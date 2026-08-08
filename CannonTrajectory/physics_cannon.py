@@ -2,9 +2,6 @@
 physics_cannon.py
 
 Physics and numerical integration routines for CannonTrajectory.
-This module follows the structure of Bernard Schutz's original
-Triana Java program, rewritten cleanly in Python under the
-Creative Commons Attribution–NonCommercial–ShareAlike License.
 
 State vector:
     x  — horizontal position

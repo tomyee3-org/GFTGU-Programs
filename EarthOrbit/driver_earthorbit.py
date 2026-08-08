@@ -2,8 +2,6 @@
 driver_earthorbit.py
 
 Driver for the EarthOrbit simulation.
-Follows the structure of Bernard Schutz's Triana Java program closely,
-including variable names and loop logic.
 """
 
 import numpy as np

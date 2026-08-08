@@ -2,8 +2,6 @@
 plot_cannon.py
 
 Plotting routine for CannonTrajectory.
-This mirrors the behavior of Triana's SGTGrapher, including equal
-horizontal and vertical scales.
 """
 
 import matplotlib.pyplot as plt
@@ -20,7 +18,7 @@ def plot_cannon(xs, hs):
     plt.xlabel("Horizontal distance (m)")
     plt.ylabel("Vertical distance (m)")
     plt.title("CannonTrajectory — Newtonian Projectile Motion")
-    plt.axis("equal")  # Equivalent to Triana's "force equal ranges"
+    plt.axis("equal")  # Sets plot axes so that "force equal ranges"
     plt.grid(True)
     plt.legend()
     plt.show()

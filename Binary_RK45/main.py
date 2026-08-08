@@ -2,6 +2,15 @@
 Main entry point for binary orbit simulation using RK45
 rather than the simple predictor–corrector scheme and
 adaptive time-step logic employed by module Binary
+
+Simulate the motion of two stars in a binary orbit around one another.
+The user can choose initial stellar masses, positions and velocities to
+represent any kind of orbit. The program can output graphs of the orbits,
+of the velocity evolution, of the positions and speeds as functions of
+time, and of the kinetic and potential energies as functions of time.
+
+Example parameters are set to values that roughly produce an elliptical
+binary orbit of two equal-mass stars.
 """
 
 from driver_binary import run_binary_orbit

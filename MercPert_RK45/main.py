@@ -1,5 +1,11 @@
 """
-MercPert main module.
+MercPert main module (RK45 version)
+
+Simulate the motion of a small planet in a solar system consisting of a star
+like the Sun and a large planet more massive than Jupiter and closer to the Sun.
+The program illustrates the way that massive planets "clean out" regions of the
+planetary system near themselves. Spectacular interactions between the small
+planet and the massive one are easy to achieve with the suggested initial data.
 
 Sets example parameters (which the user can edit) and runs the simulation
 using the RK45 adaptive integrator via scipy.integrate.solve_ivp.
@@ -17,10 +23,10 @@ def main():
     binary_separation = 0.7 * AU   # centre-to-centre distance [m]
 
     # ── Mercury initial conditions ──────────────────────────────────────────
-    x_init_merc  = 0.5 * AU        # initial x-position [m]
+    x_init_merc  = 0.3 * AU        # initial x-position [m]
     y_init_merc  = 0.0             # initial y-position [m]
     vx_init_merc = 0.0             # initial x-velocity [m/s]
-    vy_init_merc = 30000.0         # initial y-velocity [m/s]
+    vy_init_merc = 59220.0         # initial y-velocity [m/s]
 
     # ── Integration parameters ──────────────────────────────────────────────
     # t_max     : total simulation time in seconds

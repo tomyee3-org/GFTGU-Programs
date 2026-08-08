@@ -2,8 +2,6 @@
 driver_cannon.py
 
 Driver for the CannonTrajectory simulation.
-This module follows the structure of the original Triana Java code,
-including variable names (x, h, u, v, w, j) and loop logic.
 
 The loop stops when:
     - The projectile returns to the ground (h < 0)

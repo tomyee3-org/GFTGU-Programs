@@ -1,6 +1,12 @@
 """
 MercPert main module (non-RK45 version)
 
+Simulate the motion of a small planet in a solar system consisting of a star
+like the Sun and a large planet more massive than Jupiter and closer to the Sun.
+The program illustrates the way that massive planets "clean out" regions of the
+planetary system near themselves. Spectacular interactions between the small
+planet and the massive one are easy to achieve with the suggested initial data.
+
 Example entry point for running the MercPert simulation
 and plotting the orbits.
 
@@ -29,18 +35,18 @@ def main():
     # These are illustrative; users can adjust to reproduce
     # the book's figures or explore chaotic behavior.
     merc_ic = MercuryInitialConditions(
-        x_init=1.0 * AU,         # start outside the binary
+        x_init=0.3 * AU,         # start outside the binary
         y_init=0.0,
         vx_init=0.0,
-        vy_init=15000.0,         # some tangential velocity (m/s)
+        vy_init=59220.0,         # some tangential velocity (m/s)
     )
 
     # Driver parameters, echoing Schutz's style:
     run_params = MercPertRunParams(
         dt=2000.0,       # initial time-step (s), as in examples
-        max_steps=150000,
+        max_steps=400000,
         eps1=0.05,       # time-step halving threshold
-        eps2=0.01,       # predictor-corrector convergence threshold
+        eps2=0.0001,       # predictor-corrector convergence threshold
     )
 
     output = run_mercpert(binary_params, merc_ic, run_params)

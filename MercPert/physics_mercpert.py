@@ -1,9 +1,6 @@
 """
 MercPert physics module (non-RK45 version)
 
-Port of Bernard F. Schutz's MercPert Triana unit from
-'Gravity from the Ground Up', implemented in Python.
-
 Only physical constants are literal numbers here.
 """
 

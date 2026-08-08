@@ -1,9 +1,8 @@
 """
 MercPert driver module (non-RK45 version)
 
-Implements a Schutz-style explicit integrator with
-time-step halving and a simple predictor-corrector,
-following the structure of Orbit/Binary/MercPert.
+Implements an explicit integrator with
+time-step halving and a simple predictor-corrector
 """
 
 from dataclasses import dataclass
@@ -69,7 +68,11 @@ def run_mercpert(binary_params: BinarySystemParams,
     merc_y: List[float] = []
 
     for step in range(max_steps):
-        # Record current positions
+        # Record current positions. This happens exactly once per
+        # accepted step -- rejected attempts inside the retry loop below
+        # never reach this point again, so they are never logged and
+        # never consume the max_steps budget, mirroring the
+        # `dt1 /= 2; j--;` retry in the original MercPert.java.
         (x_sun, y_sun), (x_planet, y_planet) = binary_positions(t, binary_params)
 
         times.append(t)
@@ -83,54 +86,63 @@ def run_mercpert(binary_params: BinarySystemParams,
         # Compute acceleration at current state
         ax0, ay0 = mercury_acceleration(t, x_merc, y_merc, binary_params)
 
-        # Predictor step: simple Euler
-        x_pred = x_merc + vx_merc * dt1
-        y_pred = y_merc + vy_merc * dt1
-        vx_pred = vx_merc + ax0 * dt1
-        vy_pred = vy_merc + ay0 * dt1
+        while True:
+            # Predictor step: simple Euler
+            x_pred = x_merc + vx_merc * dt1
+            y_pred = y_merc + vy_merc * dt1
+            vx_pred = vx_merc + ax0 * dt1
+            vy_pred = vy_merc + ay0 * dt1
 
-        # Corrector iteration: average accelerations over the step
-        # until fractional change is below eps2
-        x_new = x_pred
-        y_new = y_pred
-        vx_new = vx_pred
-        vy_new = vy_pred
+            # Corrector iteration: average accelerations over the step
+            # until fractional change is below eps2
+            x_new = x_pred
+            y_new = y_pred
+            vx_new = vx_pred
+            vy_new = vy_pred
 
-        for _ in range(10):  # modest cap on iterations
-            ax1, ay1 = mercury_acceleration(t + dt1, x_new, y_new, binary_params)
+            for _ in range(10):  # modest cap on iterations
+                ax1, ay1 = mercury_acceleration(t + dt1, x_new, y_new, binary_params)
 
-            vx_corr = vx_merc + 0.5 * (ax0 + ax1) * dt1
-            vy_corr = vy_merc + 0.5 * (ay0 + ay1) * dt1
-            x_corr = x_merc + 0.5 * (vx_merc + vx_corr) * dt1
-            y_corr = y_merc + 0.5 * (vy_merc + vy_corr) * dt1
+                vx_corr = vx_merc + 0.5 * (ax0 + ax1) * dt1
+                vy_corr = vy_merc + 0.5 * (ay0 + ay1) * dt1
+                x_corr = x_merc + 0.5 * (vx_merc + vx_corr) * dt1
+                y_corr = y_merc + 0.5 * (vy_merc + vy_corr) * dt1
 
-            # Check fractional changes
-            dvx_frac = abs(vx_corr - vx_new) / max(abs(vx_corr), 1e-30)
-            dvy_frac = abs(vy_corr - vy_new) / max(abs(vy_corr), 1e-30)
-            dx_frac = abs(x_corr - x_new) / max(abs(x_corr), 1e-30)
-            dy_frac = abs(y_corr - y_new) / max(abs(y_corr), 1e-30)
+                # Check fractional changes
+                dvx_frac = abs(vx_corr - vx_new) / max(abs(vx_corr), 1e-30)
+                dvy_frac = abs(vy_corr - vy_new) / max(abs(vy_corr), 1e-30)
+                dx_frac = abs(x_corr - x_new) / max(abs(x_corr), 1e-30)
+                dy_frac = abs(y_corr - y_new) / max(abs(y_corr), 1e-30)
 
-            x_new, y_new = x_corr, y_corr
-            vx_new, vy_new = vx_corr, vy_corr
+                x_new, y_new = x_corr, y_corr
+                vx_new, vy_new = vx_corr, vy_corr
 
-            if max(dvx_frac, dvy_frac, dx_frac, dy_frac) < eps2:
-                break
+                if max(dvx_frac, dvy_frac, dx_frac, dy_frac) < eps2:
+                    break
 
-        # Time-step halving if changes are too large
-        dvx_frac0 = abs(vx_new - vx_merc) / max(abs(vx_new), 1e-30)
-        dvy_frac0 = abs(vy_new - vy_merc) / max(abs(vy_new), 1e-30)
-        dx_frac0 = abs(x_new - x_merc) / max(abs(x_new), 1e-30)
-        dy_frac0 = abs(y_new - y_merc) / max(abs(y_new), 1e-30)
+            # Time-step halving if changes are too large. A rejection
+            # here only shrinks dt1 and loops back to retry the SAME
+            # step; it does not touch the output lists and does not
+            # advance `step`.
+            dvx_frac0 = abs(vx_new - vx_merc) / max(abs(vx_new), 1e-30)
+            dvy_frac0 = abs(vy_new - vy_merc) / max(abs(vy_new), 1e-30)
+            dx_frac0 = abs(x_new - x_merc) / max(abs(x_new), 1e-30)
+            dy_frac0 = abs(y_new - y_merc) / max(abs(y_new), 1e-30)
 
-        if max(dvx_frac0, dvy_frac0, dx_frac0, dy_frac0) > eps1:
-            # Reduce dt1 and redo this step with smaller time-step
-            dt1 *= 0.5
-            continue
+            if max(dvx_frac0, dvy_frac0, dx_frac0, dy_frac0) > eps1:
+                dt1 *= 0.5
+                continue  # retry the SAME step with a smaller dt1
+
+            break  # step accepted; leave the retry loop
 
         # Accept step
         t += dt1
         x_merc, y_merc = x_new, y_new
         vx_merc, vy_merc = vx_new, vy_new
+
+        # Let the step size grow back towards the user's requested dt
+        # now that we know the last step was well-behaved.
+        dt1 = min(dt1 * 1.1, run_params.dt)
 
     return MercPertOutput(
         times=times,
