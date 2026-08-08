@@ -1,6 +1,5 @@
-# plot_multiple.py
 """
-Plot module for Multiple (Gravity From the Ground Up).
+Plot module for Multiple_RK45.
 Plots trajectories or current positions.
 """
 

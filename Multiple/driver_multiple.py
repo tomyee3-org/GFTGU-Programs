@@ -1,8 +1,7 @@
 """
-Multiple: driver module (Creative Commons, after B.F. Schutz)
+Driver module for Multiple
 
 Implements time-step halving and a simple predictor-corrector,
-following the spirit of Schutz's Orbit/Binary/Multiple programs.
 """
 
 from dataclasses import dataclass

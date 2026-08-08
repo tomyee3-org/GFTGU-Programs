@@ -1,10 +1,15 @@
 # main.py
 """
-Main entry point for Multiple (Gravity From the Ground Up).
+A program to simulate the motions of any number of bodies that interact with
+one another gravitationally, within Newton's theory of gravity. The user can set
+up fully three-dimensional initial conditions and masses for any number of
+objects, and the output can be a drawing of all the trajectories or a continuously
+running movie of the locations of the bodies.
+
+Main entry point for Multiple_RK45.
 User sets parameters here.
 """
 
-import numpy as np
 from driver_multiple import run_simulation
 from plot_multiple import plot_trajectories, plot_positions
 
@@ -16,21 +21,21 @@ if __name__ == "__main__":
     # (faithful to Schutz’s defaults)
     # -----------------------------
 
-    nBodies = 3
+    masses_solar = [1.0, 1.0, 1.0]  # all solar-mass bodies
 
-    masses = np.array([
-        1.0 * 1.989e30,   # Sun
-        1.0 * 1.989e30,   # Sun-like
-        1.0 * 1.989e30    # Sun-like
-    ])
+    # Positions (x, y, z) in meters
+    positions_init = [
+        [4.6e10, 0.0, 0.0],
+        [-4.6e10, 0.0, 0.0],
+        [0.0, 4.6e10, 0.0],
+    ]
 
-    xInit = np.array([4.6e10, -4.6e10, 0.0])
-    yInit = np.array([0.0, 0.0, 4.6e10])
-    zInit = np.array([0.0, 0.0, 0.0])
-
-    vInit = np.array([0.0, 0.0, -30000.0])
-    uInit = np.array([30000.0, -30000.0, 0.0])
-    wInit = np.array([0.0, 0.0, 0.0])
+    # Velocities (vx, vy, vz) in m/s
+    velocities_init = [
+        [0.0, 0.0, -30000.0],
+        [0.0, -30000.0, 0.0],
+        [-30000.0, 0.0, 0.0],
+    ]
 
     # Simulation parameters
     t_max = 3.0e7        # total time (seconds)
@@ -38,8 +43,7 @@ if __name__ == "__main__":
 
     # Run simulation
     times, trajectories = run_simulation(
-        masses, xInit, yInit, zInit,
-        vInit, uInit, wInit,
+        masses_solar, positions_init, velocities_init,
         t_max, dt_output
     )
 

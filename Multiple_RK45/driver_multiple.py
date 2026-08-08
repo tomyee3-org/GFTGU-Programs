@@ -2,27 +2,26 @@
 """
 Driver module for Multiple (Gravity From the Ground Up).
 Uses RK45 (solve_ivp) to integrate the N-body system.
-
-Follows Schutz’s Java structure closely, but replaces
-predictor–corrector + time-step halving with solve_ivp.
 """
 
 import numpy as np
 from scipy.integrate import solve_ivp
-from physics_multiple import accelerations
+from physics_multiple import accelerations, M_SUN
 
 
-def run_simulation(masses, xInit, yInit, zInit,
-                   vInit, uInit, wInit,
+def run_simulation(masses_solar, positions_init, velocities_init,
                    t_max, dt_output):
     """
     Integrate the N-body system using RK45.
 
     Parameters
     ----------
-    masses : array of masses (kg)
-    xInit, yInit, zInit : initial positions
-    vInit, uInit, wInit : initial velocities
+    masses_solar : sequence of length N
+        Mass of each body, in solar masses.
+    positions_init : sequence of N [x, y, z] triples
+        Initial position of each body (m).
+    velocities_init : sequence of N [vx, vy, vz] triples
+        Initial velocity of each body (m/s).
     t_max : total simulation time (seconds)
     dt_output : time spacing between output samples
 
@@ -33,24 +32,26 @@ def run_simulation(masses, xInit, yInit, zInit,
         each array has shape (len(times), 3)
     """
 
-    n = len(masses)
+    masses_solar = np.asarray(masses_solar, dtype=float)
+    positions_init = np.asarray(positions_init, dtype=float)   # (n, 3)
+    velocities_init = np.asarray(velocities_init, dtype=float)  # (n, 3)
 
-    # Build initial state vector
+    n = len(masses_solar)
+    masses_kg = masses_solar * M_SUN
+
+    # Build initial state vector: each body contributes
+    # [x, y, z, vx, vy, vz], read straight off its own row.
     state0 = np.zeros(6 * n)
     for i in range(n):
-        state0[6*i + 0] = xInit[i]
-        state0[6*i + 1] = yInit[i]
-        state0[6*i + 2] = zInit[i]
-        state0[6*i + 3] = vInit[i]
-        state0[6*i + 4] = uInit[i]
-        state0[6*i + 5] = wInit[i]
+        state0[6*i:6*i + 3] = positions_init[i]
+        state0[6*i + 3:6*i + 6] = velocities_init[i]
 
     # Output times
     times = np.arange(0, t_max, dt_output)
 
     # Integrate
     sol = solve_ivp(
-        fun=lambda t, y: accelerations(t, y, masses),
+        fun=lambda t, y: accelerations(t, y, masses_kg),
         t_span=(0, t_max),
         y0=state0,
         t_eval=times,

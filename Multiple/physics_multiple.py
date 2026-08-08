@@ -1,6 +1,4 @@
 """
-Multiple: physics module (Creative Commons, after B.F. Schutz)
-
 Encodes Newtonian gravity for an arbitrary number of bodies.
 Only physical constants appear as literals.
 """
@@ -35,10 +33,18 @@ def compute_accelerations(positions: np.ndarray, masses_solar: np.ndarray) -> np
                 continue
             r3 = r ** 3
 
+            # r_vec points from a to b (opposite of Schutz's xAB = xA - xB
+            # convention). Gravity pulls a TOWARD b, i.e. along +r_vec, and
+            # pulls b TOWARD a, i.e. along -r_vec -- so both coefficients
+            # here are positive; the "-=" below is what supplies b's
+            # opposite direction, matching Schutz's
+            #   a_A = -kGravity*m[B]*xAB/rAB3,  a_B = +kGravity*m[A]*xAB/rAB3
+            # once re-expressed in terms of r_vec = -xAB.
+
             # Acceleration on a due to b
-            factor_ab = -K_GRAVITY * masses_solar[b] / r3
+            factor_ab = K_GRAVITY * masses_solar[b] / r3
             # Acceleration on b due to a
-            factor_ba = -K_GRAVITY * masses_solar[a] / r3
+            factor_ba = K_GRAVITY * masses_solar[a] / r3
 
             acc[a] += factor_ab * r_vec
             acc[b] -= factor_ba * r_vec  # opposite direction

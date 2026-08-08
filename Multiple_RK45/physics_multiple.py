@@ -1,7 +1,6 @@
-# physics_multiple.py
 """
-Physics module for Multiple (Gravity From the Ground Up).
-Encodes ONLY the gravitational physics, following Schutz’s Java structure.
+Physics module for Multiple_RK45
+Encodes the gravitational physics
 
 All literal numbers here represent physical constants only.
 """
@@ -10,6 +9,9 @@ import numpy as np
 
 # Newton's gravitational constant (SI units)
 G = 6.6726e-11
+
+# Mass of the Sun (kg), for converting masses given in solar masses
+M_SUN = 1.989e30
 
 
 def accelerations(t, state, masses):
