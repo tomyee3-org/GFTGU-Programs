@@ -1,7 +1,8 @@
-# plot_binary.py
 """
-Plot module for Schutz-style binary orbits.
-Creative Commons BY-NC-SA 1.0 — faithful to Schutz's original Java output style.
+Binary_RK45 orbit plotting module.
+
+This module takes the structured output from driver_binary
+and produces graphs.
 """
 
 import matplotlib.pyplot as plt
@@ -10,13 +11,13 @@ def plot_orbits(data):
     xA, yA = data["xA"], data["yA"]
     xB, yB = data["xB"], data["yB"]
 
-    plt.figure(figsize=(8, 8))
-    plt.plot(xA, yA, label="Body A")
-    plt.plot(xB, yB, label="Body B")
-    plt.xlabel("x (m)")
-    plt.ylabel("y (m)")
-    plt.title("Binary Orbits (RK45)")
-    plt.legend()
-    plt.axis("equal")
-    plt.grid(True)
+    fig, ax = plt.subplots(figsize=(8, 8))
+    ax.plot(xA, yA, label="Body A")
+    ax.plot(xB, yB, label="Body B")
+    ax.set_xlabel("x (m)")
+    ax.set_ylabel("y (m)")
+    ax.set_title("Binary Orbits (RK45)")
+    ax.legend()
+    ax.set_aspect("equal", "box")
+    ax.grid(True)
     plt.show()

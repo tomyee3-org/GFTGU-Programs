@@ -1,12 +1,16 @@
 """
 Main entry point for Binary orbit simulation.
 
-Example parameters are set to values that roughly
-produce an elliptical binary orbit of two equal-mass
-stars. Users can overwrite these values as desired.
+Simulate the motion of two stars in a binary orbit around one another.
+The user can choose initial stellar masses, positions and velocities to
+represent any kind of orbit. The program can output graphs of the orbits,
+of the velocity evolution, of the positions and speeds as functions of
+time, and of the kinetic and potential energies as functions of time.
 
-Based on Bernard F. Schutz, Gravity from the Ground Up,
-Binary.java (CC license).
+Example parameters are set to values that roughly produce an elliptical
+binary orbit of two equal-mass stars.
+
+Users can overwrite these values as desired.
 """
 
 from driver_binary import integrate_binary
@@ -20,22 +24,22 @@ def main():
     MB = 2.0e30  # kg
 
     # Positions (meters)
-    xInitA = -1.0e11
+    xInitA = 4.6e10
     yInitA = 0.0
-    xInitB = 1.0e11
+    xInitB = -4.6e10
     yInitB = 0.0
 
     # Velocities (m/s) chosen to give a bound, non-circular orbit
     vInitA = 0.0
-    uInitA = 1.5e4
+    uInitA = 13000.0
     vInitB = 0.0
-    uInitB = -1.5e4
+    uInitB = -13000.0
 
     # Time-step and accuracy parameters
-    dt = 1.0e4          # base time-step (s)
-    max_steps = 5000    # maximum number of steps
-    eps1 = 1.0e-2       # time-step accuracy threshold
-    eps2 = 1.0e-3       # predictor–corrector accuracy threshold
+    dt = 2000          # base time-step (s)
+    max_steps = 10000    # maximum number of steps
+    eps1 = 0.05       # time-step accuracy threshold
+    eps2 = 1.0e-4       # predictor–corrector accuracy threshold
 
     # Choose output type (can be changed by user)
     output_type: OutputType = "orbits"

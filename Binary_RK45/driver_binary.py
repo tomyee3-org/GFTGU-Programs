@@ -1,7 +1,5 @@
-# driver_binary.py
 """
-Driver module for RK45 integration of Schutz-style binary orbits.
-Creative Commons BY-NC-SA 1.0 — faithful to Schutz's original Java physics.
+Driver module for RK45 integration of binary orbits.
 """
 
 import numpy as np

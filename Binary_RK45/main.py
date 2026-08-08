@@ -1,7 +1,7 @@
-# main.py
 """
-Main entry point for Schutz-style binary orbit simulation using RK45.
-Creative Commons BY-NC-SA 1.0 — faithful to Schutz's original Java structure.
+Main entry point for binary orbit simulation using RK45
+rather than the simple predictor–corrector scheme and
+adaptive time-step logic employed by module Binary
 """
 
 from driver_binary import run_binary_orbit
@@ -13,16 +13,16 @@ def main():
     MB = 2.0e30      # kg
 
     # Initial positions (meters)
-    xInitA = -5e10
+    xInitA = 4.6e10
     yInitA = 0.0
-    xInitB =  5e10
+    xInitB =  -4.6e10
     yInitB = 0.0
 
     # Initial velocities (m/s)
     vInitA = 0.0
-    uInitA = 1.0e4
+    uInitA = 13000.0
     vInitB = 0.0
-    uInitB = -1.0e4
+    uInitB = -13000.0
 
     # Integration parameters
     t_max = 1e9      # seconds

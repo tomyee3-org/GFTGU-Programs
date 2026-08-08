@@ -1,9 +1,6 @@
 """
 Binary orbit physics module.
 
-Translated and adapted from Bernard F. Schutz,
-Gravity from the Ground Up, Binary.java (CC license).
-
 This module encodes the Newtonian two-body gravitational
 equations of motion and associated energies.
 

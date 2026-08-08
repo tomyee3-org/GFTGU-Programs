@@ -1,8 +1,10 @@
-# physics_binary.py
 """
-Physics module for Schutz-style Newtonian binary orbits.
-Implements only the gravitational acceleration law.
-Creative Commons BY-NC-SA 1.0 — faithful to Schutz's original Java.
+Binary_RK45 orbit physics module.
+
+This module encodes the Newtonian two-body gravitational
+equations of motion and associated energies.
+
+Only physical constants appear as literals here.
 """
 
 import numpy as np

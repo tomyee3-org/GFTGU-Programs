@@ -2,8 +2,7 @@
 Binary orbit plotting module.
 
 This module takes the structured output from driver_binary
-and produces graphs analogous to the SGTGrapher outputs
-described in Binary.html.
+and produces graphs.
 """
 
 from typing import Literal
@@ -37,7 +36,10 @@ def plot_binary(result: BinaryResult, output_type: OutputType) -> None:
         ax.set_ylabel("y (m)")
         ax.set_title("Binary orbits")
         ax.set_aspect("equal", "box")
-        ax.legend()
+        # A fixed location sidesteps the loc="best" placement search,
+        # which is what was landing in the center on the first draw
+        # (see comment below plt.tight_layout()).
+        ax.legend(loc="upper right")
 
     elif output_type == "velocity space":
         fig, ax = plt.subplots()
@@ -97,5 +99,15 @@ def plot_binary(result: BinaryResult, output_type: OutputType) -> None:
     else:
         raise ValueError(f"Unknown output_type: {output_type}")
 
+    # NOTE: for the "orbits" plot specifically, ax.set_aspect("equal", "box")
+    # changes the axes' box size at render time. On interactive backends
+    # that change isn't finalized until after a legend placed with the
+    # default loc="best" has already searched for open space, so the
+    # legend can land in the middle of the window until a resize forces
+    # a fresh layout pass. Forcing an extra draw here did not reliably
+    # fix this across backends, so the "orbits" branch above uses a
+    # fixed loc="upper right" instead, which is computed directly from
+    # the axes' bounding box rather than via a data-overlap search, and
+    # so isn't sensitive to this timing issue.
     plt.tight_layout()
     plt.show()

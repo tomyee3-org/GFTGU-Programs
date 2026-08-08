@@ -1,8 +1,5 @@
 """
 Atmosphere physics module
-
-Ported from Bernard F. Schutz, Gravity from the Ground Up
-Original Java program: Atmosphere (Triana unit)
 """
 
 from dataclasses import dataclass

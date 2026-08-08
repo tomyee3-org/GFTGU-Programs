@@ -1,15 +1,12 @@
 """
 Atmosphere driver module
 
-Numerical implementation of Schutz's Atmosphere program:
-finite steps in altitude, hydrostatic equilibrium, ideal gas law,
-and temperature interpolation.
-
-Ported from Bernard F. Schutz, Gravity from the Ground Up (Atmosphere).
+Driver performs numerical interpolation using finite steps
+in altitude, hydrostatic equilibrium, ideal gas law, and temperature.
 """
 
 from dataclasses import dataclass
-from typing import List, Dict, Literal
+from typing import List, Literal
 
 from physics_atmosphere import TemperatureProfile, ideal_gas_density, hydrostatic_step
 
@@ -36,6 +33,21 @@ class AtmosphereResult:
     temperatures: List[float]
     output_type: OutputType
     planet_name: str
+
+
+@dataclass
+class CurveData:
+    """
+    Structured, uniformly-typed replacement for the old
+    Dict[str, List[float]] curve output: x/y are the plotted series,
+    the rest are display strings for the plot.
+    """
+    x: List[float]
+    y: List[float]
+    y_unit: str
+    x_label: str
+    y_label: str
+    title: str
 
 
 class AtmosphereModel:
@@ -119,7 +131,7 @@ class AtmosphereModel:
         )
 
 
-def extract_output(result: AtmosphereResult) -> Dict[str, List[float]]:
+def extract_output(result: AtmosphereResult) -> CurveData:
     """
     Mimic the Java Curve output: x-values are altitude, y-values depend on outputType.
     """
@@ -133,11 +145,11 @@ def extract_output(result: AtmosphereResult) -> Dict[str, List[float]]:
         y = result.temperatures
         unit = "K"
 
-    return {
-        "x": result.altitudes,
-        "y": y,
-        "y_unit": unit,
-        "x_label": "altitude (m)",
-        "y_label": f"{result.output_type} ({unit})",
-        "title": f"{result.planet_name} atmosphere: {result.output_type}",
-    }
+    return CurveData(
+        x=result.altitudes,
+        y=y,
+        y_unit=unit,
+        x_label="altitude (m)",
+        y_label=f"{result.output_type} ({unit})",
+        title=f"{result.planet_name} atmosphere: {result.output_type}",
+    )
