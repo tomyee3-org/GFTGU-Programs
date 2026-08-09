@@ -1,25 +1,25 @@
 """
-main.py — Entry point for the Python port of the Star program.
+Compute the structure of a star.
 
 This module sets example input parameters for a polytropic stellar
 model (e.g. a solar-like star) and calls the driver and plot modules.
 Users may overwrite these values to explore different stars.
 """
 
-from driver_star import integrate_star
+from driver_star import integrate_star, OutputType
 from plot_star import plot_star_structure
 
 
 def main():
     # Example parameters for a solar-like star.
     # Users are encouraged to modify these.
-    p_c = 2.5e16        # central pressure [Pa] (example value)
-    T_c = 1.5e7         # central temperature [K] (example value)
-    mu = 0.61           # mean molecular weight (solar composition)
-    gamma = 5.0 / 3.0   # polytropic exponent (ideal monatomic gas)
+    p_c = 7.158e15       # central pressure [Pa] (example value)
+    T_c = 2.263e7        # central temperature [K] (example value)
+    mu = 1.285           # mean molecular weight (solar composition)
+    gamma = 1.36         # polytropic exponent
 
     # Choose what to plot: "pressure", "density", "temperature", or "mass"
-    output_type = "pressure"
+    output_type: OutputType = "pressure"
 
     result = integrate_star(
         p_c=p_c,

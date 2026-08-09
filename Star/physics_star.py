@@ -1,5 +1,5 @@
 """
-physics_star.py — Physical laws for the Star program (polytropic stellar structure)
+Physical laws for the Star program (polytropic stellar structure)
 
 This module encodes the physical relations used to model a spherically
 symmetric star with a polytropic equation of state. The only literal

@@ -1,14 +1,14 @@
 """
 driver_star.py — Numerical integration of stellar structure for the Star program.
 
-This module follows the logic of Bernard Schutz's original Java program:
-it steps outward from the center of the star, enforcing hydrostatic
+This module steps outward from the center of the star, enforcing hydrostatic
 equilibrium and a polytropic equation of state, adjusting the radial
 step size so that the surface (where p ~ 0) is reached within a fixed
 maximum number of steps.
 """
 
-from typing import Dict, List
+from dataclasses import dataclass
+from typing import List, Literal
 from math import pi
 
 from physics_star import (
@@ -21,6 +21,25 @@ from physics_star import (
     temperature_from_prho,
 )
 
+OutputType = Literal["pressure", "density", "temperature", "mass"]
+
+
+@dataclass
+class StarResult:
+    """
+    Structured, uniformly-typed replacement for the old
+    Dict[str, List[float]] result: radius/pressure/density/temperature/
+    mass are the plotted profiles, last_index and output_type are not
+    themselves List[float] and don't belong in that same mapping.
+    """
+    radius: List[float]
+    pressure: List[float]
+    density: List[float]
+    temperature: List[float]
+    mass: List[float]
+    last_index: int
+    output_type: OutputType
+
 
 def integrate_star(
     p_c: float,
@@ -28,8 +47,8 @@ def integrate_star(
     mu: float,
     gamma: float,
     max_points: int = 2000,
-    output_type: str = "pressure",
-) -> Dict[str, List[float]]:
+    output_type: OutputType = "pressure",
+) -> StarResult:
     """
     Integrate the stellar structure outward from the center.
 
@@ -45,19 +64,15 @@ def integrate_star(
         Polytropic exponent in the equation of state.
     max_points : int
         Maximum number of radial grid points.
-    output_type : str
-        One of "pressure", "density", "temperature", "mass".
+    output_type : "pressure", "density", "temperature", or "mass"
+        Which profile the plot module should display.
 
     Returns
     -------
-    result : dict
-        Dictionary containing arrays:
-        - "radius": radial coordinate [m]
-        - "pressure": pressure profile [Pa]
-        - "density": density profile [kg/m^3]
-        - "temperature": temperature profile [K]
-        - "mass": enclosed mass profile [kg]
-        - "last_index": index of the surface (where p crosses zero)
+    result : StarResult
+        radius, pressure, density, temperature, mass: profile arrays.
+        last_index: index of the surface (where p crosses zero).
+        output_type: echoed back for the plot module.
     """
     # Central quantities
     rho_c = central_density(p_c, T_c, mu)
@@ -124,12 +139,12 @@ def integrate_star(
     temperature = temperature[:last_step]
     mass = mass[:last_step]
 
-    return {
-        "radius": radius,
-        "pressure": pressure,
-        "density": density,
-        "temperature": temperature,
-        "mass": mass,
-        "last_index": last_step,
-        "output_type": output_type,
-    }
+    return StarResult(
+        radius=radius,
+        pressure=pressure,
+        density=density,
+        temperature=temperature,
+        mass=mass,
+        last_index=last_step,
+        output_type=output_type,
+    )
