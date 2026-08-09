@@ -4,7 +4,8 @@ random2_plot.py
 Plotting routines for Random2.
 """
 
-from typing import List
+from dataclasses import dataclass
+from typing import List, Tuple
 
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
@@ -42,6 +43,23 @@ def plot_scaled_distance(lengths: List[float], avg_dist: List[float]) -> None:
     ax.grid(True, which="both", ls="--", alpha=0.5)
 
     plt.show()
+
+
+@dataclass
+class _AnchorSpec:
+    """Uniformly-typed replacement for the old dict-of-mixed-types
+    anchor spec: xy is a coordinate pair, ha/va are alignment strings."""
+    xy: Tuple[float, float]
+    ha: str
+    va: str
+
+
+_CORNER_TO_ANCHOR = {
+    "upper right": _AnchorSpec(xy=(0.97, 0.97), ha="right", va="top"),
+    "upper left": _AnchorSpec(xy=(0.03, 0.97), ha="left", va="top"),
+    "lower right": _AnchorSpec(xy=(0.97, 0.03), ha="right", va="bottom"),
+    "lower left": _AnchorSpec(xy=(0.03, 0.03), ha="left", va="bottom"),
+}
 
 
 def plot_walk2d(result: Walk2DResult, corner: str = "upper right") -> None:
@@ -82,13 +100,7 @@ def plot_walk2d(result: Walk2DResult, corner: str = "upper right") -> None:
     ax.set_xlim(-span, span)
     ax.set_ylim(-span, span)
 
-    anchors = {
-        "upper right": dict(xy=(0.97, 0.97), ha="right", va="top"),
-        "upper left": dict(xy=(0.03, 0.97), ha="left", va="top"),
-        "lower right": dict(xy=(0.97, 0.03), ha="right", va="bottom"),
-        "lower left": dict(xy=(0.03, 0.03), ha="left", va="bottom"),
-    }
-    anchor = anchors[corner]
+    anchor = _CORNER_TO_ANCHOR[corner]
     text = (
         f"radius = {result.radius:.2f}\n"
         f"reference steps = {result.max_steps}\n"
@@ -96,8 +108,8 @@ def plot_walk2d(result: Walk2DResult, corner: str = "upper right") -> None:
     )
     ax.annotate(
         text,
-        xy=anchor["xy"], xycoords="axes fraction",
-        ha=anchor["ha"], va=anchor["va"],
+        xy=anchor.xy, xycoords="axes fraction",
+        ha=anchor.ha, va=anchor.va,
         fontsize=9, family="monospace",
         bbox=dict(boxstyle="round", facecolor="white", edgecolor="gray", alpha=0.9),
     )

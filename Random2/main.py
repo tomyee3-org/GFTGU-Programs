@@ -36,7 +36,7 @@ def main():
 
     else:  # "walk2d"
         reference_steps = 2000  # the "N" the default radius is sized around
-        n_walks = 6              # number of simultaneous walks to draw
+        n_walks = 4              # number of simultaneous walks to draw
         mean_free_path = 1.0     # used only for the default radius
         radius_factor = 2.0      # default radius = radius_factor * sqrt(reference_steps * mean_free_path)
         radius = None            # or set an explicit radius to override the default
