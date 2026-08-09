@@ -11,7 +11,6 @@ Contains the numerical driver that:
     - computes the area under the curve
 """
 
-import math
 from planck_physics import planck_small_x, planck_large_x, planck_exact
 
 
