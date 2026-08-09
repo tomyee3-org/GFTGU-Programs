@@ -11,14 +11,14 @@ def plot_cannon(xs, hs):
     """
     Plot the trajectory of the projectile.
     """
-    plt.figure(figsize=(8, 6))
-    plt.plot(xs, hs, label="Projectile trajectory")
-    plt.scatter([0], [0], color="orange", label="Launch point")
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.plot(xs, hs, label="Projectile trajectory")
+    ax.scatter([0], [0], color="orange", label="Launch point")
 
-    plt.xlabel("Horizontal distance (m)")
-    plt.ylabel("Vertical distance (m)")
-    plt.title("CannonTrajectory — Newtonian Projectile Motion")
-    plt.axis("equal")  # Sets plot axes so that "force equal ranges"
-    plt.grid(True)
-    plt.legend()
+    ax.set_xlabel("Horizontal distance (m)")
+    ax.set_ylabel("Vertical distance (m)")
+    ax.set_title("CannonTrajectory — Newtonian Projectile Motion")
+    ax.set_aspect("equal", "box")  # Sets plot axes so that "force equal ranges"
+    ax.grid(True)
+    ax.legend()
     plt.show()
