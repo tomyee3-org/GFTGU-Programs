@@ -1,10 +1,4 @@
 """
-random_physics.py
-
-A faithful Python port of Bernard Schutz's Random.java program
-from *Gravity From the Ground Up*, released under
-Creative Commons BY‑NC‑SA 1.0.
-
 This module contains only the physics of the random walk:
 generating random steps, accumulating displacement, and
 computing scaled walk length. No plotting or I/O occurs here.

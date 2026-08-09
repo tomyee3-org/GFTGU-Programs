@@ -1,8 +1,6 @@
 """
-random_plot.py
-
 Plotting routines for the Random Walk program.
-Uses matplotlib to reproduce the log-log plot recommended by Schutz.
+Uses matplotlib to produce the log-log plot
 """
 
 import matplotlib.pyplot as plt

@@ -1,8 +1,5 @@
 """
-random_driver.py
-
-Driver logic for the Random Walk program from
-Gravity From the Ground Up (Schutz, CC BY‑NC‑SA 1.0).
+Driver logic for the Random Walk program
 
 This module performs the sequence of experiments:
 starting with maxSteps, halving the number of steps each time,
@@ -16,7 +13,7 @@ def run_random_walk_experiments(max_steps, n_trials):
     """
     Runs the full suite of random-walk experiments.
 
-    The Java logic:
+    The logic:
         nWalks = floor(log2(maxSteps))
         nSteps starts at maxSteps
         For j = nWalks-1 down to 0:
