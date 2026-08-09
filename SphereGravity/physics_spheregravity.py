@@ -1,9 +1,4 @@
 """
-physics_spheregravity.py
-
-Physics routines for SphereGravity, rewritten from Bernard Schutz's
-Triana Java program under the Creative Commons BY-NC-SA 1.0 license.
-
 The program computes the gravitational acceleration produced by a thin
 spherical shell of radius 1 and thickness epsilon, by dividing the shell
 into nDiv × nDiv tiles and treating each tile as a point mass.
@@ -12,16 +7,16 @@ The gravitational acceleration is computed at 1000 radii from r = 0
 to r = 100, skipping r = 1 (the shell radius).
 """
 
+from typing import Literal
+
 import numpy as np
+
+OutputType = Literal["acceleration", "relative difference"]
 
 
 def compute_shell_mass(nDiv, epsilon=0.001):
     """
     Compute total mass of the spherical shell by summing tile masses.
-
-    Equivalent to Schutz's Java code:
-        dm = dTheta * dPhi * cos(theta) * epsilon
-        mass += dm * nDiv
     """
     degToRad = np.pi / 180.0
     dPhi = 360.0 * degToRad / nDiv
@@ -38,7 +33,7 @@ def compute_shell_mass(nDiv, epsilon=0.001):
     return mass
 
 
-def compute_acceleration_profile(nDiv, outputType="acceleration", epsilon=0.001):
+def compute_acceleration_profile(nDiv, outputType: OutputType = "acceleration", epsilon=0.001):
     """
     Compute gravitational acceleration at 1000 radii.
 
@@ -88,16 +83,22 @@ def compute_acceleration_profile(nDiv, outputType="acceleration", epsilon=0.001)
 
     # Relative difference mode
     if outputType == "relative difference":
-        # Newtonian prediction outside shell: g = mass / r^2
-        newton_outside = mass / (radius[11]**2)
-
+        # Matches Sphere_Gravity.java exactly: indices 0..10 inclusive
+        # (r = 0.0 through r = 1.0, i.e. inside the shell AND the shell
+        # itself) are normalized by dividing by `mass` -- which equals
+        # the Newtonian acceleration just outside the shell, since
+        # Newton's g = mass/r^2 evaluates to exactly `mass` at r = 1.
+        # Indices 11+ (strictly outside) use the standard relative-
+        # difference formula against the Newtonian prediction at that
+        # radius. Using j (not a floating-point r < 1.0 comparison)
+        # avoids any ambiguity from r = j*0.1 not landing on exactly
+        # 1.0 in floating point at j = 10.
         for j in range(1000):
-            r = radius[j]
-            if r < 1.0:
-                # Inside shell: Newtonian acceleration = 0
-                acceleration[j] = acceleration[j] / newton_outside
+            if j <= 10:
+                acceleration[j] = acceleration[j] / mass
             else:
-                newton = mass / (r*r)
+                r = radius[j]
+                newton = mass / (r * r)
                 acceleration[j] = (acceleration[j] - newton) / newton
 
     return radius, acceleration

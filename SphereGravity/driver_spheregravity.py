@@ -6,10 +6,10 @@ Provides a clean interface for running the spherical-shell gravity
 calculation.
 """
 
-from physics_spheregravity import compute_acceleration_profile
+from physics_spheregravity import compute_acceleration_profile, OutputType
 
 
-def run_spheregravity(nDiv=100, outputType="acceleration"):
+def run_spheregravity(nDiv=100, outputType: OutputType = "acceleration"):
     """
     Run the SphereGravity simulation.
 
