@@ -1,15 +1,8 @@
 """
-RelativisticOrbit driver module (Gravity From the Ground Up)
-Original predictor–corrector style after Bernard F. Schutz, 2003.
+RelativisticOrbit driver module
 
 This module performs the time integration of the relativistic orbit,
-using a variable time-step predictor–corrector scheme and orbit counting.
-
-Bug fixes applied (2026-07-01):
-  1. Replaced component-wise eps1 test (which collapsed dt when ay0 ≈ 0
-     at orbit start) with a vector-norm test on the full acceleration change.
-  2. Corrected velocity update to use the averaged acceleration
-     0.5*(ax0+ax1)*dt1 rather than only the predictor acceleration ax0*dt1.
+using a variable time-step predictor-corrector scheme and orbit counting.
 """
 
 import math
@@ -126,12 +119,28 @@ def integrate_relativistic_orbit(params: RelativisticOrbitParams) -> Relativisti
         # acceleration at predicted position
         ax1, ay1 = schwarzschild_acceleration(x1, y1, K, Q)
 
+        # --- Time-step accuracy control (eps1) ---
+        # Matches RelativisticOrbit.java exactly: checked against the
+        # cheap predictor's acceleration, BEFORE spending effort on the
+        # corrector iterations below, using the sum-of-absolute-values
+        # test (not a Euclidean-norm ratio, and not a component-wise
+        # test divided by a single component -- the real algorithm sums
+        # |ax0|+|ay0| together, so it is never at risk of a lone-axis
+        # division by zero in the first place).
+        accel_change = abs(ax1 - ax0) + abs(ay1 - ay0)
+        accel_ref = abs(ax0) + abs(ay0)
+        if accel_ref > 0.0 and accel_change > params.eps1 * accel_ref:
+            dt1 *= 0.5
+            # recompute with smaller step on next iteration
+            continue
+
         # --- Predictor–corrector iteration ---
         # We iteratively refine ddx1, ddy1 using averaged acceleration.
         ddx1 = ddx0
         ddy1 = ddy0
 
         # Simple iteration: average old and new acceleration until change small
+        test_prediction = abs(ddx0) + abs(ddy0)
         for _ in range(10):  # cap iterations
             dv1 = ax1 * dt1
             du1 = ay1 * dt1
@@ -139,12 +148,10 @@ def integrate_relativistic_orbit(params: RelativisticOrbitParams) -> Relativisti
             new_ddx1 = 0.5 * (dv + dv1) * dt1 / 2.0
             new_ddy1 = 0.5 * (du + du1) * dt1 / 2.0
 
-            # relative change test
-            test_prediction = 0.0
-            if abs(ddx1) > 0.0:
-                test_prediction = max(test_prediction, abs(new_ddx1 - ddx1) / abs(ddx1))
-            if abs(ddy1) > 0.0:
-                test_prediction = max(test_prediction, abs(new_ddy1 - ddy1) / abs(ddy1))
+            # relative change test (Java: sum of absolute changes vs
+            # eps2 * testPrediction, where testPrediction was fixed
+            # once, before the loop, as abs(ddx0)+abs(ddy0))
+            change = abs(new_ddx1 - ddx1) + abs(new_ddy1 - ddy1)
 
             ddx1 = new_ddx1
             ddy1 = new_ddy1
@@ -154,27 +161,13 @@ def integrate_relativistic_orbit(params: RelativisticOrbitParams) -> Relativisti
             y1 = y0 + dy + ddy1
             ax1, ay1 = schwarzschild_acceleration(x1, y1, K, Q)
 
-            if test_prediction < params.eps2:
+            if change < params.eps2 * test_prediction:
                 break
 
-        # --- Time-step accuracy control (eps1) ---
-        # FIX 1: Use vector-norm test instead of component-wise test.
-        # The original component-wise test divided by |ay0|, which is exactly
-        # zero at orbit start (particle on x-axis), causing dt to collapse
-        # immediately to ~0.49 s and never recover.
-        a0_norm = math.hypot(ax0, ay0)
-        da_norm = math.hypot(ax1 - ax0, ay1 - ay0)
-        accel_change = da_norm / a0_norm if a0_norm > 0.0 else 0.0
-
-        if accel_change > params.eps1:
-            dt1 *= 0.5
-            # recompute with smaller step on next iteration
-            continue
-
-        # Accept step: update velocities and positions.
-        # FIX 2: Use averaged acceleration for velocity update.
-        # The original code used only the predictor acceleration (ax0*dt1),
-        # which is inconsistent with the corrector's refined position.
+        # Accept step: update velocities and positions, using the
+        # averaged acceleration for the velocity update (matches
+        # Java's dv/du, which are computed from (ax0+ax1)/2*dt1 inside
+        # the corrector loop and then applied as v+=dv; u+=du;).
         v += 0.5 * (ax0 + ax1) * dt1
         u += 0.5 * (ay0 + ay1) * dt1
         x0 = x1

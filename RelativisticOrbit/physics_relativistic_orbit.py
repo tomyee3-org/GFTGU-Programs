@@ -1,7 +1,4 @@
 """
-RelativisticOrbit physics module (Gravity From the Ground Up)
-Original logic after Bernard F. Schutz, 2003 (Creative Commons).
-
 This module encodes the Schwarzschild test-particle acceleration
 used in RelativisticOrbit, with only physical constants as literals.
 """
