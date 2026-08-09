@@ -1,8 +1,5 @@
-# driver_neutron.py
 """
 Driver module for Neutron star structure.
-Faithful port of Bernard Schutz's Neutron.java (GFTGU),
-Creative Commons BY-NC-SA 1.0.
 
 Implements:
 - initial special step at r = dr
@@ -11,7 +8,7 @@ Implements:
 """
 
 import math
-from physics_neutron import eos_density, tov_pressure_step, mass_step, G, c2
+from physics_neutron import eos_density, tov_pressure_step, mass_step, G
 
 def compute_neutron_star(gamma, pC, K):
     """

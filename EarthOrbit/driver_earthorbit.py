@@ -5,11 +5,12 @@ Driver for the EarthOrbit simulation.
 """
 
 import numpy as np
-from physics_earthorbit import compute_acceleration, R_EARTH   # fix 1
+from physics_earthorbit import compute_acceleration, R_EARTH, ForceLaw   # fix 1
 
 
 def run_earth_orbit(h0=300.0, uInit=0.0, vInit=7900.0,
-                    dt=0.4, maxSteps=15000):
+                    dt=0.4, maxSteps=15000,
+                    force_law: ForceLaw = "simplified"):
     # Initial position: on the y-axis at R_EARTH + h0
     x = 0.0
     y = R_EARTH + h0          # fix 2
@@ -26,7 +27,7 @@ def run_earth_orbit(h0=300.0, uInit=0.0, vInit=7900.0,
 
     j = 1
     while r >= R_EARTH and j < maxSteps:    # fix 3
-        ax, ay = compute_acceleration(x, y)
+        ax, ay = compute_acceleration(x, y, force_law)
 
         u1 = u0 + ax * dt
         v1 = v0 + ay * dt

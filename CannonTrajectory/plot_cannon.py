@@ -1,6 +1,4 @@
 """
-plot_cannon.py
-
 Plotting routine for CannonTrajectory.
 """
 

@@ -20,11 +20,11 @@ def plot_neutron(data, output_type):
     else:
         raise ValueError("Unknown output_type")
 
-    plt.figure(figsize=(8,6))
-    plt.plot(r, y, lw=2)
-    plt.xlabel("Radius (m)")
-    plt.ylabel(ylabel)
-    plt.title(f"Neutron Star: {output_type}")
-    plt.grid(True)
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.plot(r, y, lw=2)
+    ax.set_xlabel("Radius (m)")
+    ax.set_ylabel(ylabel)
+    ax.set_title(f"Neutron Star: {output_type}")
+    ax.grid(True)
     plt.tight_layout()
     plt.show()

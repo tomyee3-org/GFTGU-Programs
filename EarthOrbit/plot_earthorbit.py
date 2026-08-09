@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 def plot_earth_orbit(xs, ys, xEarth, yEarth):
     """
     Plot the Earth and the projectile trajectory.
-    Uses equal axis scaling, as recommended in Triana's SGTGrapher.
+    Uses equal axis scaling.
     """
     plt.figure(figsize=(8, 8))
 

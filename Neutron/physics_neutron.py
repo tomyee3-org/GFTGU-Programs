@@ -1,11 +1,9 @@
 # physics_neutron.py
 """
 Neutron star structure physics module
-Faithful port of Bernard Schutz's Neutron.java (Gravity From the Ground Up),
-Creative Commons BY-NC-SA 1.0.
 
 Contains only physical constants and the relativistic hydrostatic equilibrium
-equation (TOV-like form used in Schutz’s simplified model).
+equation (Simplified model uses TOV-like form).
 """
 
 import math
