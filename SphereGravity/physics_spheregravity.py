@@ -83,7 +83,7 @@ def compute_acceleration_profile(nDiv, outputType: OutputType = "acceleration", 
 
     # Relative difference mode
     if outputType == "relative difference":
-        # Matches Sphere_Gravity.java exactly: indices 0..10 inclusive
+        # Indices 0..10 inclusive
         # (r = 0.0 through r = 1.0, i.e. inside the shell AND the shell
         # itself) are normalized by dividing by `mass` -- which equals
         # the Newtonian acceleration just outside the shell, since
