@@ -18,11 +18,11 @@ from plot_earthorbit import plot_earth_orbit
 force_law = "simplified"
 
 xs, ys, xEarth, yEarth = run_earth_orbit(
-    h0=300000.0,
-    uInit=9000.0,
+    h0=300.0,
+    uInit=7900.0,  # Not quite sufficient velocity to complete an orbit at 300.0 meters
     vInit=0.0,
     dt=0.4,
-    maxSteps=50000,
+    maxSteps=15000,
     force_law=force_law,
 )
 
