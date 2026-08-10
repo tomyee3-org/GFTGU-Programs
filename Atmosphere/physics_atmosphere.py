@@ -29,8 +29,6 @@ class TemperatureProfile:
         highest measurement, use T = beta * p^power, with beta fixed so that
         T matches the last measured temperature at the altitude where the
         atmosphere first reaches the top.
-
-        This follows the description in the Atmosphere help file.
         """
         # If we are still below or within measured range, do linear interpolation
         if altitude <= self.h[-1]:

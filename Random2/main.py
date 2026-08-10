@@ -1,18 +1,16 @@
 """
 main.py
 
-User entry point for Random2, a revised version of Schutz's Random
-program (Investigation 8.7) offering a choice of two displays:
+User entry point for Random2, offering a choice of two displays:
 
-    "scaled_distance" -- the original display: average scaled walk
+    "scaled_distance" -- average scaled walk
         distance vs. number of steps, on log-log axes, demonstrating
         the sqrt(N) diffusion law.
 
-    "walk2d" -- a new display: a handful of individual 2D random walks
+    "walk2d" -- a handful of individual 2D random walks
         drawn from the center of a circular "star" outward, each in
         its own color, with walks that reach the surface continuing as
-        a straight escaping ray. Modeled after an earlier 2D
-        Turbo Pascal visualization.
+        a straight escaping ray.
 
 Example parameters are provided below and may be overwritten by the
 user.

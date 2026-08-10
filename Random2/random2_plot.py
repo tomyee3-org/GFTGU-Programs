@@ -1,6 +1,4 @@
 """
-random2_plot.py
-
 Plotting routines for Random2.
 """
 
@@ -14,9 +12,7 @@ from random2_driver import Walk2DResult
 
 
 # A small palette of visually distinct colors for up to a handful of
-# simultaneous walk paths (matches the "roughly six" the original
-# Turbo Pascal display used, so overlapping paths near the center
-# stay distinguishable).
+# simultaneous walk paths.
 _WALK_COLORS = [
     "#e6194b",  # red
     "#3cb44b",  # green

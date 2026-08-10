@@ -1,8 +1,7 @@
 """
 random2_physics.py
 
-Physics for Random2: a 2D random walk, following the same step-generation
-convention as Schutz's Random program (Investigation 8.7) -- each step's
+Physics for Random2: a 2D random walk -- each step's
 components are drawn uniformly in [-1, 1] -- but restricted to two
 dimensions so the walk can be drawn directly on a plane, representing
 (schematically) a photon random-walking outward from a star's center.
@@ -86,4 +85,4 @@ def circle_crossing_fraction(p0: Point, p1: Point, radius: float) -> Optional[fl
 
 def point_at(p0: Point, p1: Point, t: float) -> Point:
     """Linear interpolation p0 + t*(p1 - p0)."""
-    return (p0[0] + t * (p1[0] - p0[0]), p0[1] + t * (p1[1] - p0[1]))
+    return p0[0] + t * (p1[0] - p0[0]), p0[1] + t * (p1[1] - p0[1])

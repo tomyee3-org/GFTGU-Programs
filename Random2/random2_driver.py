@@ -3,11 +3,10 @@ random2_driver.py
 
 Driver for Random2. Two independent experiments are supported:
 
-    "scaled_distance" -- the same experiment as the original Random
-        program (Investigation 8.7): for a sequence of step counts
+    "scaled_distance" -- for a sequence of step counts
         (halving from max_steps down), run many independent walks and
         average the net displacement, scaled by the mean step length.
-        Reimplemented here in 2D (see random2_physics.generate_2d_step)
+        Implemented here in 2D (see random2_physics.generate_2d_step)
         rather than 3D, since Random2's other mode needs a 2D walk
         anyway and the sqrt(N) diffusion law this experiment
         demonstrates holds regardless of dimension.

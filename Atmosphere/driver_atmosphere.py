@@ -133,7 +133,7 @@ class AtmosphereModel:
 
 def extract_output(result: AtmosphereResult) -> CurveData:
     """
-    Mimic the Java Curve output: x-values are altitude, y-values depend on outputType.
+    x-values are altitude, y-values depend on outputType.
     """
     if result.output_type == "Pressure":
         y = result.pressures
