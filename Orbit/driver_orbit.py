@@ -2,34 +2,58 @@
 Driver for the Orbit simulation.
 """
 
+from dataclasses import dataclass
+from typing import Literal
+
 import numpy as np
+from numpy.typing import NDArray
 from physics_orbit import compute_acceleration
 
-def run_orbit(
-    xInit, yInit,
-    vxInit, vyInit,
-    k,             # GM of central mass
-    dt0,           # initial time-step
-    maxSteps,
-    eps1,          # time-step accuracy threshold
-    eps2,          # predictor-corrector accuracy threshold
-    output="orbit" # "orbit", "velocity", "position_time", "velocity_time", "energy"
-):
+OutputType = Literal["orbit", "velocity", "position_time", "velocity_time", "energy"]
+
+
+@dataclass
+class OrbitResult:
     """
-    Run the Orbit simulation.
+    Full trajectory history. run_orbit() always computes and returns
+    every one of these arrays -- the computation does not depend on
+    which output mode the user eventually wants to look at, only the
+    plotting does (see plot_orbit.py).
 
-    Parameters match Schutz's Java program:
-        xInit, yInit   — initial position
-        vxInit, vyInit — initial velocity
-        k              — GM of central mass
-        dt0            — initial time-step
-        maxSteps       — maximum number of steps
-        eps1           — threshold for time-step reduction
-        eps2           — threshold for predictor-corrector convergence
-        output         — type of output data
+    xs, ys       -- position (m)
+    vxs, vys     -- velocity (m/s)
+    ts           -- time since the start of the orbit (s)
+    PEs, KEs     -- specific (per unit mass) potential and kinetic
+                    energy (J/kg), since the orbiting body's own mass
+                    never enters these calculations
+    """
+    xs: NDArray[np.float64]
+    ys: NDArray[np.float64]
+    vxs: NDArray[np.float64]
+    vys: NDArray[np.float64]
+    ts: NDArray[np.float64]
+    PEs: NDArray[np.float64]
+    KEs: NDArray[np.float64]
 
-    Returns:
-        Data arrays depending on output mode.
+
+def run_orbit(
+    xInit, yInit,            # initial position
+    vxInit, vyInit,          # initial velocity
+    k,             # GM of central mass
+    dt0,                     # initial time-step
+    maxSteps,                # maximum number of steps
+    eps1,          # threshold for time-step reduction
+    eps2,          # threshold for predictor-corrector convergence
+) -> OrbitResult:
+    """
+    Returns
+    -------
+    OrbitResult with the full position/velocity/time/energy history.
+    Which of these arrays actually gets plotted, and how, is decided
+    separately by plot_orbit()'s `output` argument -- see that
+    function's docstring for what each of the five output modes
+    ("orbit", "velocity", "position_time", "velocity_time", "energy")
+    actually shows.
     """
 
     # Initial state
@@ -39,12 +63,7 @@ def run_orbit(
     vy = vyInit
 
     # Arrays for storing the full trajectory: position, velocity, time,
-    # and energy history. Schutz's Java stores all of these
-    # (xCoordinate/yCoordinate, xVelocity/yVelocity, time,
-    # potentialEnergy/kineticEnergy) at every accepted step -- earlier
-    # versions of this driver only tracked vx/vy as scalars that got
-    # overwritten each step, which silently broke every output mode
-    # except "orbit".
+    # and energy history at every accepted step.
     xs = np.zeros(maxSteps)
     ys = np.zeros(maxSteps)
     vxs = np.zeros(maxSteps)
@@ -66,17 +85,13 @@ def run_orbit(
     dt1 = dt0
     t = 0.0
 
-    # Orbit closure detection. This mirrors Schutz's Java exactly:
+    # Orbit closure detection.
     # angleInitPos/angleInitVel are computed once from the initial data,
     # and the direction of travel (counterclockwise) is determined from
     # the angle BETWEEN them -- not assumed. Every step's angular
-    # position is then compared against angleInitPos (not against zero),
+    # position is then compared against angleInitPos,
     # so closure is detected correctly regardless of where the orbit
-    # starts or which way it travels. The previous version of this
-    # driver skipped angleInitPos/angleInitVel/counterclockwise
-    # entirely and just re-wrapped the raw position angle against zero,
-    # which only happened to work for an orbit starting on the positive
-    # x-axis and moving counterclockwise.
+    # starts or which way it travels.
     angleInitPos = np.arctan2(yInit, xInit)
     angleInitVel = np.arctan2(vyInit, vxInit)
     anglediff0 = angleInitVel - angleInitPos
@@ -170,30 +185,12 @@ def run_orbit(
         j += 1
 
     # Trim arrays
-    xs = xs[:j]
-    ys = ys[:j]
-    vxs = vxs[:j]
-    vys = vys[:j]
-    ts = ts[:j]
-    PEs = PEs[:j]
-    KEs = KEs[:j]
-
-    # Output modes
-    if output == "orbit":
-        return xs, ys
-
-    elif output == "velocity":
-        return vxs, vys
-
-    elif output == "position_time":
-        return ts, xs, ys
-
-    elif output == "velocity_time":
-        return ts, vxs, vys
-
-    elif output == "energy":
-        TE = KEs + PEs
-        return ts, KEs, PEs, TE
-
-    else:
-        return xs, ys
+    return OrbitResult(
+        xs=xs[:j],
+        ys=ys[:j],
+        vxs=vxs[:j],
+        vys=vys[:j],
+        ts=ts[:j],
+        PEs=PEs[:j],
+        KEs=KEs[:j],
+    )
