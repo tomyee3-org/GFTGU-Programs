@@ -8,11 +8,10 @@ Investigation 10.3 (peak-finding by direct comparison, area by the
 trapezoidal rule -- see Figure 10.5), then converts x back to physical
 units (wavelength or frequency) for plotting.
 
-Note on n_steps: in the original Planck.java, the "number of steps"
-GUI parameter was never actually connected to the sampling step dx
-(dx was hardcoded to 0.01 and the loop used a fixed number of steps
-regardless of what the user entered). This driver fixes that: n_steps
-directly and functionally controls the sampling resolution.
+n_steps directly and functionally controls the sampling resolution:
+it sets the number of divisions of the dimensionless domain
+[x_min, x_max], so a larger n_steps gives a finer sampling grid and a
+more accurate peak location and area.
 """
 
 from dataclasses import dataclass
@@ -63,8 +62,8 @@ def run_planck2(
         Which form of Planck's law to compute.
     n_steps : int
         Number of divisions of the dimensionless domain x in
-        [domain.x_min, domain.x_max]. Unlike the original Planck
-        program, this genuinely controls the sampling resolution.
+        [domain.x_min, domain.x_max]. Directly controls the sampling
+        resolution.
     domain : PlanckDomain, optional
         Domain and small-x/large-x approximation boundaries. Defaults
         to (x_min=0.01, x_max=100, x_low=0.01, x_high=100).

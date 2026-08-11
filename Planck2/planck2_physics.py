@@ -1,13 +1,9 @@
 """
 planck2_physics.py
 
-Physics for Planck2: an extended, from-scratch reimplementation inspired
-by Schutz's Planck program (Gravity From the Ground Up), built to
-accompany Investigation 10.2 ("Exploring the Planck Function") and
-Investigation 10.3 ("Computing the Planck function").
-
-This module does not import or modify anything from the original
-Planck module -- it is an independent file set.
+Physics for Planck2, built to accompany Investigation 10.2 ("Exploring
+the Planck Function") and Investigation 10.3 ("Computing the Planck
+function") of Gravity From the Ground Up.
 
 --------------------------------------------------------------------
 Physical background (Investigation 10.2)
