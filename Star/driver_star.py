@@ -27,8 +27,7 @@ OutputType = Literal["pressure", "density", "temperature", "mass"]
 @dataclass
 class StarResult:
     """
-    Structured, uniformly-typed replacement for the old
-    Dict[str, List[float]] result: radius/pressure/density/temperature/
+    radius/pressure/density/temperature/
     mass are the plotted profiles, last_index and output_type are not
     themselves List[float] and don't belong in that same mapping.
     """
