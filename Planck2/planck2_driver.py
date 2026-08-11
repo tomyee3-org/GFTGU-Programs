@@ -67,8 +67,7 @@ def run_planck2(
         program, this genuinely controls the sampling resolution.
     domain : PlanckDomain, optional
         Domain and small-x/large-x approximation boundaries. Defaults
-        to Schutz's values (x_min=0.01, x_max=100, x_low=0.01,
-        x_high=100).
+        to (x_min=0.01, x_max=100, x_low=0.01, x_high=100).
 
     Returns
     -------

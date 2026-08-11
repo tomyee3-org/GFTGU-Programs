@@ -1,8 +1,7 @@
 """
 main.py
 
-User entry point for Planck2: an extended reimplementation of
-Schutz's Planck program, offering a choice of three Planck-law
+User entry point for Planck2, offering a choice of three Planck-law
 quantities (spectral radiance per unit wavelength, spectral radiance
 per unit frequency, or spectral energy density per unit frequency),
 plotted against physical units with the peak location and area
