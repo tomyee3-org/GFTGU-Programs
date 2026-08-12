@@ -24,7 +24,6 @@ def compute_accelerations(positions: np.ndarray, masses_solar: np.ndarray) -> np
     acc = np.zeros_like(positions)
 
     # Convert masses to kg via K_GRAVITY convention (masses in solar units)
-    # Schutz uses kGravity * m (solar masses) / r^3
     for a in range(n_bodies):
         for b in range(a + 1, n_bodies):
             r_vec = positions[b] - positions[a]
@@ -37,9 +36,7 @@ def compute_accelerations(positions: np.ndarray, masses_solar: np.ndarray) -> np
             # convention). Gravity pulls a TOWARD b, i.e. along +r_vec, and
             # pulls b TOWARD a, i.e. along -r_vec -- so both coefficients
             # here are positive; the "-=" below is what supplies b's
-            # opposite direction, matching Schutz's
-            #   a_A = -kGravity*m[B]*xAB/rAB3,  a_B = +kGravity*m[A]*xAB/rAB3
-            # once re-expressed in terms of r_vec = -xAB.
+            # opposite direction.
 
             # Acceleration on a due to b
             factor_ab = K_GRAVITY * masses_solar[b] / r3

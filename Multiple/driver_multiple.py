@@ -28,7 +28,7 @@ class SimulationParams:
 
 def run_simulation(params: SimulationParams) -> Dict[str, Any]:
     """
-    Run the Multiple simulation with Schutz-style adaptive dt and predictor-corrector.
+    Run the Multiple simulation with adaptive dt and predictor-corrector.
 
     Returns a structured result suitable for plotting.
     """
