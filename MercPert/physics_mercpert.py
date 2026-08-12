@@ -1,5 +1,5 @@
 """
-MercPert physics module (non-RK45 version)
+MercPert physics module
 
 Only physical constants are literal numbers here.
 """
@@ -30,7 +30,7 @@ class MercuryInitialConditions:
 
 def k_gravity() -> float:
     """
-    kGravity = G * M_sun, as in Schutz's code.
+    kGravity = G * M_sun.
     This allows binary masses to be given in solar masses.
     """
     return G * M_SUN
@@ -40,8 +40,22 @@ def compute_binary_radii(params: BinarySystemParams) -> tuple[float, float]:
     """
     Compute orbital radii of Sun and Planet in the circular binary.
 
-    rSun = mPlanet / (mSun + mPlanet) * binarySeparation
-    rPlanet = binarySeparation - rSun
+    Both bodies orbit their common center of mass (barycenter) -- neither
+    sits still. By Newton's third law the two bodies pull on each other
+    equally, so the center of mass stays fixed at the origin while each
+    body traces its own circle around it, with radius inversely
+    proportional to its own mass:
+
+        rSun = mPlanet / (mSun + mPlanet) * binarySeparation
+        rPlanet = binarySeparation - rSun
+
+    so that mSun*rSun = mPlanet*rPlanet (equal and opposite "moments"
+    about the barycenter) and rSun + rPlanet = binarySeparation always.
+    A much heavier Sun traces a correspondingly tiny circle -- with the
+    default 10:1 mass ratio, the Sun's radius is only 1/10th the
+    planet's -- which is why the Sun's trajectory can look like it's
+    barely moving in the plot, while the massive planet's circle is
+    large and obvious.
     """
     m_sun = params.m_sun_solar
     m_planet = params.m_planet_solar
@@ -71,10 +85,16 @@ def binary_positions(t: float,
     """
     Return positions (x, y) of Sun and Planet at time t.
 
-    xSun = -rSun * cos(omega * t)
-    ySun = -rSun * sin(omega * t)
-    xPlanet = rPlanet * cos(omega * t)
-    yPlanet = rPlanet * sin(omega * t)
+    Both bodies are always on opposite sides of the barycenter (origin),
+    each moving on its own circle of radius rSun or rPlanet (see
+    compute_binary_radii) at the same angular rate omega, exactly 180
+    degrees out of phase -- when one is at angle theta, the other is at
+    theta + pi, so the two positions and the origin are always collinear.
+
+        xSun = -rSun * cos(omega * t)
+        ySun = -rSun * sin(omega * t)
+        xPlanet = rPlanet * cos(omega * t)
+        yPlanet = rPlanet * sin(omega * t)
     """
     r_sun, r_planet = compute_binary_radii(params)
     omega = compute_binary_angular_velocity(params)
@@ -96,8 +116,6 @@ def mercury_acceleration(t: float,
                          params: BinarySystemParams) -> tuple[float, float]:
     """
     Compute acceleration of Mercury due to Sun and Planet.
-
-    Using Schutz's structure:
 
         xMercSun = xMerc - xSun
         yMercSun = yMerc - ySun

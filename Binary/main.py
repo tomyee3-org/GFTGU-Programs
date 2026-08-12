@@ -1,6 +1,5 @@
 """
 Main entry point for Binary orbit simulation.
-
 Simulate the motion of two stars in a binary orbit around one another.
 The user can choose initial stellar masses, positions and velocities to
 represent any kind of orbit. The program can output graphs of the orbits,
@@ -42,7 +41,16 @@ def main():
     eps2 = 1.0e-4       # predictor–corrector accuracy threshold
 
     # Choose output type (can be changed by user)
-    output_type: OutputType = "orbits"
+    # Available output_types:
+    #   "orbits",
+    #   "velocity space",
+    #   "position vs. time, body A",
+    #   "position vs. time, body B",
+    #   "velocity vs. time, body A",
+    #   "velocity vs. time, body B",
+    #   "energy vs time"
+
+    output_type: OutputType = "velocity space"
 
     result = integrate_binary(
         MA=MA,

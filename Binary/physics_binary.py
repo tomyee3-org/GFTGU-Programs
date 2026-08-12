@@ -30,8 +30,6 @@ class BinaryState:
 def relative_displacement(xA: float, yA: float, xB: float, yB: float):
     """
     Compute displacement of A from B and its magnitude and cube.
-
-    Corresponds to Schutz's xAB, yAB, rAB, rAB3.
     """
     xAB = xA - xB
     yAB = yA - yB
@@ -46,14 +44,6 @@ def accelerations(MA: float, MB: float,
                   xB: float, yB: float):
     """
     Compute accelerations of bodies A and B due to mutual gravity.
-
-    Java analogue:
-        kGravityA = G * MA
-        kGravityB = G * MB
-        axA = -kGravityB * xAB / rAB3
-        ayA = -kGravityB * yAB / rAB3
-        axB =  kGravityA * xAB / rAB3
-        ayB =  kGravityA * yAB / rAB3
     """
     xAB, yAB, rAB, rAB3 = relative_displacement(xA, yA, xB, yB)
 

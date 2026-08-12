@@ -45,7 +45,7 @@ def integrate_binary(
     eps2: float,
 ) -> BinaryResult:
     """
-    Integrate the binary orbit using a Schutz-style
+    Integrate the binary orbit using a
     predictor–corrector with adaptive time-step.
 
     Parameters mirror Binary.java:
@@ -161,7 +161,6 @@ def integrate_binary(
 
             # Time-step accuracy check (eps1), done against the cheap
             # predictor -- BEFORE paying for the corrector iterations --
-            # just like the eps1 test in Binary.java.
             acc_change = abs(axA_pred - axA) + abs(ayA_pred - ayA)
             acc_ref = abs(axA) + abs(ayA)
             if acc_ref > 0.0 and acc_change > eps1 * acc_ref:

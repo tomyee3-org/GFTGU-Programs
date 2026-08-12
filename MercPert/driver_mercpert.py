@@ -1,5 +1,5 @@
 """
-MercPert driver module (non-RK45 version)
+MercPert driver module
 
 Implements an explicit integrator with
 time-step halving and a simple predictor-corrector
@@ -71,8 +71,7 @@ def run_mercpert(binary_params: BinarySystemParams,
         # Record current positions. This happens exactly once per
         # accepted step -- rejected attempts inside the retry loop below
         # never reach this point again, so they are never logged and
-        # never consume the max_steps budget, mirroring the
-        # `dt1 /= 2; j--;` retry in the original MercPert.java.
+        # never consume the max_steps budget.
         (x_sun, y_sun), (x_planet, y_planet) = binary_positions(t, binary_params)
 
         times.append(t)
