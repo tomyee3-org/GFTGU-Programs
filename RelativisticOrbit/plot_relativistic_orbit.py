@@ -9,7 +9,7 @@ zoom level the circle is drawn with a radius equal to:
 
     max(HORIZON_RADIUS, equivalent_of_2_pixels_in_data_units)
 
-so it always renders as at least a 2-pixel-wide coloured dot while still
+so it always renders as at least a 2-pixel-wide colored dot while still
 being a truthful to-scale circle whenever the orbit is close enough to the
 horizon for it to matter (e.g. plunge orbits).
 """

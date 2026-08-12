@@ -51,11 +51,8 @@ def _build_horizon_circle() -> tuple[list[float], list[float]]:
 
 def integrate_relativistic_orbit(params: RelativisticOrbitParams) -> RelativisticOrbitResult:
     """
-    Perform the relativistic orbit integration using Schutz-style
+    Perform the relativistic orbit integration using
     predictor–corrector and orbit counting.
-
-    The logic follows the Java RelativisticOrbit program as closely
-    as is practical in Python.
     """
 
     # Initial conditions
@@ -120,7 +117,7 @@ def integrate_relativistic_orbit(params: RelativisticOrbitParams) -> Relativisti
         ax1, ay1 = schwarzschild_acceleration(x1, y1, K, Q)
 
         # --- Time-step accuracy control (eps1) ---
-        # Matches RelativisticOrbit.java exactly: checked against the
+        # Time-step accuracy control Checks against the
         # cheap predictor's acceleration, BEFORE spending effort on the
         # corrector iterations below, using the sum-of-absolute-values
         # test (not a Euclidean-norm ratio, and not a component-wise
@@ -148,9 +145,9 @@ def integrate_relativistic_orbit(params: RelativisticOrbitParams) -> Relativisti
             new_ddx1 = 0.5 * (dv + dv1) * dt1 / 2.0
             new_ddy1 = 0.5 * (du + du1) * dt1 / 2.0
 
-            # relative change test (Java: sum of absolute changes vs
-            # eps2 * testPrediction, where testPrediction was fixed
-            # once, before the loop, as abs(ddx0)+abs(ddy0))
+            # relative change test: sum of absolute changes compared
+            # against a threshold fixed once, before the loop, as
+            # eps2 * (abs(ddx0)+abs(ddy0))
             change = abs(new_ddx1 - ddx1) + abs(new_ddy1 - ddy1)
 
             ddx1 = new_ddx1
@@ -165,8 +162,8 @@ def integrate_relativistic_orbit(params: RelativisticOrbitParams) -> Relativisti
                 break
 
         # Accept step: update velocities and positions, using the
-        # averaged acceleration for the velocity update (matches
-        # Java's dv/du, which are computed from (ax0+ax1)/2*dt1 inside
+        # averaged acceleration for the velocity update which is
+        # computed from (ax0+ax1)/2*dt1 inside
         # the corrector loop and then applied as v+=dv; u+=du;).
         v += 0.5 * (ax0 + ax1) * dt1
         u += 0.5 * (ay0 + ay1) * dt1
@@ -180,7 +177,7 @@ def integrate_relativistic_orbit(params: RelativisticOrbitParams) -> Relativisti
         # Update radius and angle
         r, angle_now = current_radius_angle(x0, y0)
 
-        # --- Orbit counting (same spirit as Orbit/RelativisticOrbit Java) ---
+        # --- Orbit counting ---
         # We detect crossings of the x-axis to count half and full orbits.
         if counterclockwise:
             if (y0 > 0.0) and (not half_orbit):
