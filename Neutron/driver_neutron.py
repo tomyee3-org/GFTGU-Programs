@@ -27,7 +27,7 @@ def compute_neutron_star(gamma, pC, K):
     scale = math.sqrt(pC / G) / rhoC
     dr = scale / 400.0
 
-    # Allocate arrays (Schutz uses fixed length 2000)
+    # Allocate arrays
     NMAX = 2000
     radius = [0.0] * NMAX
     pressure = [0.0] * NMAX
