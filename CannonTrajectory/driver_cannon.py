@@ -13,7 +13,7 @@ from physics_cannon import euler_step, improved_euler_step
 
 
 def run_cannon_trajectory(speed=100.0, angle_deg=45.0, dt=0.1,
-                          max_steps=1000, method="improved"):
+                          max_steps=100_000, method="improved"):
     """
     Run the cannonball trajectory simulation.
 
