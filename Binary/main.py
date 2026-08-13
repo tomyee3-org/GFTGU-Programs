@@ -50,7 +50,7 @@ def main():
     #   "velocity vs. time, body B",
     #   "energy vs time"
 
-    output_type: OutputType = "velocity space"
+    output_type: OutputType = "orbits"
 
     result = integrate_binary(
         MA=MA,
