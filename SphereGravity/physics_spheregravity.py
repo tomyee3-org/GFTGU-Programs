@@ -4,7 +4,9 @@ spherical shell of radius 1 and thickness epsilon, by dividing the shell
 into nDiv × nDiv tiles and treating each tile as a point mass.
 
 The gravitational acceleration is computed at 1000 radii from r = 0
-to r = 100, skipping r = 1 (the shell radius).
+to r = 4.99, skipping r = 1 (the shell radius). Plotting out to 5
+times the shell radius gives a clear view of both the interior (r < 1)
+and exterior (r > 1) regions.
 """
 
 from typing import Literal
@@ -35,7 +37,9 @@ def compute_shell_mass(nDiv, epsilon=0.001):
 
 def compute_acceleration_profile(nDiv, outputType: OutputType = "acceleration", epsilon=0.001):
     """
-    Compute gravitational acceleration at 1000 radii.
+    Compute gravitational acceleration at 1000 radii from r = 0 to r = 4.99
+    (step 0.005), spanning 5 times the shell radius for a clear view of
+    both interior and exterior behaviour.
 
     Parameters:
         nDiv        — number of angular divisions
@@ -57,12 +61,13 @@ def compute_acceleration_profile(nDiv, outputType: OutputType = "acceleration", 
     radius = np.zeros(1000)
     acceleration = np.zeros(1000)
 
-    # Loop over radii
+    # Loop over radii: r = j * 0.005, so r ranges from 0.00 to 4.99.
+    # The shell lies at r = 1, which corresponds to j = 200.
     for j in range(1000):
-        r = j * 0.1
+        r = j * 0.005
         radius[j] = r
 
-        if j == 10:  # r = 1 (shell radius)
+        if j == 200:  # r = 1 (shell radius) — skip to avoid singularity
             acceleration[j] = 0.0
             continue
 
@@ -83,18 +88,17 @@ def compute_acceleration_profile(nDiv, outputType: OutputType = "acceleration", 
 
     # Relative difference mode
     if outputType == "relative difference":
-        # Indices 0..10 inclusive
-        # (r = 0.0 through r = 1.0, i.e. inside the shell AND the shell
-        # itself) are normalized by dividing by `mass` -- which equals
-        # the Newtonian acceleration just outside the shell, since
-        # Newton's g = mass/r^2 evaluates to exactly `mass` at r = 1.
-        # Indices 11+ (strictly outside) use the standard relative-
-        # difference formula against the Newtonian prediction at that
-        # radius. Using j (not a floating-point r < 1.0 comparison)
-        # avoids any ambiguity from r = j*0.1 not landing on exactly
-        # 1.0 in floating point at j = 10.
+        # Indices 0..200 inclusive (r = 0.00 through r = 1.00, i.e. inside
+        # the shell and the shell itself) are normalised by dividing by
+        # `mass` — which equals the Newtonian acceleration just outside the
+        # shell, since Newton's g = mass/r^2 evaluates to exactly `mass` at
+        # r = 1. Indices 201+ (strictly outside) use the standard relative-
+        # difference formula against the Newtonian prediction at that radius.
+        # Using j (not a floating-point r < 1.0 comparison) avoids any
+        # ambiguity from r = j*0.005 not landing exactly on 1.0 in floating
+        # point at j = 200.
         for j in range(1000):
-            if j <= 10:
+            if j <= 200:
                 acceleration[j] = acceleration[j] / mass
             else:
                 r = radius[j]
