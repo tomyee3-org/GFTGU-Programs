@@ -20,7 +20,14 @@ _WALK_COLORS = [
     "#f58231",  # orange
     "#911eb4",  # purple
     "#42d4f4",  # cyan
+    "#ffe119",  # yellow
+    "#f032e6",  # magenta
+    "#469990",  # teal
+    "#9a6324",  # brown
+    "#bfef45",  # lime
+    "#000075",  # navy
 ]
+
 
 
 def plot_scaled_distance(lengths: List[float], avg_dist: List[float]) -> None:
