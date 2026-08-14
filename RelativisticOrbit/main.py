@@ -24,8 +24,8 @@ from plot_relativistic_orbit import plot_relativistic_orbit
 # Parameters – edit these values to explore different orbits
 # ---------------------------------------------------------------------------
 params = RelativisticOrbitParams(
-    x_init     =1.5e4,    # initial x-position (m);  start on the x-axis
-    u_init     = 34_056_720.0,    # initial y-velocity  (m/s); > 0 → counter-clockwise
+    x_init     = 1.5e4,    # initial x-position (m);  start on the x-axis
+    u_init     = 1.2e8,    # initial y-velocity  (m/s); > 0 → counter-clockwise
     dt         = 2.0E-6,   # initial time-step   (s);  halved automatically near
                            #   periapsis or the horizon
     max_steps  = 6_000,    # safety cap on total integration steps
