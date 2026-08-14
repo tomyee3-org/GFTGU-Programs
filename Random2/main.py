@@ -24,7 +24,7 @@ def main():
     # ----------------------------------------------------------------
     # Choose which display to run
     # ----------------------------------------------------------------
-    display = "scaled_distance"   # "scaled_distance" or "walk2d"
+    display = "walk2d"   # "scaled_distance" or "walk2d"
 
     if display == "scaled_distance":
         maxSteps = 4096

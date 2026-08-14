@@ -5,7 +5,7 @@ Driver for the CannonTrajectory simulation.
 
 The loop stops when:
     - The projectile returns to the ground (h < 0)
-    - The step counter reaches 1000 (array size limit)
+    - The step counter reaches max_steps (array size limit)
 """
 
 import numpy as np
@@ -21,7 +21,7 @@ def run_cannon_trajectory(speed=100.0, angle_deg=45.0, dt=0.1,
         speed      — launch speed (m/s)
         angle_deg  — launch angle in degrees
         dt         — timestep (s)
-        max_steps  — maximum number of steps (default 1000)
+        max_steps  — maximum number of steps (default 100_000)
         method     — "euler" or "improved"
 
     Returns:
