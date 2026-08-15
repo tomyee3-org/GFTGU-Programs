@@ -11,6 +11,11 @@ from physics_spheregravity import OutputType
 
 
 def plot_spheregravity(radius, acceleration, outputType: OutputType = "acceleration"):
+    if outputType not in ("acceleration", "relative difference"):
+        raise ValueError(
+            "outputType must be 'acceleration' or 'relative difference'."
+        )
+
     fig, ax = plt.subplots(figsize=(8, 6))
     ax.plot(radius, acceleration, linewidth=2)
 

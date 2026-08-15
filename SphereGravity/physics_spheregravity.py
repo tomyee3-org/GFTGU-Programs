@@ -4,7 +4,7 @@ spherical shell of radius 1 and thickness epsilon, by dividing the shell
 into nDiv × nDiv tiles and treating each tile as a point mass.
 
 The gravitational acceleration is computed at 1000 radii from r = 0
-to r = 4.99, skipping r = 1 (the shell radius). Plotting out to 5
+to r = 4.995, skipping r = 1 (the shell radius). Plotting out to 5
 times the shell radius gives a clear view of both the interior (r < 1)
 and exterior (r > 1) regions.
 """
@@ -51,6 +51,15 @@ def compute_acceleration_profile(nDiv, outputType: OutputType = "acceleration", 
         acceleration[]  — computed acceleration or relative difference
     """
 
+    if not isinstance(nDiv, (int, np.integer)) or isinstance(nDiv, bool) or nDiv <= 0:
+        raise ValueError("nDiv must be a positive integer.")
+    if outputType not in ("acceleration", "relative difference"):
+        raise ValueError(
+            "outputType must be 'acceleration' or 'relative difference'."
+        )
+    if epsilon <= 0:
+        raise ValueError("epsilon must be positive.")
+
     degToRad = np.pi / 180.0
     dPhi = 360.0 * degToRad / nDiv
     dTheta = 0.5 * dPhi
@@ -61,7 +70,7 @@ def compute_acceleration_profile(nDiv, outputType: OutputType = "acceleration", 
     radius = np.zeros(1000)
     acceleration = np.zeros(1000)
 
-    # Loop over radii: r = j * 0.005, so r ranges from 0.00 to 4.99.
+    # Loop over radii: r = j * 0.005, so r ranges from 0.000 to 4.995.
     # The shell lies at r = 1, which corresponds to j = 200.
     for j in range(1000):
         r = j * 0.005
