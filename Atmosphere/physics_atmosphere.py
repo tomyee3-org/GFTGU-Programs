@@ -23,12 +23,23 @@ class TemperatureProfile:
     beta: float = 0.0   # will be set when top is reached
     reached_top: bool = False
 
+    def validate(self) -> None:
+        """Validate the supplied temperature profile."""
+        if len(self.h) != len(self.T):
+            raise ValueError("h_points and T_points must contain the same number of values.")
+        if len(self.h) < 2:
+            raise ValueError("At least two altitude-temperature points are required.")
+        if any(t <= 0.0 for t in self.T):
+            raise ValueError("All temperatures must be greater than zero kelvin.")
+        if any(self.h[i + 1] <= self.h[i] for i in range(len(self.h) - 1)):
+            raise ValueError("h_points must be in strictly increasing order.")
+
     def get_temp(self, altitude: float, pressure: float) -> float:
         """
         Interpolate temperature at given altitude. For altitudes above the
         highest measurement, use T = beta * p^power, with beta fixed so that
-        T matches the last measured temperature at the altitude where the
-        atmosphere first reaches the top.
+        T is continuous at the first integration point above the highest
+        supplied temperature measurement.
         """
         # If we are still below or within measured range, do linear interpolation
         if altitude <= self.h[-1]:
@@ -79,6 +90,13 @@ def ideal_gas_density(pressure: float, mu: float, temperature: float) -> float:
     mu: mean molecular weight (in units of proton mass)
     temperature: T (K)
     """
+    if pressure < 0.0:
+        raise ValueError("pressure must not be negative.")
+    if mu <= 0.0:
+        raise ValueError("mu must be positive.")
+    if temperature <= 0.0:
+        raise ValueError("temperature must be greater than zero kelvin.")
+
     q = M_PROTON * mu / K_BOLTZMANN
     return pressure * q / temperature
 
@@ -89,4 +107,13 @@ def hydrostatic_step(pressure_prev: float, rho_prev: float, g_accel: float, dh: 
 
         p[j] = p[j-1] - gAccel * rho[j-1] * dh
     """
+    if pressure_prev < 0.0:
+        raise ValueError("pressure_prev must not be negative.")
+    if rho_prev < 0.0:
+        raise ValueError("rho_prev must not be negative.")
+    if g_accel <= 0.0:
+        raise ValueError("g_accel must be positive.")
+    if dh <= 0.0:
+        raise ValueError("dh must be positive.")
+
     return pressure_prev - g_accel * rho_prev * dh

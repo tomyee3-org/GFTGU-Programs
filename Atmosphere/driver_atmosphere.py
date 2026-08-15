@@ -38,9 +38,8 @@ class AtmosphereResult:
 @dataclass
 class CurveData:
     """
-    Structured, uniformly-typed replacement for the old
-    Dict[str, List[float]] curve output: x/y are the plotted series,
-    the rest are display strings for the plot.
+    Plot-ready atmospheric data: x/y are the plotted series and the
+    remaining fields provide units, labels, and the plot title.
     """
     x: List[float]
     y: List[float]
@@ -57,10 +56,27 @@ class AtmosphereModel:
             h=params.h_points,
             T=params.T_points,
         )
+        self._validate_parameters()
+
+    def _validate_parameters(self) -> None:
+        """Raise ValueError with a clear message for invalid user inputs."""
+        if not self.params.planet_name.strip():
+            raise ValueError("planet_name must not be empty.")
+        if self.params.g_accel <= 0.0:
+            raise ValueError("g_accel must be positive.")
+        if self.params.mu <= 0.0:
+            raise ValueError("mu must be positive.")
+        if self.params.p0 <= 0.0:
+            raise ValueError("p0 must be positive.")
+        if self.params.output_type not in ("Pressure", "Density", "Temperature"):
+            raise ValueError(
+                'output_type must be "Pressure", "Density", or "Temperature".'
+            )
+        self.temp_profile.validate()
 
     def run(self) -> AtmosphereResult:
         """
-        Follow the original Atmosphere logic:
+        Compute an atmosphere profile by finite steps in altitude:
 
         - Compute scale height and initial step dh
         - Use while-loop to adjust dh if top not reached within array size
@@ -77,7 +93,7 @@ class AtmosphereModel:
         # Ideal gas law to get density at bottom
         rho0 = ideal_gas_density(p0, mu, T0)
 
-        # Scale height: roughly distance over which pressure falls by factor ~2
+        # Scale height: for an isothermal atmosphere, pressure falls by a factor e
         scale = p0 / (g * rho0)
 
         # Step size in altitude; Java uses scale / 200.
@@ -96,15 +112,20 @@ class AtmosphereModel:
         rho[0] = rho0
 
         last_step = 0
-        self.temp_profile.reached_top = False
 
-        # Outer while-loop: repeat with larger dh if we don't reach top
+        # Outer while-loop: repeat with larger dh if we do not reach the
+        # numerical upper boundary within max_steps.
         while last_step == 0:
+            # Each retry is a fresh integration. The upper-atmosphere
+            # extrapolation coefficient must therefore be recomputed.
+            self.temp_profile.reached_top = False
+            self.temp_profile.beta = 0.0
+
             for j in range(1, max_steps):
                 alt[j] = alt[j - 1] + dh
                 p[j] = hydrostatic_step(p[j - 1], rho[j - 1], g, dh)
 
-                # Stop when pressure goes negative
+                # Stop when the Euler step crosses the model's zero-pressure boundary
                 if p[j] < 0.0:
                     last_step = j
                     break
@@ -112,7 +133,7 @@ class AtmosphereModel:
                 Temp[j] = self.temp_profile.get_temp(alt[j], p[j])
                 rho[j] = ideal_gas_density(p[j], mu, Temp[j])
 
-            # If still zero, we used all steps without reaching top: increase dh
+            # If still zero, all steps were used without crossing zero pressure: increase dh
             dh *= 2.0
 
         # Prepare output arrays up to last_step (excluding the negative-pressure point)
@@ -141,9 +162,13 @@ def extract_output(result: AtmosphereResult) -> CurveData:
     elif result.output_type == "Density":
         y = result.densities
         unit = "kg/m^3"
-    else:  # "Temperature"
+    elif result.output_type == "Temperature":
         y = result.temperatures
         unit = "K"
+    else:
+        raise ValueError(
+            'output_type must be "Pressure", "Density", or "Temperature".'
+        )
 
     return CurveData(
         x=result.altitudes,
