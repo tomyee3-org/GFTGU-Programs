@@ -1,92 +1,125 @@
 """
 random2_driver.py
 
-Driver for Random2. Two independent experiments are supported:
+Driver routines for Random2.
 
-    "scaled_distance" -- for a sequence of step counts
-        (halving from max_steps down), run many independent walks and
-        average the net displacement, scaled by the mean step length.
-        Implemented here in 2D (see random2_physics.generate_2d_step)
-        rather than 3D, since Random2's other mode needs a 2D walk
-        anyway and the sqrt(N) diffusion law this experiment
-        demonstrates holds regardless of dimension.
+"scaled_distance"
+    For a sequence of step counts, perform many independent 2D random
+    walks and average the net displacement after dividing by that
+    walk's mean step length. The experiment demonstrates the sqrt(N)
+    scaling of random-walk displacement.
 
-    "walk2d" -- a small number of individual walks, each run for up to
-        max_steps steps, starting at the origin ("center of the star")
-        and stopping early if the walk crosses a circular boundary
-        ("the surface", of a given or default radius) -- in which case
-        a straight ray is recorded continuing in the walk's last
-        direction of travel, representing the photon escaping into
-        space. Walks that do not reach the surface within max_steps
-        simply stop where they are.
+"walk2d"
+    Draw a small number of fixed-step, isotropic 2D walks from the
+    center of a circular schematic star. Each walk continues until it
+    crosses the boundary or reaches a generous safety cap.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import List, Literal, Optional, Tuple
 import math
 
 from random2_physics import (
     Point,
-    generate_2d_step,
-    default_radius,
+    StepDistribution,
     circle_crossing_fraction,
+    default_radius,
+    generate_component_step,
+    generate_isotropic_step,
     point_at,
 )
+
+
+def _require_positive_int(name: str, value: int) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer.")
 
 
 # ---------------------------------------------------------------------
 # "scaled_distance" mode
 # ---------------------------------------------------------------------
 
-def _perform_single_walk_2d(n_steps: int) -> Tuple[float, float]:
-    """One 2D walk of n_steps steps. Returns (net_distance, avg_step_length)."""
+def _perform_single_walk_2d(
+    n_steps: int,
+    step_distribution: StepDistribution = "uniform",
+) -> Tuple[float, float]:
+    """Return (net_distance, mean_step_length) for one 2D walk."""
+    _require_positive_int("n_steps", n_steps)
+
     x = 0.0
     y = 0.0
     step_size_total = 0.0
 
     for _ in range(n_steps):
-        dx, dy = generate_2d_step()
-        step_size_total += math.sqrt(dx * dx + dy * dy)
+        dx, dy = generate_component_step(step_distribution)
+        step_size_total += math.hypot(dx, dy)
         x += dx
         y += dy
 
-    net_distance = math.sqrt(x * x + y * y)
-    avg_step_length = step_size_total / n_steps
-    return net_distance, avg_step_length
+    net_distance = math.hypot(x, y)
+    mean_step_length = step_size_total / n_steps
+    return net_distance, mean_step_length
 
 
-def _perform_trials_2d(n_steps: int, n_trials: int) -> float:
-    """Average scaled distance (net_distance / avg_step_length) over n_trials walks."""
+def _perform_trials_2d(
+    n_steps: int,
+    n_trials: int,
+    step_distribution: StepDistribution = "uniform",
+) -> float:
+    """Average the scaled distance over n_trials independent walks."""
+    _require_positive_int("n_trials", n_trials)
+
     total = 0.0
     for _ in range(n_trials):
-        net_dist, avg_step = _perform_single_walk_2d(n_steps)
-        total += net_dist / avg_step
+        net_distance, mean_step = _perform_single_walk_2d(
+            n_steps, step_distribution
+        )
+        total += net_distance / mean_step
     return total / n_trials
 
 
-def run_scaled_distance_experiment(max_steps: int, n_trials: int
-                                    ) -> Tuple[List[float], List[float]]:
+def run_scaled_distance_experiment(
+    max_steps: int,
+    n_trials: int,
+    step_distribution: StepDistribution = "uniform",
+) -> Tuple[List[float], List[float]]:
     """
-    Runs the same experiment as the original Random program, in 2D:
-        nWalks = floor(log2(maxSteps))
-        nSteps starts at maxSteps and halves each iteration
-        avgDist[j] = average scaled distance over nTrials walks
+    Run scaled-distance experiments at max_steps, max_steps//2, ...,
+    stopping before a one-step walk.
 
-    Returns (lengths, avg_dist).
+    Returns
+    -------
+    lengths, avg_dist
+        Step counts and the corresponding average scaled distances,
+        ordered from smallest to largest step count.
     """
-    n_walks = int(math.floor(math.log(max_steps) / math.log(2.0)))
+    _require_positive_int("max_steps", max_steps)
+    _require_positive_int("n_trials", n_trials)
+    if max_steps < 2:
+        raise ValueError("max_steps must be at least 2.")
+    if step_distribution not in ("uniform", "gaussian"):
+        raise ValueError(
+            'step_distribution must be "uniform" or "gaussian".'
+        )
 
-    lengths = [0.0] * n_walks
-    avg_dist = [0.0] * n_walks
-
+    pairs = []
     n_steps = max_steps
-    for j in range(n_walks - 1, -1, -1):
-        lengths[j] = n_steps
-        avg_dist[j] = _perform_trials_2d(n_steps, n_trials)
+    while n_steps > 1:
+        pairs.append(
+            (
+                float(n_steps),
+                _perform_trials_2d(
+                    n_steps,
+                    n_trials,
+                    step_distribution,
+                ),
+            )
+        )
         n_steps //= 2
-        if n_steps <= 1:
-            break
 
+    pairs.reverse()
+    lengths = [p[0] for p in pairs]
+    avg_dist = [p[1] for p in pairs]
     return lengths, avg_dist
 
 
@@ -96,22 +129,24 @@ def run_scaled_distance_experiment(max_steps: int, n_trials: int
 
 @dataclass
 class WalkPath:
-    points: List[Point]              # the walk itself, from the origin
-    escaped: bool                    # whether it crossed the boundary
-    ray: Optional[Tuple[Point, Point]] = None  # (exit point, ray end point), if escaped
+    points: List[Point]
+    escaped: bool
+    steps_taken: int
+    ray: Optional[Tuple[Point, Point]] = None
 
 
 @dataclass
 class Walk2DResult:
     radius: float
     mean_free_path: float
-    max_steps: int
+    reference_steps: int
+    step_cap: int
     walks: List[WalkPath] = field(default_factory=list)
 
 
 def run_walk2d(
     reference_steps: int = 2000,
-    n_walks: int = 6,
+    n_walks: int = 4,
     radius: Optional[float] = None,
     mean_free_path: float = 1.0,
     radius_factor: float = 2.0,
@@ -119,47 +154,36 @@ def run_walk2d(
     step_cap: int = 200_000,
 ) -> Walk2DResult:
     """
-    Run n_walks independent 2D random walks, each starting at the
-    origin and continuing until it crosses the circular boundary
-    ("the star's surface") of the given (or default) radius -- so that,
-    as in the photon-diffusion picture this models, a walk almost
-    always eventually escapes; visual variety comes from how long and
-    wandering each escaping path is, not from a coin-flip on whether it
-    escapes at all. A walk stops early if it crosses the boundary, in
-    which case a straight ray is recorded continuing in the direction
-    of the walk's final step, extending an additional
-    ray_length_factor*radius beyond the crossing point. step_cap is a
-    generous safety limit only -- reaching it (a walk that still hasn't
-    escaped) should be rare with the default radius_factor, but is
-    handled the same way an incomplete walk always is: plotted as-is,
-    with no ray.
+    Run fixed-length isotropic 2D random walks from the origin.
 
-    Parameters
-    ----------
-    reference_steps : int
-        The "N" used only for the default radius formula (see
-        random2_physics.default_radius) -- NOT a hard step budget for
-        the walk itself. Historically this was found empirically to
-        need to be much smaller than the number of steps an individual
-        walk actually takes to reach that radius (by roughly 2-20x, for
-        radius_factor=2) -- see the Random2 documentation.
-    n_walks : int
-        Number of independent walks to draw.
-    radius : float, optional
-        Star radius. Defaults to random2_physics.default_radius(...).
-    mean_free_path : float
-        Used only for the default radius formula, unless radius is given.
-    radius_factor : float
-        Used only for the default radius formula, unless radius is given.
-    ray_length_factor : float
-        Length of the escaping ray beyond the boundary, as a fraction
-        of the radius.
-    step_cap : int
-        Safety limit on steps per walk, to guarantee termination even
-        in the (rare, long-tail) case a walk hasn't escaped yet.
+    If radius is None, the schematic star radius is
+
+        radius_factor * mean_free_path * sqrt(reference_steps).
+
+    A walk ends when it crosses the circular boundary or reaches
+    step_cap. When a crossing occurs, the plotted path terminates at the
+    exact line-circle intersection and a short straight ray is recorded
+    to indicate that the toy model has stopped scattering the photon.
     """
+    _require_positive_int("reference_steps", reference_steps)
+    _require_positive_int("n_walks", n_walks)
+    _require_positive_int("step_cap", step_cap)
+
+    if mean_free_path <= 0.0:
+        raise ValueError("mean_free_path must be positive.")
+    if radius_factor <= 0.0:
+        raise ValueError("radius_factor must be positive.")
+    if ray_length_factor < 0.0:
+        raise ValueError("ray_length_factor must not be negative.")
+
     if radius is None:
-        radius = default_radius(reference_steps, mean_free_path, radius_factor)
+        radius = default_radius(
+            reference_steps,
+            mean_free_path,
+            radius_factor,
+        )
+    elif radius <= 0.0:
+        raise ValueError("radius must be positive when supplied.")
 
     walks: List[WalkPath] = []
 
@@ -168,41 +192,55 @@ def run_walk2d(
         points: List[Point] = [(x, y)]
         escaped = False
         ray = None
+        steps_taken = 0
 
-        for _ in range(step_cap):
-            dx, dy = generate_2d_step()
+        for step_number in range(1, step_cap + 1):
+            dx, dy = generate_isotropic_step(mean_free_path)
             x_new, y_new = x + dx, y + dy
+            steps_taken = step_number
 
             if math.hypot(x_new, y_new) >= radius:
-                t = circle_crossing_fraction((x, y), (x_new, y_new), radius)
-                if t is None:
-                    # Shouldn't happen since we already know p1 is
-                    # outside, but fall back to the endpoint itself
-                    # rather than crash if it ever does.
-                    exit_point = (x_new, y_new)
-                else:
-                    exit_point = point_at((x, y), (x_new, y_new), t)
-
+                t = circle_crossing_fraction(
+                    (x, y),
+                    (x_new, y_new),
+                    radius,
+                )
+                exit_point = (
+                    point_at((x, y), (x_new, y_new), t)
+                    if t is not None
+                    else (x_new, y_new)
+                )
                 points.append(exit_point)
 
-                # Continue the ray in the same direction as the final step.
-                step_len = math.hypot(dx, dy)
-                if step_len > 0.0:
-                    ux, uy = dx / step_len, dy / step_len
-                else:
-                    ux, uy = exit_point[0] / radius, exit_point[1] / radius
-                ray_end = (
-                    exit_point[0] + ux * ray_length_factor * radius,
-                    exit_point[1] + uy * ray_length_factor * radius,
-                )
-                ray = (exit_point, ray_end)
+                if ray_length_factor > 0.0:
+                    # An isotropic step has length mean_free_path > 0.
+                    ux = dx / mean_free_path
+                    uy = dy / mean_free_path
+                    ray_end = (
+                        exit_point[0] + ux * ray_length_factor * radius,
+                        exit_point[1] + uy * ray_length_factor * radius,
+                    )
+                    ray = (exit_point, ray_end)
+
                 escaped = True
                 break
 
             x, y = x_new, y_new
             points.append((x, y))
 
-        walks.append(WalkPath(points=points, escaped=escaped, ray=ray))
+        walks.append(
+            WalkPath(
+                points=points,
+                escaped=escaped,
+                steps_taken=steps_taken,
+                ray=ray,
+            )
+        )
 
-    return Walk2DResult(radius=radius, mean_free_path=mean_free_path,
-                         max_steps=reference_steps, walks=walks)
+    return Walk2DResult(
+        radius=radius,
+        mean_free_path=mean_free_path,
+        reference_steps=reference_steps,
+        step_cap=step_cap,
+        walks=walks,
+    )

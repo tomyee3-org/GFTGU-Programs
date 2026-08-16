@@ -4,6 +4,7 @@ Plotting routines for Random2.
 
 from dataclasses import dataclass
 from typing import List, Tuple
+import statistics
 
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
@@ -11,8 +12,6 @@ from matplotlib.patches import Circle
 from random2_driver import Walk2DResult
 
 
-# A small palette of visually distinct colors for up to a handful of
-# simultaneous walk paths.
 _WALK_COLORS = [
     "#e6194b",  # red
     "#3cb44b",  # green
@@ -29,29 +28,32 @@ _WALK_COLORS = [
 ]
 
 
+def plot_scaled_distance(
+    lengths: List[float],
+    avg_dist: List[float],
+) -> None:
+    """Plot average scaled distance against step count on log-log axes."""
+    if len(lengths) != len(avg_dist) or not lengths:
+        raise ValueError(
+            "lengths and avg_dist must be non-empty lists of equal length."
+        )
+    if any(x <= 0.0 for x in lengths) or any(y <= 0.0 for y in avg_dist):
+        raise ValueError("log-log plot values must all be positive.")
 
-def plot_scaled_distance(lengths: List[float], avg_dist: List[float]) -> None:
-    """
-    Log-log plot of average scaled distance vs number of steps --
-    the same display the original Random program produces.
-    """
     fig, ax = plt.subplots(figsize=(8, 6))
-
-    ax.loglog(lengths, avg_dist, marker='o', linestyle='-', color='blue')
+    ax.loglog(lengths, avg_dist, marker="o", linestyle="-")
 
     ax.set_xlabel("Number of Steps (log scale)")
     ax.set_ylabel("Scaled Distance (log scale)")
     ax.set_title("Random2: Scaled Distance vs Number of Steps")
-
     ax.grid(True, which="both", ls="--", alpha=0.5)
 
     plt.show()
 
 
-@dataclass
+@dataclass(frozen=True)
 class _AnchorSpec:
-    """Uniformly-typed replacement for the old dict-of-mixed-types
-    anchor spec: xy is a coordinate pair, ha/va are alignment strings."""
+    """Coordinates and alignment for the results annotation box."""
     xy: Tuple[float, float]
     ha: str
     va: str
@@ -65,23 +67,37 @@ _CORNER_TO_ANCHOR = {
 }
 
 
-def plot_walk2d(result: Walk2DResult, corner: str = "upper right") -> None:
+def plot_walk2d(
+    result: Walk2DResult,
+    corner: str = "upper right",
+) -> None:
     """
-    Plot the star (a circle of the walk's radius) and each random walk
-    path from the center outward, in a distinct color per walk. Walks
-    that reach the surface continue as a straight ray in their final
-    direction of travel, representing an escaping photon; walks that
-    don't reach the surface within the step budget simply end where
-    they stop.
+    Plot the circular schematic star and each fixed-step isotropic walk.
+
+    A short straight ray beyond the boundary is a visual indication that
+    scattering has stopped in the toy model; it is not a model of the
+    Sun's outer layers.
     """
+    if corner not in _CORNER_TO_ANCHOR:
+        allowed = ", ".join(f'"{x}"' for x in _CORNER_TO_ANCHOR)
+        raise ValueError(f"corner must be one of: {allowed}.")
+
     fig, ax = plt.subplots(figsize=(8, 8))
 
-    star = Circle((0, 0), result.radius, facecolor="#fff2cc",
-                  edgecolor="#b5811a", linewidth=1.5, zorder=1)
+    star = Circle(
+        (0, 0),
+        result.radius,
+        facecolor="#fff2cc",
+        edgecolor="#b5811a",
+        linewidth=1.5,
+        zorder=1,
+    )
     ax.add_patch(star)
     ax.plot(0, 0, marker="*", color="#b5811a", markersize=14, zorder=3)
 
     n_escaped = 0
+    escaped_steps = []
+
     for i, walk in enumerate(result.walks):
         color = _WALK_COLORS[i % len(_WALK_COLORS)]
         xs = [p[0] for p in walk.points]
@@ -90,31 +106,53 @@ def plot_walk2d(result: Walk2DResult, corner: str = "upper right") -> None:
 
         if walk.escaped:
             n_escaped += 1
-            (ex, ey), (rx, ry) = walk.ray
-            ax.plot([ex, rx], [ey, ry], color=color, linewidth=1.3,
-                    linestyle="-", zorder=2)
+            escaped_steps.append(walk.steps_taken)
+            if walk.ray is not None:
+                (ex, ey), (rx, ry) = walk.ray
+                ax.plot(
+                    [ex, rx],
+                    [ey, ry],
+                    color=color,
+                    linewidth=1.3,
+                    linestyle="-",
+                    zorder=2,
+                )
 
     ax.set_aspect("equal", "box")
-    ax.set_xlabel("x (mean free paths)")
-    ax.set_ylabel("y (mean free paths)")
-    ax.set_title("Random2: Photon Walks From a Star's Center")
+    ax.set_xlabel("x (distance units)")
+    ax.set_ylabel("y (distance units)")
+    ax.set_title("Random2: Isotropic Random Walks in a Schematic Star")
 
     span = result.radius * 1.8
     ax.set_xlim(-span, span)
     ax.set_ylim(-span, span)
 
     anchor = _CORNER_TO_ANCHOR[corner]
-    text = (
-        f"radius = {result.radius:.2f}\n"
-        f"reference steps = {result.max_steps}\n"
-        f"walks = {len(result.walks)}  (escaped: {n_escaped})"
-    )
+    text_lines = [
+        f"radius = {result.radius:.2f}",
+        f"mean free path = {result.mean_free_path:g}",
+        f"reference steps = {result.reference_steps}",
+        f"walks = {len(result.walks)}  (escaped: {n_escaped})",
+    ]
+    if escaped_steps:
+        text_lines.append(
+            f"median escape steps = {statistics.median(escaped_steps):.0f}"
+        )
+
     ax.annotate(
-        text,
-        xy=anchor.xy, xycoords="axes fraction",
-        ha=anchor.ha, va=anchor.va,
-        fontsize=9, family="monospace",
-        bbox=dict(boxstyle="round", facecolor="white", edgecolor="gray", alpha=0.9),
+        "\n".join(text_lines),
+        xy=anchor.xy,
+        xycoords="axes fraction",
+        ha=anchor.ha,
+        va=anchor.va,
+        fontsize=9,
+        family="monospace",
+        bbox=dict(
+            boxstyle="round",
+            facecolor="white",
+            edgecolor="gray",
+            alpha=0.9,
+        ),
     )
 
     plt.tight_layout()
