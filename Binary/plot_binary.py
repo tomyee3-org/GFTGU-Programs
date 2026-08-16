@@ -36,14 +36,7 @@ def plot_binary(result: BinaryResult, output_type: OutputType) -> None:
         ax.set_ylabel("y (m)")
         ax.set_title("Binary orbits")
         ax.set_aspect("equal", "box")
-        # Deliberately not ax.legend() (loc="best"): set_aspect("equal", "box")
-        # doesn't finish resizing the axes box until the window actually
-        # renders, and on some interactive backends loc="best"'s search for
-        # open space runs before that resize is finished -- so it can plant
-        # the legend in the wrong-sized box, often dead center on the data,
-        # until the user manually resizes the window. A fixed corner is
-        # computed directly from the box geometry instead of searching the
-        # data, so it isn't sensitive to that timing issue.
+        # A fixed legend location keeps it clear of the equal-aspect resizing.
         ax.legend(loc="upper right")
 
     elif output_type == "velocity space":
@@ -53,9 +46,7 @@ def plot_binary(result: BinaryResult, output_type: OutputType) -> None:
         ax.set_xlabel("v_x (m/s)")
         ax.set_ylabel("v_y (m/s)")
         ax.set_title("Velocity space")
-        # Same units on both axes as "orbits" above (m/s here vs. m there),
-        # so equal-aspect applies for the same reason, and needs the same
-        # fixed-corner legend workaround -- see the comment in "orbits".
+        # Both velocity axes use the same units, so equal aspect is appropriate.
         ax.set_aspect("equal", "box")
         ax.legend(loc="upper right")
 
