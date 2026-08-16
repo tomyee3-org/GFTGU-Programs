@@ -51,8 +51,7 @@ def plot_orbits(
 
     Dashed red/green curves are the prescribed primary orbits. Mercury's
     integrated trajectory is solid blue. Small filled circles mark the three
-    starting positions. A blue triangle marks an ordinary final point; a black
-    x marks a finite-radius collision.
+    starting positions. A black x is reserved for a finite-radius collision.
     """
     _validate_display_options(corner, position_unit)
 
