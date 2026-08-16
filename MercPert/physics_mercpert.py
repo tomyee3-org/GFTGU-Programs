@@ -1,163 +1,232 @@
 """
-MercPert physics module
-
-Only physical constants are literal numbers here.
+Physics for MercPert, a planar circular restricted three-body simulation.
 """
 
 from dataclasses import dataclass
 import math
 
-# Physical constants (SI units)
-G = 6.6726e-11          # Newton's gravitational constant (m^3 kg^-1 s^-2)
-M_SUN = 1.98847e30      # Mass of the Sun (kg)
-AU = 1.495978707e11     # Astronomical unit (m)
+# IAU 2015 nominal solar mass parameter and nominal solar radius.
+# These are exact nominal conversion constants, not measurements of G or M_sun.
+GM_SUN = 1.3271244e20       # m^3 s^-2
+R_SUN = 6.957e8             # m
+AU = 1.495978707e11         # m
 
 
-@dataclass
+@dataclass(frozen=True)
 class BinarySystemParams:
-    m_sun_solar: float       # mass of central body in solar masses
-    m_planet_solar: float    # mass of massive planet in solar masses
-    binary_separation: float # separation between Sun and planet (m)
+    m_sun_solar: float
+    m_planet_solar: float
+    binary_separation: float
 
 
-@dataclass
+@dataclass(frozen=True)
 class MercuryInitialConditions:
+    """
+    Mercury's initial position and velocity RELATIVE TO THE SUN.
+
+    The driver converts these values to barycentric inertial coordinates before
+    beginning the integration, matching the physical meaning of the original
+    MercPert inputs.
+    """
     x_init: float
     y_init: float
     vx_init: float
     vy_init: float
 
 
-def k_gravity() -> float:
-    """
-    kGravity = G * M_sun.
-    This allows binary masses to be given in solar masses.
-    """
-    return G * M_SUN
+def validate_binary_params(params: BinarySystemParams) -> None:
+    values = (
+        params.m_sun_solar,
+        params.m_planet_solar,
+        params.binary_separation,
+    )
+    if not all(math.isfinite(v) for v in values):
+        raise ValueError("Binary-system parameters must be finite.")
+    if params.m_sun_solar <= 0.0:
+        raise ValueError("m_sun_solar must be positive.")
+    if params.m_planet_solar <= 0.0:
+        raise ValueError("m_planet_solar must be positive.")
+    if params.binary_separation <= 0.0:
+        raise ValueError("binary_separation must be positive.")
+
+
+def validate_mercury_ic(ic: MercuryInitialConditions) -> None:
+    if not all(math.isfinite(v) for v in (
+        ic.x_init, ic.y_init, ic.vx_init, ic.vy_init
+    )):
+        raise ValueError("Mercury initial position and velocity must be finite.")
 
 
 def compute_binary_radii(params: BinarySystemParams) -> tuple[float, float]:
-    """
-    Compute orbital radii of Sun and Planet in the circular binary.
-
-    Both bodies orbit their common center of mass (barycenter) -- neither
-    sits still. By Newton's third law the two bodies pull on each other
-    equally, so the center of mass stays fixed at the origin while each
-    body traces its own circle around it, with radius inversely
-    proportional to its own mass:
-
-        rSun = mPlanet / (mSun + mPlanet) * binarySeparation
-        rPlanet = binarySeparation - rSun
-
-    so that mSun*rSun = mPlanet*rPlanet (equal and opposite "moments"
-    about the barycenter) and rSun + rPlanet = binarySeparation always.
-    A much heavier Sun traces a correspondingly tiny circle -- with the
-    default 10:1 mass ratio, the Sun's radius is only 1/10th the
-    planet's -- which is why the Sun's trajectory can look like it's
-    barely moving in the plot, while the massive planet's circle is
-    large and obvious.
-    """
-    m_sun = params.m_sun_solar
-    m_planet = params.m_planet_solar
-    sep = params.binary_separation
-
-    r_sun = m_planet / (m_sun + m_planet) * sep
-    r_planet = sep - r_sun
+    """Return the Sun and companion radii about the binary barycentre."""
+    validate_binary_params(params)
+    total_mass = params.m_sun_solar + params.m_planet_solar
+    r_sun = params.m_planet_solar / total_mass * params.binary_separation
+    r_planet = params.m_sun_solar / total_mass * params.binary_separation
     return r_sun, r_planet
 
 
 def compute_binary_angular_velocity(params: BinarySystemParams) -> float:
+    """Angular velocity of the prescribed circular binary orbit."""
+    validate_binary_params(params)
+    return math.sqrt(
+        GM_SUN
+        * (params.m_sun_solar + params.m_planet_solar)
+        / params.binary_separation ** 3
+    )
+
+
+def binary_positions(
+    t: float,
+    params: BinarySystemParams,
+) -> tuple[tuple[float, float], tuple[float, float]]:
     """
-    omega = sqrt( kGravity * (mSun + mPlanet) / binarySeparation^3 )
-    with mSun, mPlanet in solar masses.
-    """
-    kg = k_gravity()
-    m_sun = params.m_sun_solar
-    m_planet = params.m_planet_solar
-    sep = params.binary_separation
+    Return barycentric inertial positions of the Sun and companion at time t.
 
-    return math.sqrt(kg * (m_sun + m_planet) / (sep ** 3))
-
-
-def binary_positions(t: float,
-                     params: BinarySystemParams) -> tuple[tuple[float, float],
-                                                          tuple[float, float]]:
-    """
-    Return positions (x, y) of Sun and Planet at time t.
-
-    Both bodies are always on opposite sides of the barycenter (origin),
-    each moving on its own circle of radius rSun or rPlanet (see
-    compute_binary_radii) at the same angular rate omega, exactly 180
-    degrees out of phase -- when one is at angle theta, the other is at
-    theta + pi, so the two positions and the origin are always collinear.
-
-        xSun = -rSun * cos(omega * t)
-        ySun = -rSun * sin(omega * t)
-        xPlanet = rPlanet * cos(omega * t)
-        yPlanet = rPlanet * sin(omega * t)
+    At t=0 the Sun is on the negative x-axis and the companion is on the
+    positive x-axis. The orbit is counter-clockwise.
     """
     r_sun, r_planet = compute_binary_radii(params)
     omega = compute_binary_angular_velocity(params)
+    c = math.cos(omega * t)
+    s = math.sin(omega * t)
 
-    c1 = math.cos(omega * t)
-    s1 = math.sin(omega * t)
-
-    x_sun = -r_sun * c1
-    y_sun = -r_sun * s1
-    x_planet = r_planet * c1
-    y_planet = r_planet * s1
-
-    return (x_sun, y_sun), (x_planet, y_planet)
+    sun = (-r_sun * c, -r_sun * s)
+    planet = (r_planet * c, r_planet * s)
+    return sun, planet
 
 
-def mercury_acceleration(t: float,
-                         x_merc: float,
-                         y_merc: float,
-                         params: BinarySystemParams) -> tuple[float, float]:
+def binary_velocities(
+    t: float,
+    params: BinarySystemParams,
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Return barycentric inertial velocities of the Sun and companion."""
+    r_sun, r_planet = compute_binary_radii(params)
+    omega = compute_binary_angular_velocity(params)
+    c = math.cos(omega * t)
+    s = math.sin(omega * t)
+
+    sun = (r_sun * omega * s, -r_sun * omega * c)
+    planet = (-r_planet * omega * s, r_planet * omega * c)
+    return sun, planet
+
+
+def mercury_initial_barycentric_state(
+    params: BinarySystemParams,
+    ic: MercuryInitialConditions,
+) -> tuple[float, float, float, float]:
     """
-    Compute acceleration of Mercury due to Sun and Planet.
+    Convert Sun-relative user input to barycentric inertial coordinates.
 
-        xMercSun = xMerc - xSun
-        yMercSun = yMerc - ySun
-        xMercPlanet = xMerc - xPlanet
-        yMercPlanet = yMerc - yPlanet
-
-        rMercSun = sqrt(xMercSun^2 + yMercSun^2)
-        rMercSun3 = rMercSun^3
-        rMercPlanet = sqrt(xMercPlanet^2 + yMercPlanet^2)
-        rMercPlanet3 = rMercPlanet^3
-
-        axMerc = -kGravity * ( mSun * xMercSun / rMercSun3
-                               + mPlanet * xMercPlanet / rMercPlanet3 )
-        ayMerc = -kGravity * ( mSun * yMercSun / rMercSun3
-                               + mPlanet * yMercPlanet / rMercPlanet3 )
+    This keeps the user-facing meaning of x_init, y_init, vx_init, vy_init
+    tied to the Sun while the integration itself is performed in an inertial
+    frame centred on the binary barycentre.
     """
+    validate_binary_params(params)
+    validate_mercury_ic(ic)
+    (x_sun, y_sun), _ = binary_positions(0.0, params)
+    (vx_sun, vy_sun), _ = binary_velocities(0.0, params)
+    return (
+        x_sun + ic.x_init,
+        y_sun + ic.y_init,
+        vx_sun + ic.vx_init,
+        vy_sun + ic.vy_init,
+    )
+
+
+def _primary_displacements(
+    t: float,
+    x_merc: float,
+    y_merc: float,
+    params: BinarySystemParams,
+):
     (x_sun, y_sun), (x_planet, y_planet) = binary_positions(t, params)
 
-    x_merc_sun = x_merc - x_sun
-    y_merc_sun = y_merc - y_sun
-    x_merc_planet = x_merc - x_planet
-    y_merc_planet = y_merc - y_planet
+    dx_sun = x_merc - x_sun
+    dy_sun = y_merc - y_sun
+    dx_planet = x_merc - x_planet
+    dy_planet = y_merc - y_planet
 
-    r_merc_sun = math.sqrt(x_merc_sun ** 2 + y_merc_sun ** 2)
-    r_merc_planet = math.sqrt(x_merc_planet ** 2 + y_merc_planet ** 2)
+    r_sun = math.hypot(dx_sun, dy_sun)
+    r_planet = math.hypot(dx_planet, dy_planet)
 
-    # Avoid division by zero in pathological cases
-    if r_merc_sun == 0.0:
-        r_merc_sun = 1e-30
-    if r_merc_planet == 0.0:
-        r_merc_planet = 1e-30
+    if r_sun == 0.0:
+        raise ValueError(
+            "Mercury has reached the Sun's point-mass position; "
+            "the Newtonian point-mass force is singular there."
+        )
+    if r_planet == 0.0:
+        raise ValueError(
+            "Mercury has reached the companion's point-mass position; "
+            "the Newtonian point-mass force is singular there."
+        )
 
-    r_merc_sun3 = r_merc_sun ** 3
-    r_merc_planet3 = r_merc_planet ** 3
+    return dx_sun, dy_sun, r_sun, dx_planet, dy_planet, r_planet
 
-    kg = k_gravity()
-    m_sun = params.m_sun_solar
-    m_planet = params.m_planet_solar
 
-    ax_merc = -kg * (m_sun * x_merc_sun / r_merc_sun3 +
-                     m_planet * x_merc_planet / r_merc_planet3)
-    ay_merc = -kg * (m_sun * y_merc_sun / r_merc_sun3 +
-                     m_planet * y_merc_planet / r_merc_planet3)
+def distances_to_primaries(
+    t: float,
+    x_merc: float,
+    y_merc: float,
+    params: BinarySystemParams,
+) -> tuple[float, float]:
+    """Return Mercury's distances from the Sun and companion."""
+    _, _, r_sun, _, _, r_planet = _primary_displacements(
+        t, x_merc, y_merc, params
+    )
+    return r_sun, r_planet
 
-    return ax_merc, ay_merc
+
+def mercury_acceleration(
+    t: float,
+    x_merc: float,
+    y_merc: float,
+    params: BinarySystemParams,
+) -> tuple[float, float]:
+    """Newtonian acceleration of Mercury due to both massive bodies."""
+    (
+        dx_sun, dy_sun, r_sun,
+        dx_planet, dy_planet, r_planet,
+    ) = _primary_displacements(t, x_merc, y_merc, params)
+
+    ax = -GM_SUN * (
+        params.m_sun_solar * dx_sun / r_sun ** 3
+        + params.m_planet_solar * dx_planet / r_planet ** 3
+    )
+    ay = -GM_SUN * (
+        params.m_sun_solar * dy_sun / r_sun ** 3
+        + params.m_planet_solar * dy_planet / r_planet ** 3
+    )
+    return ax, ay
+
+
+def jacobi_constant(
+    t: float,
+    x: float,
+    y: float,
+    vx: float,
+    vy: float,
+    params: BinarySystemParams,
+) -> float:
+    """
+    Return the Jacobi constant in SI units (m^2/s^2).
+
+    Coordinates are barycentric inertial coordinates. The inertial velocity is
+    transformed to the frame rotating with the circular binary before applying
+    the usual CR3BP Jacobi integral.
+    """
+    omega = compute_binary_angular_velocity(params)
+    r_sun, r_planet = distances_to_primaries(t, x, y, params)
+
+    # v_rot = v_inertial - omega x r
+    vx_rot = vx + omega * y
+    vy_rot = vy - omega * x
+
+    potential_term = 2.0 * GM_SUN * (
+        params.m_sun_solar / r_sun
+        + params.m_planet_solar / r_planet
+    )
+    centrifugal_term = omega * omega * (x * x + y * y)
+    speed2_rot = vx_rot * vx_rot + vy_rot * vy_rot
+
+    return centrifugal_term + potential_term - speed2_rot

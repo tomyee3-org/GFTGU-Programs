@@ -1,7 +1,5 @@
 """
-MercPert plotting module
-
-Separates plotting from physics and driver logic.
+Plotting for MercPert.
 """
 
 from typing import Literal, Optional
@@ -9,7 +7,7 @@ from typing import Literal, Optional
 import matplotlib.pyplot as plt
 
 from driver_mercpert import MercPertOutput
-from physics_mercpert import MercuryInitialConditions, AU
+from physics_mercpert import AU, MercuryInitialConditions
 
 Corner = Literal["upper right", "upper left", "lower right", "lower left"]
 PositionUnit = Literal["m", "AU"]
@@ -21,9 +19,6 @@ _CORNER_TO_XY = {
     "lower left": dict(x=0.03, y=0.03, ha="left", va="bottom"),
 }
 
-# Legend goes in the corner diagonally opposite wherever the parameter
-# annotation is placed, so the two never overlap regardless of which
-# corner is chosen for the annotation.
 _OPPOSITE_CORNER = {
     "upper right": "lower left",
     "upper left": "lower right",
@@ -32,37 +27,30 @@ _OPPOSITE_CORNER = {
 }
 
 
-def plot_orbits(output: MercPertOutput,
-                title: str = "MercPert orbits",
-                merc_ic: Optional[MercuryInitialConditions] = None,
-                corner: Corner = "upper left",
-                position_unit: PositionUnit = "m") -> None:
+def _validate_display_options(corner: str, position_unit: str) -> None:
+    if corner not in _CORNER_TO_XY:
+        raise ValueError(
+            "corner must be one of: upper right, upper left, "
+            "lower right, lower left."
+        )
+    if position_unit not in ("m", "AU"):
+        raise ValueError('position_unit must be either "m" or "AU".')
+
+
+def plot_orbits(
+    output: MercPertOutput,
+    title: str = "MercPert orbits",
+    merc_ic: Optional[MercuryInitialConditions] = None,
+    corner: Corner = "upper left",
+    position_unit: PositionUnit = "m",
+) -> None:
     """
-    Plot the orbits of Sun, Planet, and Mercury in the x-y plane.
+    Plot barycentric inertial trajectories of the Sun, companion, and Mercury.
 
-    Every figure is rendered at the same physical size and with the same
-    square axes-box shape, regardless of how the trajectory itself is
-    shaped. This uses `adjustable="datalim"` rather than the default `"box"`:
-    "box" would keep x/y data scaled 1:1 by shrinking the *axes box* to
-    match the data's own aspect ratio, and would produce inconsistently
-    sized/shaped plots. Using "datalim" instead keeps the box
-    itself a fixed square and pads the data's shorter axis to fill it,
-    so the box is always the same shape and only the data scale changes.
-
-    If merc_ic is given, the initial position and velocity are annotated
-    directly on the plot (velocity always in m/s; position in whichever
-    unit position_unit selects).
-
-    position_unit : "m" (default) or "AU"
-        All internal physics (in physics_mercpert.py / driver_mercpert.py)
-        works in SI units (meters) regardless of this setting -- this
-        only controls how positions are *displayed*, on both axes and in
-        the position annotation. Since initial positions are commonly
-        specified as "0.65 * AU" etc. in main.py, "AU" can make the plot
-        easier to relate back to the input parameters than the default
-        meters, particularly at solar-system scales where the AU values
-        stay close to 1 rather than needing scientific notation.
+    If merc_ic is supplied, its annotation is explicitly labelled as the
+    Sun-relative initial state, matching the meaning of the user inputs.
     """
+    _validate_display_options(corner, position_unit)
 
     scale = AU if position_unit == "AU" else 1.0
     unit_label = "AU" if position_unit == "AU" else "m"
@@ -70,11 +58,26 @@ def plot_orbits(output: MercPertOutput,
     fig, ax = plt.subplots(figsize=(6, 6))
 
     ax.plot([x / scale for x in output.sun_x],
-            [y / scale for y in output.sun_y], color="red", label="Sun")
+            [y / scale for y in output.sun_y],
+            color="red", label="Sun")
     ax.plot([x / scale for x in output.planet_x],
-            [y / scale for y in output.planet_y], color="green", label="Planet")
+            [y / scale for y in output.planet_y],
+            color="green", label="Companion")
     ax.plot([x / scale for x in output.merc_x],
-            [y / scale for y in output.merc_y], color="blue", label="Mercury")
+            [y / scale for y in output.merc_y],
+            color="blue", label="Mercury")
+
+    if output.collision_body is not None:
+        ax.plot(
+            output.merc_x[-1] / scale,
+            output.merc_y[-1] / scale,
+            marker="x",
+            markersize=9,
+            markeredgewidth=2,
+            color="black",
+            linestyle="none",
+            label=f"Collision: {output.collision_body}",
+        )
 
     ax.set_xlabel(f"x ({unit_label})")
     ax.set_ylabel(f"y ({unit_label})")
@@ -82,24 +85,54 @@ def plot_orbits(output: MercPertOutput,
     ax.legend(loc=_OPPOSITE_CORNER[corner])
     ax.set_aspect("equal", adjustable="datalim")
 
-    # Scientific notation suits meter-scale numbers; AU-scale positions
-    # are already small, human-readable decimals and don't need it.
     if position_unit == "m":
         ax.ticklabel_format(style="sci", axis="both", scilimits=(0, 0))
 
     if merc_ic is not None:
         anchor = _CORNER_TO_XY[corner]
         text = (
-            f"pos: {merc_ic.x_init / scale:.4g}   {merc_ic.y_init / scale:.4g} {unit_label}\n"
-            f"vel: {merc_ic.vx_init:.4g}   {merc_ic.vy_init:.4g} m/s"
+            "initial relative to Sun:\n"
+            f"pos: {merc_ic.x_init / scale:.4g}   "
+            f"{merc_ic.y_init / scale:.4g} {unit_label}\n"
+            f"vel: {merc_ic.vx_init:.4g}   "
+            f"{merc_ic.vy_init:.4g} m/s"
         )
         ax.annotate(
             text,
-            xy=(anchor["x"], anchor["y"]), xycoords="axes fraction",
-            ha=anchor["ha"], va=anchor["va"],
-            fontsize=9, family="monospace", fontweight="bold",
-            bbox=dict(boxstyle="round", facecolor="white", edgecolor="gray", alpha=0.9),
+            xy=(anchor["x"], anchor["y"]),
+            xycoords="axes fraction",
+            ha=anchor["ha"],
+            va=anchor["va"],
+            fontsize=9,
+            family="monospace",
+            fontweight="bold",
+            bbox=dict(
+                boxstyle="round",
+                facecolor="white",
+                edgecolor="gray",
+                alpha=0.9,
+            ),
         )
 
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_jacobi_drift(output: MercPertOutput) -> None:
+    """Plot fractional drift of the Jacobi constant as an accuracy diagnostic."""
+    if not output.jacobi:
+        raise ValueError("No Jacobi data are available.")
+
+    c0 = output.jacobi[0]
+    scale = abs(c0) if c0 != 0.0 else 1.0
+    drift = [(c - c0) / scale for c in output.jacobi]
+    days = [t / 86400.0 for t in output.times]
+
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    ax.plot(days, drift)
+    ax.set_xlabel("time (days)")
+    ax.set_ylabel(r"$(C-C_0)/|C_0|$")
+    ax.set_title("MercPert Jacobi-constant drift")
+    ax.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.show()

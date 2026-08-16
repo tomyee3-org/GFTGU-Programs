@@ -1,27 +1,35 @@
 """
-MercPert driver module
-
-Implements an explicit integrator with
-time-step halving and a simple predictor-corrector
+Integration driver for MercPert.
 """
 
 from dataclasses import dataclass
-from typing import List, Dict
+from math import hypot, isfinite
+from typing import List, Optional
 
 from physics_mercpert import (
     BinarySystemParams,
     MercuryInitialConditions,
-    mercury_acceleration,
     binary_positions,
+    distances_to_primaries,
+    jacobi_constant,
+    mercury_acceleration,
+    mercury_initial_barycentric_state,
+    validate_binary_params,
+    validate_mercury_ic,
 )
 
 
-@dataclass
+@dataclass(frozen=True)
 class MercPertRunParams:
-    dt: float          # initial time-step (s)
-    max_steps: int     # maximum number of steps
-    eps1: float        # accuracy parameter for time-step halving
-    eps2: float        # accuracy parameter for predictor-corrector
+    dt: float
+    max_steps: int
+    eps1: float
+    eps2: float
+
+    # Optional finite-radius stopping surfaces. A value of 0 disables the
+    # corresponding collision test.
+    sun_collision_radius: float = 0.0
+    companion_collision_radius: float = 0.0
 
 
 @dataclass
@@ -33,31 +41,72 @@ class MercPertOutput:
     planet_y: List[float]
     merc_x: List[float]
     merc_y: List[float]
+    merc_vx: List[float]
+    merc_vy: List[float]
+    jacobi: List[float]
+    dt_used: List[float]
+    accepted_steps: int
+    termination_reason: str
+    collision_body: Optional[str] = None
 
 
-def run_mercpert(binary_params: BinarySystemParams,
-                 merc_ic: MercuryInitialConditions,
-                 run_params: MercPertRunParams) -> MercPertOutput:
+def _vector_relative_change(
+    old_x: float,
+    old_y: float,
+    new_x: float,
+    new_y: float,
+) -> float:
+    """Dimensionless relative change of a two-dimensional vector."""
+    change = hypot(new_x - old_x, new_y - old_y)
+    scale = max(hypot(old_x, old_y), hypot(new_x, new_y))
+    return 0.0 if scale == 0.0 else change / scale
+
+
+def _validate_run_params(run: MercPertRunParams) -> None:
+    if not isfinite(run.dt) or run.dt <= 0.0:
+        raise ValueError("dt must be a positive finite number.")
+    if not isinstance(run.max_steps, int) or isinstance(run.max_steps, bool) or run.max_steps <= 0:
+        raise ValueError("max_steps must be a positive integer.")
+    if not isfinite(run.eps1) or not (0.0 < run.eps1 < 1.0):
+        raise ValueError("eps1 must satisfy 0 < eps1 < 1.")
+    if not isfinite(run.eps2) or not (0.0 < run.eps2 < 1.0):
+        raise ValueError("eps2 must satisfy 0 < eps2 < 1.")
+    if run.eps2 >= run.eps1:
+        raise ValueError("eps2 should be smaller than eps1.")
+    for name, value in (
+        ("sun_collision_radius", run.sun_collision_radius),
+        ("companion_collision_radius", run.companion_collision_radius),
+    ):
+        if not isfinite(value) or value < 0.0:
+            raise ValueError(f"{name} must be finite and non-negative.")
+
+
+def run_mercpert(
+    binary_params: BinarySystemParams,
+    merc_ic: MercuryInitialConditions,
+    run_params: MercPertRunParams,
+) -> MercPertOutput:
     """
-    Main driver for MercPert.
+    Integrate Mercury's motion in the planar circular restricted three-body problem.
 
-    - Uses dt1 as working time-step, halved when fractional changes
-      exceed eps1.
-    - Uses a simple predictor-corrector iteration controlled by eps2.
-    - Does NOT stop on completion of an orbit; runs until max_steps.
+    User-supplied Mercury initial conditions are Sun-relative; they are converted
+    once to barycentric inertial coordinates before integration.
+
+    The calculation always stops after max_steps accepted steps unless a configured
+    finite-radius collision surface is reached first.
     """
+    validate_binary_params(binary_params)
+    validate_mercury_ic(merc_ic)
+    _validate_run_params(run_params)
 
-    dt1 = run_params.dt
-    max_steps = run_params.max_steps
-    eps1 = run_params.eps1
-    eps2 = run_params.eps2
-
-    # Initial state of Mercury
     t = 0.0
-    x_merc = merc_ic.x_init
-    y_merc = merc_ic.y_init
-    vx_merc = merc_ic.vx_init
-    vy_merc = merc_ic.vy_init
+    x_merc, y_merc, vx_merc, vy_merc = mercury_initial_barycentric_state(
+        binary_params, merc_ic
+    )
+
+    dt_work = run_params.dt
+    max_corrector_iterations = 10
+    max_retries_per_step = 80
 
     times: List[float] = []
     sun_x: List[float] = []
@@ -66,82 +115,136 @@ def run_mercpert(binary_params: BinarySystemParams,
     planet_y: List[float] = []
     merc_x: List[float] = []
     merc_y: List[float] = []
+    merc_vx: List[float] = []
+    merc_vy: List[float] = []
+    jacobi: List[float] = []
+    dt_used: List[float] = []
 
-    for step in range(max_steps):
-        # Record current positions. This happens exactly once per
-        # accepted step -- rejected attempts inside the retry loop below
-        # never reach this point again, so they are never logged and
-        # never consume the max_steps budget.
-        (x_sun, y_sun), (x_planet, y_planet) = binary_positions(t, binary_params)
-
+    def record_state(step_dt: float) -> None:
+        (xs, ys), (xp, yp) = binary_positions(t, binary_params)
         times.append(t)
-        sun_x.append(x_sun)
-        sun_y.append(y_sun)
-        planet_x.append(x_planet)
-        planet_y.append(y_planet)
+        sun_x.append(xs)
+        sun_y.append(ys)
+        planet_x.append(xp)
+        planet_y.append(yp)
         merc_x.append(x_merc)
         merc_y.append(y_merc)
+        merc_vx.append(vx_merc)
+        merc_vy.append(vy_merc)
+        jacobi.append(
+            jacobi_constant(t, x_merc, y_merc, vx_merc, vy_merc, binary_params)
+        )
+        dt_used.append(step_dt)
 
-        # Compute acceleration at current state
-        ax0, ay0 = mercury_acceleration(t, x_merc, y_merc, binary_params)
+    def collision_at_state() -> Optional[str]:
+        r_sun, r_planet = distances_to_primaries(
+            t, x_merc, y_merc, binary_params
+        )
+        if run_params.sun_collision_radius > 0.0 and r_sun <= run_params.sun_collision_radius:
+            return "Sun"
+        if (
+            run_params.companion_collision_radius > 0.0
+            and r_planet <= run_params.companion_collision_radius
+        ):
+            return "companion"
+        return None
 
-        while True:
-            # Predictor step: simple Euler
-            x_pred = x_merc + vx_merc * dt1
-            y_pred = y_merc + vy_merc * dt1
-            vx_pred = vx_merc + ax0 * dt1
-            vy_pred = vy_merc + ay0 * dt1
+    # Initial sample. dt_used=0 identifies the starting point.
+    record_state(0.0)
+    initial_collision = collision_at_state()
+    if initial_collision is not None:
+        return MercPertOutput(
+            times, sun_x, sun_y, planet_x, planet_y,
+            merc_x, merc_y, merc_vx, merc_vy, jacobi, dt_used,
+            accepted_steps=0,
+            termination_reason=f"collision with {initial_collision}",
+            collision_body=initial_collision,
+        )
 
-            # Corrector iteration: average accelerations over the step
-            # until fractional change is below eps2
-            x_new = x_pred
-            y_new = y_pred
-            vx_new = vx_pred
-            vy_new = vy_pred
+    accepted_steps = 0
+    termination_reason = "max_steps reached"
+    collision_body: Optional[str] = None
 
-            for _ in range(10):  # modest cap on iterations
-                ax1, ay1 = mercury_acceleration(t + dt1, x_new, y_new, binary_params)
+    while accepted_steps < run_params.max_steps:
+        ax0, ay0 = mercury_acceleration(
+            t, x_merc, y_merc, binary_params
+        )
 
-                vx_corr = vx_merc + 0.5 * (ax0 + ax1) * dt1
-                vy_corr = vy_merc + 0.5 * (ay0 + ay1) * dt1
-                x_corr = x_merc + 0.5 * (vx_merc + vx_corr) * dt1
-                y_corr = y_merc + 0.5 * (vy_merc + vy_corr) * dt1
+        accepted = False
 
-                # Check fractional changes
-                dvx_frac = abs(vx_corr - vx_new) / max(abs(vx_corr), 1e-30)
-                dvy_frac = abs(vy_corr - vy_new) / max(abs(vy_corr), 1e-30)
-                dx_frac = abs(x_corr - x_new) / max(abs(x_corr), 1e-30)
-                dy_frac = abs(y_corr - y_new) / max(abs(y_corr), 1e-30)
+        for _retry in range(max_retries_per_step):
+            # Euler predictor, used as the inexpensive eps1 accuracy gate.
+            x_pred = x_merc + vx_merc * dt_work
+            y_pred = y_merc + vy_merc * dt_work
+            vx_pred = vx_merc + ax0 * dt_work
+            vy_pred = vy_merc + ay0 * dt_work
+
+            ax_pred, ay_pred = mercury_acceleration(
+                t + dt_work, x_pred, y_pred, binary_params
+            )
+
+            acc_change = _vector_relative_change(
+                ax0, ay0, ax_pred, ay_pred
+            )
+            if acc_change > run_params.eps1:
+                dt_work *= 0.5
+                continue
+
+            # Iterated trapezoidal corrector.
+            x_new, y_new = x_pred, y_pred
+            vx_new, vy_new = vx_pred, vy_pred
+            ax1, ay1 = ax_pred, ay_pred
+            converged = False
+
+            for _ in range(max_corrector_iterations):
+                vx_corr = vx_merc + 0.5 * (ax0 + ax1) * dt_work
+                vy_corr = vy_merc + 0.5 * (ay0 + ay1) * dt_work
+                x_corr = x_merc + 0.5 * (vx_merc + vx_corr) * dt_work
+                y_corr = y_merc + 0.5 * (vy_merc + vy_corr) * dt_work
+
+                velocity_change = _vector_relative_change(
+                    vx_new, vy_new, vx_corr, vy_corr
+                )
 
                 x_new, y_new = x_corr, y_corr
                 vx_new, vy_new = vx_corr, vy_corr
 
-                if max(dvx_frac, dvy_frac, dx_frac, dy_frac) < eps2:
+                if velocity_change < run_params.eps2:
+                    converged = True
                     break
 
-            # Time-step halving if changes are too large. A rejection
-            # here only shrinks dt1 and loops back to retry the SAME
-            # step; it does not touch the output lists and does not
-            # advance `step`.
-            dvx_frac0 = abs(vx_new - vx_merc) / max(abs(vx_new), 1e-30)
-            dvy_frac0 = abs(vy_new - vy_merc) / max(abs(vy_new), 1e-30)
-            dx_frac0 = abs(x_new - x_merc) / max(abs(x_new), 1e-30)
-            dy_frac0 = abs(y_new - y_merc) / max(abs(y_new), 1e-30)
+                ax1, ay1 = mercury_acceleration(
+                    t + dt_work, x_new, y_new, binary_params
+                )
 
-            if max(dvx_frac0, dvy_frac0, dx_frac0, dy_frac0) > eps1:
-                dt1 *= 0.5
-                continue  # retry the SAME step with a smaller dt1
+            if not converged:
+                dt_work *= 0.5
+                continue
 
-            break  # step accepted; leave the retry loop
+            accepted = True
+            break
 
-        # Accept step
-        t += dt1
+        if not accepted:
+            raise RuntimeError(
+                "MercPert could not find a converged timestep after "
+                f"{max_retries_per_step} retries. Try a smaller dt or less "
+                "extreme initial conditions."
+            )
+
+        # Accept and RECORD the endpoint, eliminating the previous off-by-one.
+        t += dt_work
         x_merc, y_merc = x_new, y_new
         vx_merc, vy_merc = vx_new, vy_new
+        accepted_steps += 1
+        record_state(dt_work)
 
-        # Let the step size grow back towards the user's requested dt
-        # now that we know the last step was well-behaved.
-        dt1 = min(dt1 * 1.1, run_params.dt)
+        collision_body = collision_at_state()
+        if collision_body is not None:
+            termination_reason = f"collision with {collision_body}"
+            break
+
+        # Recover gradually toward the user-specified maximum timestep.
+        dt_work = min(dt_work * 1.1, run_params.dt)
 
     return MercPertOutput(
         times=times,
@@ -151,4 +254,11 @@ def run_mercpert(binary_params: BinarySystemParams,
         planet_y=planet_y,
         merc_x=merc_x,
         merc_y=merc_y,
+        merc_vx=merc_vx,
+        merc_vy=merc_vy,
+        jacobi=jacobi,
+        dt_used=dt_used,
+        accepted_steps=accepted_steps,
+        termination_reason=termination_reason,
+        collision_body=collision_body,
     )
