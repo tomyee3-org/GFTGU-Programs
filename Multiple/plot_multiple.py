@@ -118,15 +118,25 @@ def animate_multiple(result: Dict[str, Any]):
     def _auto_limits(i):
         if axis_mode != "auto":
             return
+
         start = max(0, i - trail_frames) if mode == "trails" else i
         visible = projected[start:i + 1]
-        x, y = visible[..., 0], visible[..., 1]
+
+        x = visible[..., 0]
+        y = visible[..., 1]
         xmin, xmax = float(np.min(x)), float(np.max(x))
         ymin, ymax = float(np.min(y)), float(np.max(y))
+
+        # Use ONE span for both axes. This preserves a true 1:1 spatial scale
+        # while the viewing window zooms in or out.
         span = max(xmax - xmin, ymax - ymin, 1.0)
-        pad = 0.10 * span
-        ax.set_xlim(xmin - pad, xmax + pad)
-        ax.set_ylim(ymin - pad, ymax + pad)
+        half = 0.60 * span   # 10% margin on each side of the larger extent
+
+        xmid = 0.5 * (xmin + xmax)
+        ymid = 0.5 * (ymin + ymax)
+
+        ax.set_xlim(xmid - half, xmid + half)
+        ax.set_ylim(ymid - half, ymid + half)
 
     def draw_frame(i):
         i = max(0, min(n_frames - 1, int(i)))
