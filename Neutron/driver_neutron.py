@@ -1,93 +1,181 @@
 """
-Driver module for Neutron star structure.
+Driver for Neutron star structure.
 
-Implements:
-- initial special step at r = dr
-- loop until pressure becomes negative
-- automatic doubling of dr if surface not reached within 2000 steps
+The solver integrates the coupled TOV pressure equation and mass equation with
+classical fourth-order Runge-Kutta (RK4). The radial grid grows dynamically;
+there is no 2000-point array limit and no resolution-degrading step doubling.
+
+The stellar surface is located by shortening the final step and interpolating
+to p=0.
 """
 
+from __future__ import annotations
+
 import math
-from physics_neutron import eos_density, tov_pressure_step, mass_step, G
 
-def compute_neutron_star(gamma, pC, K):
-    """
-    Returns structured output:
-    {
-        "radius": [...],
-        "pressure": [...],
-        "density": [...],
-        "mass": [...],
-        "last_step": N
-    }
-    """
+from physics_neutron import (
+    C2,
+    G,
+    M_SUN,
+    central_state,
+    eos_density,
+    rk4_step,
+    structure_derivatives,
+)
 
-    gammaRecip = 1.0 / gamma
-    rhoC = (pC / K) ** gammaRecip
+
+def _validate_inputs(
+    gamma: float,
+    pC: float,
+    K: float,
+    steps_per_scale: int,
+    max_steps: int,
+) -> None:
+    if not math.isfinite(gamma) or gamma <= 1.0:
+        raise ValueError("gamma must be finite and greater than 1.")
+    if not math.isfinite(pC) or pC <= 0.0:
+        raise ValueError("pC must be a positive finite pressure.")
+    if not math.isfinite(K) or K <= 0.0:
+        raise ValueError("K must be positive and finite.")
+    if (
+        not isinstance(steps_per_scale, int)
+        or isinstance(steps_per_scale, bool)
+        or steps_per_scale < 50
+    ):
+        raise ValueError("steps_per_scale must be an integer of at least 50.")
+    if (
+        not isinstance(max_steps, int)
+        or isinstance(max_steps, bool)
+        or max_steps < 100
+    ):
+        raise ValueError("max_steps must be an integer of at least 100.")
+
+
+def compute_neutron_star(
+    gamma: float,
+    pC: float,
+    K: float,
+    *,
+    steps_per_scale: int = 400,
+    max_steps: int = 200_000,
+) -> dict:
+    """
+    Compute a static polytropic TOV model.
+
+    Returns pressure, density, enclosed gravitational mass, and radius arrays,
+    plus a compact summary of the resulting model.
+    """
+    _validate_inputs(gamma, pC, K, steps_per_scale, max_steps)
+
+    rhoC = eos_density(pC, K, gamma)
     scale = math.sqrt(pC / G) / rhoC
-    dr = scale / 400.0
+    dr_nominal = scale / float(steps_per_scale)
 
-    # Allocate arrays
-    NMAX = 2000
-    radius = [0.0] * NMAX
-    pressure = [0.0] * NMAX
-    density = [0.0] * NMAX
-    mass = [0.0] * NMAX
+    # Start slightly away from the coordinate singularity at r=0 using the
+    # regular central series.
+    r = dr_nominal
+    p, rho, m = central_state(pC, K, gamma, r)
 
-    # Initial values
-    radius[0] = 0.0
-    pressure[0] = pC
-    density[0] = rhoC
-    mass[0] = 0.0
+    radius = [0.0, r]
+    pressure = [pC, p]
+    density = [rhoC, rho]
+    mass = [0.0, m]
 
-    lastStep = 0
+    min_step = dr_nominal / (2.0 ** 24)
 
-    # Outer loop: repeat with larger dr if needed
-    while lastStep == 0:
-
-        # First non-zero step (special approximation)
-        radius[1] = dr
-        pressure[1] = pC
-        density[1] = rhoC
-        mass[1] = 4.0 * math.pi * dr**3 * rhoC / 3.0
-
-        # Main loop
-        for j in range(2, NMAX):
-            radius[j] = radius[j-1] + dr
-
-            # Hydrostatic equilibrium (relativistic)
-            pressure[j] = tov_pressure_step(
-                pressure[j-1],
-                density[j-1],
-                mass[j-1],
-                radius[j-1],
-                dr
+    for _ in range(max_steps):
+        # If a first-order estimate reaches the surface within this nominal
+        # step, locate p=0 directly using the local TOV slope. This avoids
+        # evaluating the polytropic EOS at negative pressure.
+        dpdr, dmdr = structure_derivatives(r, p, m, K, gamma)
+        if dpdr >= 0.0:
+            raise RuntimeError(
+                "Pressure stopped decreasing outward; the requested polytropic "
+                "model is outside the regime expected by this solver."
             )
 
-            # Stop when pressure becomes negative
-            if pressure[j] < 0.0:
-                lastStep = j
-                break
+        h_surface = -p / dpdr
+        if 0.0 < h_surface <= dr_nominal:
+            r_surface = r + h_surface
+            m_surface = m + dmdr * h_surface
 
-            # Mass update
-            mass[j] = mass_step(
-                mass[j-1],
-                density[j-1],
-                radius[j-1],
-                dr
+            radius.append(r_surface)
+            pressure.append(0.0)
+            density.append(0.0)
+            mass.append(m_surface)
+            break
+
+        # Normal RK4 step. If an intermediate stage crosses p=0, shorten the
+        # trial step until all stages remain within the fluid.
+        h = dr_nominal
+        while True:
+            if h < min_step:
+                raise RuntimeError(
+                    "Could not resolve the stellar surface with a positive "
+                    "pressure RK4 step."
+                )
+            try:
+                p_new, m_new = rk4_step(r, p, m, h, K, gamma)
+            except ValueError:
+                h *= 0.5
+                continue
+            break
+
+        if p_new <= 0.0:
+            # This should be rare because the local surface estimate above
+            # usually catches the crossing. Interpolate conservatively.
+            fraction = p / (p - p_new)
+            r_surface = r + fraction * h
+            m_surface = m + fraction * (m_new - m)
+            radius.append(r_surface)
+            pressure.append(0.0)
+            density.append(0.0)
+            mass.append(m_surface)
+            break
+
+        r += h
+        p = p_new
+        m = m_new
+        rho = eos_density(p, K, gamma)
+
+        radius.append(r)
+        pressure.append(p)
+        density.append(rho)
+        mass.append(m)
+
+        compactness = 2.0 * G * m / (r * C2)
+        if compactness >= 1.0:
+            raise RuntimeError(
+                "The integration reached 2Gm/(rc^2) >= 1 before p=0. "
+                "No regular static stellar surface was found."
             )
+    else:
+        raise RuntimeError(
+            f"The stellar surface was not reached within {max_steps} radial "
+            "steps. Increase max_steps or reconsider the model parameters."
+        )
 
-            # EOS update
-            density[j] = eos_density(pressure[j], K, gamma)
+    R = radius[-1]
+    M = mass[-1]
+    compactness = 2.0 * G * M / (R * C2)
+    buchdahl_ratio = compactness  # Buchdahl requires 2GM/(Rc^2) <= 8/9.
 
-        # If surface not reached, double dr and repeat
-        dr *= 2.0
-
-    # Trim arrays to lastStep
     return {
-        "radius": radius[:lastStep],
-        "pressure": pressure[:lastStep],
-        "density": density[:lastStep],
-        "mass": mass[:lastStep],
-        "last_step": lastStep
+        "radius": radius,
+        "pressure": pressure,
+        "density": density,
+        "mass": mass,
+        "last_step": len(radius) - 1,
+        "gamma": gamma,
+        "pC": pC,
+        "K": K,
+        "rhoC": rhoC,
+        "scale": scale,
+        "dr_nominal": dr_nominal,
+        "surface_radius_m": R,
+        "surface_radius_km": R / 1000.0,
+        "total_mass_kg": M,
+        "total_mass_solar": M / M_SUN,
+        "compactness": compactness,
+        "buchdahl_satisfied": buchdahl_ratio <= (8.0 / 9.0),
     }
