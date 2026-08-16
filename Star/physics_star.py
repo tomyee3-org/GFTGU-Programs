@@ -1,91 +1,108 @@
 """
-Physical laws for the Star program (polytropic stellar structure)
+Physical relations for the Star program.
 
-This module encodes the physical relations used to model a spherically
-symmetric star with a polytropic equation of state. The only literal
-numbers here represent physical constants.
+The model is a spherically symmetric Newtonian polytrope.  Central density
+is fixed from the ideal-gas relation, the pressure-density relation is then
+held to one polytropic law throughout the star, and hydrostatic equilibrium
+and enclosed mass are integrated outward.
 """
 
-# Physical constants in SI units
-k_BOLTZMANN = 1.38e-23      # Boltzmann constant [J/K]
-MPROTON = 1.67e-27          # Proton mass [kg]
-G_NEWTON = 6.672e-11        # Newton's gravitational constant [m^3 kg^-1 s^-2]
+from math import pi, sqrt
+
+# Physical constants in SI units.  These values are retained from the
+# educational model so that its default results remain consistent with the
+# accompanying material.
+k_BOLTZMANN = 1.38e-23      # J/K
+MPROTON = 1.67e-27          # kg
+G_NEWTON = 6.672e-11        # m^3 kg^-1 s^-2
 
 
 def q_factor(mu: float) -> float:
-    """
-    Combination of constants in the ideal gas law:
-        p = rho * k_BOLTZMANN * T / (MPROTON * mu)
-    so q = MPROTON * mu / k_BOLTZMANN.
-    """
+    """Return m_p * mu / k_B for the ideal-gas relation."""
+    if mu <= 0.0:
+        raise ValueError("mu must be positive.")
     return MPROTON * mu / k_BOLTZMANN
 
 
 def central_density(p_c: float, T_c: float, mu: float) -> float:
-    """
-    Compute central density from central pressure and temperature
-    using the ideal gas law.
-    """
-    q = q_factor(mu)
-    return p_c * q / T_c
+    """Compute central density from central pressure and temperature."""
+    if p_c <= 0.0:
+        raise ValueError("p_c must be positive.")
+    if T_c <= 0.0:
+        raise ValueError("T_c must be positive.")
+    return p_c * q_factor(mu) / T_c
 
 
 def polytropic_D(rho_c: float, p_c: float, gamma: float) -> float:
-    """
-    Proportionality factor in the polytropic equation of state
-    written as:
-        rho = D * p^(1/gamma)
-    determined by demanding that the polytropic law reproduce
-    the central density.
-    """
-    gamma_recip = 1.0 / gamma
-    return rho_c / (p_c ** gamma_recip)
+    """Return D in rho = D * p**(1/gamma), fixed by central conditions."""
+    if rho_c <= 0.0:
+        raise ValueError("rho_c must be positive.")
+    if p_c <= 0.0:
+        raise ValueError("p_c must be positive.")
+    if gamma <= 1.2:
+        raise ValueError("gamma must be greater than 1.2 for a finite-radius polytrope.")
+    return rho_c / (p_c ** (1.0 / gamma))
 
 
-def scale_height(p_c: float, rho_c: float) -> float:
+def radial_scale(p_c: float, rho_c: float) -> float:
     """
-    Approximate pressure scale height:
-        scale ~ sqrt(p_c / G_NEWTON) / rho_c
-    roughly the distance over which the pressure falls by a factor of ~2.
+    Return the characteristic radial scale used to choose the integration step:
+
+        scale = sqrt(p_c / G) / rho_c
+
+    This is a dimensional scale for the model, not a literal local pressure
+    scale height at the stellar center (where dp/dr tends to zero).
     """
-    from math import sqrt
+    if p_c <= 0.0:
+        raise ValueError("p_c must be positive.")
+    if rho_c <= 0.0:
+        raise ValueError("rho_c must be positive.")
     return sqrt(p_c / G_NEWTON) / rho_c
+
+
+# Backward-compatible name retained for callers of the earlier Python version.
+def scale_height(p_c: float, rho_c: float) -> float:
+    return radial_scale(p_c, rho_c)
 
 
 def hydrostatic_step(p_prev: float, rho_prev: float,
                      mass_prev: float, r_prev: float, dr: float) -> float:
-    """
-    One step of the hydrostatic equilibrium equation:
-        dp/dr = - G_NEWTON * rho * m(r) / r^2
-    implemented in finite-difference form.
-    """
+    """One forward-Euler step of dp/dr = -G rho m(r) / r^2."""
+    if r_prev <= 0.0:
+        raise ValueError("r_prev must be positive in hydrostatic_step().")
+    if dr <= 0.0:
+        raise ValueError("dr must be positive.")
     return p_prev - G_NEWTON * rho_prev * mass_prev * dr / (r_prev * r_prev)
 
 
 def mass_step(mass_prev: float, r_prev: float, rho_prev: float, dr: float) -> float:
-    """
-    Update the mass interior to radius r by adding the mass of a shell:
-        dm = 4 * pi * r^2 * rho * dr
-    """
-    from math import pi
+    """One forward-Euler step of dm/dr = 4*pi*r^2*rho."""
+    if r_prev < 0.0:
+        raise ValueError("r_prev must not be negative.")
+    if rho_prev < 0.0:
+        raise ValueError("rho_prev must not be negative.")
+    if dr <= 0.0:
+        raise ValueError("dr must be positive.")
     return mass_prev + 4.0 * pi * r_prev * r_prev * rho_prev * dr
 
 
 def density_from_pressure(p: float, D: float, gamma: float) -> float:
-    """
-    Polytropic equation of state:
-        rho = D * p^(1/gamma)
-    """
-    from math import pow
-    gamma_recip = 1.0 / gamma
-    return D * pow(p, gamma_recip)
+    """Polytropic equation of state rho = D * p**(1/gamma)."""
+    if p < 0.0:
+        raise ValueError("p must not be negative when computing density.")
+    if D <= 0.0:
+        raise ValueError("D must be positive.")
+    if gamma <= 1.2:
+        raise ValueError("gamma must be greater than 1.2 for a finite-radius polytrope.")
+    return D * (p ** (1.0 / gamma))
 
 
 def temperature_from_prho(p: float, rho: float, mu: float) -> float:
-    """
-    Ideal gas law written as:
-        T = p / (rho * k_BOLTZMANN / (MPROTON * mu))
-          = p / (rho / q_factor(mu))
-    """
-    q = q_factor(mu)
-    return q * p / rho
+    """Recover temperature from the ideal-gas relation T = q*p/rho."""
+    if p < 0.0:
+        raise ValueError("p must not be negative when computing temperature.")
+    if rho <= 0.0:
+        if p == 0.0 and rho == 0.0:
+            return 0.0
+        raise ValueError("rho must be positive when p is positive.")
+    return q_factor(mu) * p / rho

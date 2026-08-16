@@ -1,20 +1,11 @@
-"""
-Plotting routines for the Star program.
-
-This module takes the structured output from driver.integrate_star
-and produces graphs of stellar structure using matplotlib.
-"""
+"""Plotting routines for the Star program."""
 
 import matplotlib.pyplot as plt
-
 from driver_star import StarResult
 
 
-def plot_star_structure(result: StarResult):
-    """
-    Plot the chosen quantity versus radius.
-    """
-    radius = result.radius
+def plot_star_structure(result: StarResult, log_y: bool = False):
+    """Plot the selected stellar quantity versus radius."""
     output_type = result.output_type
 
     if output_type == "pressure":
@@ -33,10 +24,24 @@ def plot_star_structure(result: StarResult):
         raise ValueError(f"Unknown output_type: {output_type}")
 
     fig, ax = plt.subplots()
-    ax.plot(radius, y)
+
+    # A logarithmic axis cannot display the exact zero at the interpolated
+    # stellar surface, so omit only that final zero-valued point when needed.
+    if log_y:
+        if output_type == "mass":
+            raise ValueError("log_y is not useful for mass because m(0) = 0.")
+        pairs = [(r, val) for r, val in zip(result.radius, y) if val > 0.0]
+        if not pairs:
+            raise ValueError("No positive values are available for a logarithmic plot.")
+        x_plot, y_plot = zip(*pairs)
+        ax.plot(x_plot, y_plot)
+        ax.set_yscale("log")
+    else:
+        ax.plot(result.radius, y)
+
     ax.set_xlabel("Radius [m]")
     ax.set_ylabel(ylabel)
     ax.set_title(f"Stellar structure: {output_type} vs radius")
-    ax.grid(True)
+    ax.grid(True, which="both" if log_y else "major")
     plt.tight_layout()
     plt.show()
