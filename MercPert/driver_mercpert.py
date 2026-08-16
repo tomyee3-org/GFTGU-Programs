@@ -4,6 +4,7 @@ Integration driver for MercPert.
 
 from dataclasses import dataclass
 from math import hypot, isfinite
+import math
 from typing import List, Optional
 
 from physics_mercpert import (
@@ -60,6 +61,56 @@ def _vector_relative_change(
     change = hypot(new_x - old_x, new_y - old_y)
     scale = max(hypot(old_x, old_y), hypot(new_x, new_y))
     return 0.0 if scale == 0.0 else change / scale
+
+
+def _moving_circle_crossing_fraction(
+    particle_start: tuple[float, float],
+    particle_end: tuple[float, float],
+    primary_start: tuple[float, float],
+    primary_end: tuple[float, float],
+    radius: float,
+) -> Optional[float]:
+    """
+    Return the first fraction s in [0, 1] at which an accepted particle
+    segment crosses a moving circular collision boundary.
+
+    Over one accepted timestep, both the particle and the primary are
+    represented by the straight segment joining their endpoint positions.
+    Equivalently, the relative displacement is linear in s.  Near a close
+    encounter the adaptive timestep is already reduced, so this is a much
+    stronger collision test than checking accepted endpoints alone.
+    """
+    if radius <= 0.0:
+        return None
+
+    rx0 = particle_start[0] - primary_start[0]
+    ry0 = particle_start[1] - primary_start[1]
+    rx1 = particle_end[0] - primary_end[0]
+    ry1 = particle_end[1] - primary_end[1]
+
+    # Already inside/on the boundary.
+    c = rx0 * rx0 + ry0 * ry0 - radius * radius
+    if c <= 0.0:
+        return 0.0
+
+    dx = rx1 - rx0
+    dy = ry1 - ry0
+    a = dx * dx + dy * dy
+    if a == 0.0:
+        return None
+
+    b = 2.0 * (rx0 * dx + ry0 * dy)
+    disc = b * b - 4.0 * a * c
+    if disc < 0.0:
+        return None
+
+    root = math.sqrt(disc)
+    roots = (
+        (-b - root) / (2.0 * a),
+        (-b + root) / (2.0 * a),
+    )
+    valid = [s for s in roots if 0.0 <= s <= 1.0]
+    return min(valid) if valid else None
 
 
 def _validate_run_params(run: MercPertRunParams) -> None:
@@ -231,17 +282,57 @@ def run_mercpert(
                 "extreme initial conditions."
             )
 
-        # Accept and RECORD the endpoint, eliminating the previous off-by-one.
+        # Before committing the accepted endpoint, test the entire accepted
+        # segment against each moving finite-radius primary.  Endpoint-only
+        # testing can miss a fast crossing that begins and ends outside a star.
+        t_start = t
+        particle_start = (x_merc, y_merc)
+        particle_end = (x_new, y_new)
+        sun_start, companion_start = binary_positions(t_start, binary_params)
+        sun_end, companion_end = binary_positions(t_start + dt_work, binary_params)
+
+        crossing_candidates = []
+        s_sun = _moving_circle_crossing_fraction(
+            particle_start,
+            particle_end,
+            sun_start,
+            sun_end,
+            run_params.sun_collision_radius,
+        )
+        if s_sun is not None:
+            crossing_candidates.append((s_sun, "Sun"))
+
+        s_companion = _moving_circle_crossing_fraction(
+            particle_start,
+            particle_end,
+            companion_start,
+            companion_end,
+            run_params.companion_collision_radius,
+        )
+        if s_companion is not None:
+            crossing_candidates.append((s_companion, "companion"))
+
+        if crossing_candidates:
+            s_hit, collision_body = min(crossing_candidates, key=lambda item: item[0])
+
+            # Stop at the first boundary crossing. Linear interpolation here is
+            # consistent with the segment used by the event detector.
+            t += s_hit * dt_work
+            x_merc += s_hit * (x_new - x_merc)
+            y_merc += s_hit * (y_new - y_merc)
+            vx_merc += s_hit * (vx_new - vx_merc)
+            vy_merc += s_hit * (vy_new - vy_merc)
+            accepted_steps += 1
+            record_state(s_hit * dt_work)
+            termination_reason = f"collision with {collision_body}"
+            break
+
+        # No collision: accept and record the full endpoint.
         t += dt_work
         x_merc, y_merc = x_new, y_new
         vx_merc, vy_merc = vx_new, vy_new
         accepted_steps += 1
         record_state(dt_work)
-
-        collision_body = collision_at_state()
-        if collision_body is not None:
-            termination_reason = f"collision with {collision_body}"
-            break
 
         # Recover gradually toward the user-specified maximum timestep.
         dt_work = min(dt_work * 1.1, run_params.dt)

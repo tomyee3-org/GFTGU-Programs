@@ -35,7 +35,7 @@ def main():
 
     run_params = MercPertRunParams(
         dt=2000.0,
-        max_steps=400000,
+        max_steps=10000,
         eps1=0.05,
         eps2=0.0001,
 
@@ -67,6 +67,7 @@ def main():
         output,
         title="MercPert orbits",
         merc_ic=merc_ic,
+        binary_params=binary_params,
         corner=annotation_corner,
         position_unit=position_unit,
     )

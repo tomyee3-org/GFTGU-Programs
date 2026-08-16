@@ -3,11 +3,12 @@ Plotting for MercPert.
 """
 
 from typing import Literal, Optional
+import math
 
 import matplotlib.pyplot as plt
 
 from driver_mercpert import MercPertOutput
-from physics_mercpert import AU, MercuryInitialConditions
+from physics_mercpert import AU, MercuryInitialConditions, compute_binary_angular_velocity, BinarySystemParams
 
 Corner = Literal["upper right", "upper left", "lower right", "lower left"]
 PositionUnit = Literal["m", "AU"]
@@ -41,42 +42,96 @@ def plot_orbits(
     output: MercPertOutput,
     title: str = "MercPert orbits",
     merc_ic: Optional[MercuryInitialConditions] = None,
+    binary_params: Optional[BinarySystemParams] = None,
     corner: Corner = "upper left",
     position_unit: PositionUnit = "m",
 ) -> None:
     """
     Plot barycentric inertial trajectories of the Sun, companion, and Mercury.
 
-    If merc_ic is supplied, its annotation is explicitly labelled as the
-    Sun-relative initial state, matching the meaning of the user inputs.
+    Dashed red/green curves are the prescribed primary orbits. Mercury's
+    integrated trajectory is solid blue. Small filled circles mark the three
+    starting positions. A blue triangle marks an ordinary final point; a black
+    x marks a finite-radius collision.
     """
     _validate_display_options(corner, position_unit)
 
     scale = AU if position_unit == "AU" else 1.0
     unit_label = "AU" if position_unit == "AU" else "m"
 
+    # Limit the prescribed primary reference orbits to one complete period.
+    # Mercury remains plotted for the full integration duration.
+    primary_end = len(output.times)
+
+    if binary_params is not None and output.times:
+        omega = compute_binary_angular_velocity(binary_params)
+        period = 2.0 * math.pi / omega
+
+        # Include the first sample at or just beyond one period so that the
+        # dashed orbit visually closes once, but do not continue into a second
+        # revolution where the dashes would overlap and distort.
+        primary_end = len(output.times)
+        for i, t in enumerate(output.times):
+            if t >= period:
+                primary_end = i + 1
+                break
+
+    sx = [x / scale for x in output.sun_x[:primary_end]]
+    sy = [y / scale for y in output.sun_y[:primary_end]]
+    px = [x / scale for x in output.planet_x[:primary_end]]
+    py = [y / scale for y in output.planet_y[:primary_end]]
+    mx = [x / scale for x in output.merc_x]
+    my = [y / scale for y in output.merc_y]
+
     fig, ax = plt.subplots(figsize=(6, 6))
 
-    ax.plot([x / scale for x in output.sun_x],
-            [y / scale for y in output.sun_y],
-            color="red", label="Sun")
-    ax.plot([x / scale for x in output.planet_x],
-            [y / scale for y in output.planet_y],
-            color="green", label="Companion")
-    ax.plot([x / scale for x in output.merc_x],
-            [y / scale for y in output.merc_y],
-            color="blue", label="Mercury")
+    # Prescribed binary orbits are reference geometry.
+    ax.plot(
+        sx, sy,
+        color="red",
+        linestyle="--",
+        linewidth=1.0,
+        label="Sun's orbit",
+        zorder=1,
+    )
+    ax.plot(
+        px, py,
+        color="green",
+        linestyle="--",
+        linewidth=1.0,
+        label="Companion's orbit",
+        zorder=1,
+    )
+
+    # Mercury is the simulated trajectory of interest.
+    ax.plot(
+        mx, my,
+        color="blue",
+        linestyle="-",
+        linewidth=1.4,
+        label="Mercury",
+        zorder=2,
+    )
+
+    # Start markers: intentionally omitted from the legend.
+    ax.plot(sx[0], sy[0], marker="o", markersize=4.5,
+            color="red", linestyle="none", zorder=3)
+    ax.plot(px[0], py[0], marker="o", markersize=4.5,
+            color="green", linestyle="none", zorder=3)
+    ax.plot(mx[0], my[0], marker="o", markersize=4.5,
+            color="blue", linestyle="none", zorder=4)
 
     if output.collision_body is not None:
+        # Reserve the black x exclusively for a collision event.
         ax.plot(
-            output.merc_x[-1] / scale,
-            output.merc_y[-1] / scale,
+            mx[-1], my[-1],
             marker="x",
             markersize=9,
             markeredgewidth=2,
             color="black",
             linestyle="none",
             label=f"Collision: {output.collision_body}",
+            zorder=5,
         )
 
     ax.set_xlabel(f"x ({unit_label})")
