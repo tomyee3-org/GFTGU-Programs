@@ -1,32 +1,18 @@
-"""
-A program to simulate the motions of any number of bodies that interact with
-one another gravitationally, within Newton's theory of gravity. The user can set
-up fully three-dimensional initial conditions and masses for any number of
-objects, and the output can be a drawing of all the trajectories or a continuously
-running movie of the locations of the bodies.
-
-This is the main main entry point which sets example parameters (user can edit)
-and runs the simulation.
-"""
+"""Multiple: Newtonian N-body motion in three dimensions."""
 
 from driver_multiple import SimulationParams, run_simulation
-from plot_multiple import plot_trajectories, plot_current_positions
+from plot_multiple import animate_multiple, plot_trajectories
 
 
 def main():
-    # Example: three-body encounter
     n_bodies = 3
+    masses_solar = [1.0, 1.0, 1.0]
 
-    masses_solar = [1.0, 1.0, 1.0]  # all solar-mass bodies
-
-    # Positions (x, y, z) in meters
     positions_init = [
         [4.6e10, 0.0, 0.0],
         [-4.6e10, 0.0, 0.0],
         [0.0, 4.6e10, 0.0],
     ]
-
-    # Velocities (vx, vy, vz) in m/s
     velocities_init = [
         [0.0, 0.0, -30000.0],
         [0.0, -30000.0, 0.0],
@@ -38,20 +24,33 @@ def main():
         masses_solar=masses_solar,
         positions_init=positions_init,
         velocities_init=velocities_init,
-        dt=2000.0,          # initial time-step (s), similar to MercPert defaults
-        max_steps=40000,  # user can reduce for testing
-        out_steps=1000,    # steps between output events
-        output_type="trajectories",  # or "current positions"
-        eps1=0.05,       # time-step halving accuracy
-        eps2=0.0001,       # predictor-corrector accuracy
+        dt=2000.0,
+        max_steps=40000,
+        eps1=0.05,
+        eps2=0.0001,
+
+        output_type="animation",          # "trajectories" or "animation"
+        animation_mode="trails",          # "current positions" or "trails"
+        frame_time=2.0e5,                 # simulated seconds between frames
+          frame_interval_ms=50,             # real milliseconds between frames
+        trail_time=6.0e5,                 # simulated seconds of recent trail
+        projection="xy",                  # "xy", "xz", or "yz"
+        axis_mode="fixed",                # "fixed" or "auto"
     )
 
     result = run_simulation(params)
 
     if result["type"] == "trajectories":
-        plot_trajectories(result)
+        plot_trajectories(result, projection=params.projection)
     else:
-        plot_current_positions(result)
+        n_frames = len(result["frame_times"])
+        playback_seconds = n_frames * params.frame_interval_ms / 1000.0
+        print(
+            f"Animation frames: {n_frames}; "
+            f"frame spacing: {params.frame_time:.4g} simulated s; "
+            f"approximate playback time: {playback_seconds:.1f} real s"
+        )
+        animate_multiple(result)
 
 
 if __name__ == "__main__":
