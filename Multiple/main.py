@@ -1,10 +1,15 @@
-"""Multiple: Newtonian N-body motion in three dimensions."""
+"""
+Multiple: Newtonian N-body motion in three dimensions.
+"""
 
 from driver_multiple import SimulationParams, run_simulation
-from plot_multiple import animate_multiple, plot_trajectories
+from plot_multiple import animate_multiple, plot_energy_drift, plot_trajectories
 
 
 def main():
+    # Schutz's default three-body encounter. The initial positions and
+    # velocities all lie in the xy plane; an out-of-plane velocity is a useful
+    # later experiment.
     n_bodies = 3
     masses_solar = [1.0, 1.0, 1.0]
 
@@ -13,8 +18,9 @@ def main():
         [-4.6e10, 0.0, 0.0],
         [0.0, 4.6e10, 0.0],
     ]
+
     velocities_init = [
-        [0.0, 0.0, -30000.0],
+        [0.0, 0.0, 0.0],
         [0.0, -30000.0, 0.0],
         [-30000.0, 0.0, 0.0],
     ]
@@ -24,24 +30,43 @@ def main():
         masses_solar=masses_solar,
         positions_init=positions_init,
         velocities_init=velocities_init,
+
         dt=2000.0,
         max_steps=40000,
         eps1=0.05,
         eps2=0.0001,
 
-        output_type="animation",          # "trajectories" or "animation"
-        animation_mode="trails",          # "current positions" or "trails"
-        frame_time=2.0e5,                 # simulated seconds between frames
-        frame_interval_ms=50,             # real milliseconds between frames
-        trail_time=6.0e5,                 # simulated seconds of recent trail
-        projection="xy",                  # "xy", "xz", or "yz"
-        axis_mode="fixed",                # "fixed" or "auto"
+        # Output: "trajectories" or "animation"
+        output_type="animation",
+
+        # Animation controls
+        animation_mode="trails",       # "current positions" or "trails"
+        frame_time=2.0e5,              # simulated seconds between frames
+        frame_interval_ms=50,          # real milliseconds between frames
+        trail_time=6.0e5,              # simulated seconds of recent trail
+        projection="xy",               # "xy", "xz", or "yz"
+        axis_mode="fixed",             # "fixed" or "auto"
     )
+
+    show_energy_diagnostic = False
 
     result = run_simulation(params)
 
+    print(
+        f"Accepted steps: {result['accepted_steps']}; "
+        f"simulated time: {result['final_time'] / 86400.0:.3f} days"
+    )
+    print(
+        "Maximum conservation drift: "
+        f"energy={result['max_fractional_energy_drift']:.3e}, "
+        f"momentum={result['max_fractional_momentum_drift']:.3e}, "
+        f"angular momentum={result['max_fractional_angular_momentum_drift']:.3e}"
+    )
+
     if result["type"] == "trajectories":
         plot_trajectories(result, projection=params.projection)
+        if show_energy_diagnostic:
+            plot_energy_drift(result)
     else:
         n_frames = len(result["frame_times"])
         playback_seconds = n_frames * params.frame_interval_ms / 1000.0

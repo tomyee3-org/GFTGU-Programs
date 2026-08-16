@@ -1,10 +1,12 @@
-"""Plotting and animation for Multiple."""
+"""
+Static plotting, conservation diagnostics, and animation for Multiple.
+"""
 
 from typing import Dict, Any
 
 import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
 import numpy as np
+
 
 _COLORS = ["red", "green", "blue", "orange", "purple", "brown"]
 
@@ -26,6 +28,7 @@ def _fixed_limits(projected):
     y = projected[..., 1]
     xmin, xmax = float(np.min(x)), float(np.max(x))
     ymin, ymax = float(np.min(y)), float(np.max(y))
+
     span = max(xmax - xmin, ymax - ymin, 1.0)
     xmid = 0.5 * (xmin + xmax)
     ymid = 0.5 * (ymin + ymax)
@@ -33,7 +36,10 @@ def _fixed_limits(projected):
     return (xmid - half, xmid + half), (ymid - half, ymid + half)
 
 
-def plot_trajectories(result: Dict[str, Any], projection: str = "xy") -> None:
+def plot_trajectories(
+    result: Dict[str, Any],
+    projection: str = "xy",
+) -> None:
     """Plot complete trajectories in the selected 2-D projection."""
     positions = result["positions"]
     _, n_bodies, _ = positions.shape
@@ -42,15 +48,40 @@ def plot_trajectories(result: Dict[str, Any], projection: str = "xy") -> None:
     fig, ax = plt.subplots()
     for i in range(n_bodies):
         ax.plot(
-            positions[:, i, i1], positions[:, i, i2],
+            positions[:, i, i1],
+            positions[:, i, i2],
             color=_COLORS[i % len(_COLORS)],
             label=f"Body {i + 1}",
         )
+
     ax.set_xlabel(f"{label1} (m)")
     ax.set_ylabel(f"{label2} (m)")
     ax.set_title(f"Multiple trajectories ({projection.lower()} projection)")
     ax.legend()
     ax.set_aspect("equal", "box")
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_energy_drift(result: Dict[str, Any]) -> None:
+    """Plot fractional total-energy drift for trajectory output."""
+    if result.get("type") != "trajectories":
+        raise ValueError(
+            "Energy-drift history is available in trajectories mode."
+        )
+
+    energies = np.asarray(result["energies"], dtype=float)
+    times_days = np.asarray(result["times"], dtype=float) / 86400.0
+    e0 = energies[0]
+    scale = abs(e0) if e0 != 0.0 else 1.0
+    drift = (energies - e0) / scale
+
+    fig, ax = plt.subplots()
+    ax.plot(times_days, drift)
+    ax.set_xlabel("time (days)")
+    ax.set_ylabel(r"$(E-E_0)/|E_0|$")
+    ax.set_title("Multiple total-energy drift")
+    ax.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.show()
 
@@ -66,12 +97,12 @@ def animate_multiple(result: Dict[str, Any]):
       Home        jump to first frame and pause
       End         jump to final frame and pause
 
-    Playback is driven by an explicit frame index rather than FuncAnimation's
-    internal frame sequence. Manual jumps therefore become the new playback
-    position, and the animation can be restarted after it has finished.
+    Space resumes from the currently displayed frame. If the final frame is
+    displayed, Space replays from the beginning.
     """
     frame_times = np.asarray(result["frame_times"], dtype=float)
     positions = np.asarray(result["frame_positions"], dtype=float)
+
     if frame_times.size == 0 or positions.shape[0] == 0:
         raise ValueError("No animation frames are available.")
 
@@ -87,17 +118,30 @@ def animate_multiple(result: Dict[str, Any]):
     n_frames, n_bodies, _ = projected.shape
 
     fig, ax = plt.subplots()
-    lines, markers = [], []
+
+    lines = []
+    markers = []
     for i in range(n_bodies):
         color = _COLORS[i % len(_COLORS)]
         line, = ax.plot([], [], color=color, linewidth=1.2)
-        marker, = ax.plot([], [], marker="o", linestyle="none",
-                          color=color, markersize=6, label=f"Body {i + 1}")
+        marker, = ax.plot(
+            [], [],
+            marker="o",
+            linestyle="none",
+            color=color,
+            markersize=6,
+            label=f"Body {i + 1}",
+        )
         lines.append(line)
         markers.append(marker)
 
-    time_text = ax.text(0.02, 0.98, "", transform=ax.transAxes,
-                        ha="left", va="top", family="monospace")
+    time_text = ax.text(
+        0.02, 0.98, "",
+        transform=ax.transAxes,
+        ha="left", va="top",
+        family="monospace",
+    )
+
     ax.set_xlabel(f"{label1} (m)")
     ax.set_ylabel(f"{label2} (m)")
     ax.set_title(f"Multiple animation ({projection} projection)")
@@ -127,11 +171,9 @@ def animate_multiple(result: Dict[str, Any]):
         xmin, xmax = float(np.min(x)), float(np.max(x))
         ymin, ymax = float(np.min(y)), float(np.max(y))
 
-        # Use ONE span for both axes. This preserves a true 1:1 spatial scale
-        # while the viewing window zooms in or out.
+        # One common span preserves a true 1:1 spatial scale while zooming.
         span = max(xmax - xmin, ymax - ymin, 1.0)
-        half = 0.60 * span   # 10% margin on each side of the larger extent
-
+        half = 0.60 * span
         xmid = 0.5 * (xmin + xmax)
         ymid = 0.5 * (ymin + ymax)
 
@@ -142,34 +184,47 @@ def animate_multiple(result: Dict[str, Any]):
         i = max(0, min(n_frames - 1, int(i)))
         state["index"] = i
         state["finished"] = (i >= n_frames - 1)
+
         start = max(0, i - trail_frames) if mode == "trails" else i
+
         for body in range(n_bodies):
-            markers[body].set_data([projected[i, body, 0]], [projected[i, body, 1]])
+            markers[body].set_data(
+                [projected[i, body, 0]],
+                [projected[i, body, 1]],
+            )
+
             if mode == "trails":
-                lines[body].set_data(projected[start:i + 1, body, 0],
-                                     projected[start:i + 1, body, 1])
+                lines[body].set_data(
+                    projected[start:i + 1, body, 0],
+                    projected[start:i + 1, body, 1],
+                )
             else:
                 lines[body].set_data([], [])
+
         _auto_limits(i)
-        time_text.set_text(f"t = {frame_times[i]:.4g} s\nframe {i + 1} / {n_frames}")
+        time_text.set_text(
+            f"t = {frame_times[i]:.4g} s\n"
+            f"frame {i + 1} / {n_frames}"
+        )
         return [*lines, *markers, time_text]
 
-    # A persistent canvas timer is used instead of FuncAnimation's event_source.
-    # Matplotlib may discard FuncAnimation.event_source after the last frame,
-    # which makes post-completion keyboard controls fail.
+    # Persistent canvas timer: remains valid after the last displayed frame.
     timer = fig.canvas.new_timer(interval=interval_ms)
 
     def advance():
         if state["paused"]:
             return
+
         next_index = state["index"] + 1
         if next_index >= n_frames:
             state["finished"] = True
             state["paused"] = True
             timer.stop()
             return
+
         draw_frame(next_index)
         fig.canvas.draw_idle()
+
         if state["index"] >= n_frames - 1:
             state["finished"] = True
             state["paused"] = True
@@ -182,7 +237,6 @@ def animate_multiple(result: Dict[str, Any]):
         timer.stop()
 
     def resume_from_displayed_frame():
-        # Space at the final frame means replay from the beginning.
         if state["index"] >= n_frames - 1:
             draw_frame(0)
         state["paused"] = False
@@ -191,6 +245,7 @@ def animate_multiple(result: Dict[str, Any]):
 
     def on_key(event):
         key = event.key
+
         if key == " ":
             if state["paused"] or state["finished"]:
                 resume_from_displayed_frame()
@@ -201,6 +256,7 @@ def animate_multiple(result: Dict[str, Any]):
 
         if key in ("left", "right", "home", "end"):
             pause()
+
             if key == "left":
                 i = state["index"] - 1
             elif key == "right":
@@ -209,6 +265,7 @@ def animate_multiple(result: Dict[str, Any]):
                 i = 0
             else:
                 i = n_frames - 1
+
             draw_frame(i)
             fig.canvas.draw_idle()
 
@@ -220,5 +277,5 @@ def animate_multiple(result: Dict[str, Any]):
     state["finished"] = False
     timer.start()
     plt.show()
-    return {"timer": timer, "state": state}
 
+    return {"timer": timer, "state": state}

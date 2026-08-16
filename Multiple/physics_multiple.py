@@ -1,49 +1,120 @@
 """
-Encodes Newtonian gravity for an arbitrary number of bodies.
-Only physical constants appear as literals.
+Newtonian gravity and conservation diagnostics for Multiple.
 """
 
 import numpy as np
 
-# Physical constants
-G_NEWTON = 6.67430e-11          # m^3 / (kg s^2)
-M_SUN = 1.98847e30              # kg
-K_GRAVITY = G_NEWTON * M_SUN    # G * M_sun, as in Schutz's code
+# IAU 2015 nominal solar mass parameter (exact nominal conversion constant).
+GM_SUN = 1.3271244e20  # m^3 s^-2
 
 
-def compute_accelerations(positions: np.ndarray, masses_solar: np.ndarray) -> np.ndarray:
+def compute_accelerations(
+    positions: np.ndarray,
+    masses_solar: np.ndarray,
+) -> np.ndarray:
     """
-    Compute accelerations of all bodies due to mutual gravity.
+    Compute mutual Newtonian accelerations.
 
-    positions: shape (n_bodies, 3), in meters
-    masses_solar: shape (n_bodies,), in solar masses
+    positions:    shape (n_bodies, 3), metres
+    masses_solar: shape (n_bodies,), masses in solar-mass units
 
-    Returns accelerations: shape (n_bodies, 3), in m/s^2
+    Returns an array of shape (n_bodies, 3), m/s^2.
+
+    Bodies are mathematical point masses. Exact coincidence makes the
+    Newtonian force singular and therefore raises ValueError.
     """
     n_bodies = positions.shape[0]
-    acc = np.zeros_like(positions)
+    acc = np.zeros_like(positions, dtype=float)
 
-    # Convert masses to kg via K_GRAVITY convention (masses in solar units)
     for a in range(n_bodies):
         for b in range(a + 1, n_bodies):
             r_vec = positions[b] - positions[a]
-            r = np.linalg.norm(r_vec)
+            r = float(np.linalg.norm(r_vec))
             if r == 0.0:
-                continue
-            r3 = r ** 3
+                raise ValueError(
+                    f"Bodies {a + 1} and {b + 1} occupy exactly the same "
+                    "position; the Newtonian point-mass force is singular."
+                )
 
-            # r_vec points from a to b (opposite of Schutz's xAB = xA - xB
-            # convention). Gravity pulls a TOWARD b, i.e. along +r_vec, and
-            # pulls b TOWARD a, i.e. along -r_vec -- so both coefficients
-            # here are positive; the "-=" below is what supplies b's
-            # opposite direction.
+            inv_r3 = 1.0 / (r * r * r)
 
-            # Acceleration on a due to b
-            factor_ab = K_GRAVITY * masses_solar[b] / r3
-            # Acceleration on b due to a
-            factor_ba = K_GRAVITY * masses_solar[a] / r3
-
-            acc[a] += factor_ab * r_vec
-            acc[b] -= factor_ba * r_vec  # opposite direction
+            # r_vec points from a to b.
+            acc[a] += GM_SUN * masses_solar[b] * inv_r3 * r_vec
+            acc[b] -= GM_SUN * masses_solar[a] * inv_r3 * r_vec
 
     return acc
+
+
+def scaled_total_energy(
+    positions: np.ndarray,
+    velocities: np.ndarray,
+    masses_solar: np.ndarray,
+) -> float:
+    """
+    Return total mechanical energy divided by one solar-mass unit.
+
+    The result has units m^2/s^2. The overall solar-mass factor is omitted
+    because conservation tests depend on fractional changes, not on joules.
+    """
+    kinetic = 0.5 * np.sum(
+        masses_solar[:, None] * velocities * velocities
+    )
+
+    potential = 0.0
+    n_bodies = len(masses_solar)
+    for a in range(n_bodies):
+        for b in range(a + 1, n_bodies):
+            r = float(np.linalg.norm(positions[b] - positions[a]))
+            if r == 0.0:
+                raise ValueError(
+                    f"Bodies {a + 1} and {b + 1} occupy exactly the same "
+                    "position; gravitational potential energy is singular."
+                )
+            potential -= (
+                GM_SUN * masses_solar[a] * masses_solar[b] / r
+            )
+
+    return float(kinetic + potential)
+
+
+def scaled_total_momentum(
+    velocities: np.ndarray,
+    masses_solar: np.ndarray,
+) -> np.ndarray:
+    """
+    Return total linear momentum divided by one solar-mass unit.
+
+    Units are m/s. Fractional or absolute drift provides a numerical diagnostic.
+    """
+    return np.sum(masses_solar[:, None] * velocities, axis=0)
+
+
+def scaled_total_angular_momentum(
+    positions: np.ndarray,
+    velocities: np.ndarray,
+    masses_solar: np.ndarray,
+) -> np.ndarray:
+    """
+    Return total angular momentum divided by one solar-mass unit.
+
+    Units are m^2/s. Fractional or absolute drift provides a numerical diagnostic.
+    """
+    return np.sum(
+        masses_solar[:, None] * np.cross(positions, velocities),
+        axis=0,
+    )
+
+
+def conservation_state(
+    positions: np.ndarray,
+    velocities: np.ndarray,
+    masses_solar: np.ndarray,
+) -> dict:
+    """Return energy, linear momentum, and angular momentum diagnostics."""
+    return {
+        "energy": scaled_total_energy(positions, velocities, masses_solar),
+        "momentum": scaled_total_momentum(velocities, masses_solar),
+        "angular_momentum": scaled_total_angular_momentum(
+            positions, velocities, masses_solar
+        ),
+    }
