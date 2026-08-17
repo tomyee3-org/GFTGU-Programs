@@ -1,51 +1,69 @@
 """
-Find the orbits of small bodies around black holes and spherical stars.
-Study relativistic effects, such as orbital precession and the existence
-of an innermost stable circular orbit.
+RelativisticOrbit: equatorial test-particle orbits around a one-solar-mass
+Schwarzschild source, with a Newtonian comparison mode.
 
-Edit the parameters below to explore different orbits around a solar-mass
-black hole.  All quantities are in SI units (metres, seconds).
-
-Physical context
-----------------
-The simulation integrates the equatorial geodesic of a test particle in
-the Schwarzschild spacetime.  The GR correction adds a term  12K²/(c²r²)
-to the Newtonian potential, where K = ½ u_init · x_init is the specific
-angular momentum constant of the orbit.
+The integration parameter is the particle's proper time tau.  The displayed
+x-y curve is a convenient orbital diagram built from Schwarzschild areal radius
+and azimuth; x and y are not global Cartesian coordinates of flat space.
 """
 
+import math
+
 from driver_relativistic_orbit import (
-    integrate_relativistic_orbit,
     RelativisticOrbitParams,
+    integrate_relativistic_orbit,
 )
 from plot_relativistic_orbit import plot_relativistic_orbit
 
-# ---------------------------------------------------------------------------
-# Parameters – edit these values to explore different orbits
-# ---------------------------------------------------------------------------
-params = RelativisticOrbitParams(
-    x_init     = 1.5e4,    # initial x-position (m);  start on the x-axis
-    u_init     = 1.2e8,    # initial y-velocity  (m/s); > 0 → counter-clockwise
-    dt         = 2.0E-6,   # initial time-step   (s);  halved automatically near
-                           #   periapsis or the horizon
-    max_steps  = 6_000,    # safety cap on total integration steps
-    max_orbits = 10,       # stop after this many complete orbits
-    eps1       = 0.05,     # sets the accuracy of the time-step. If computed quantities
-                           # change by a larger fraction than this in a time-step, the time-step
-                           # will be cut in half, repeatedly if necessary.
-    eps2       = 1.0e-4,   # corrector-loop convergence tolerance
-)
 
 # ---------------------------------------------------------------------------
-# Run the integrator and plot the result
+# Parameters — edit these values to explore different orbits
+# ---------------------------------------------------------------------------
+params = RelativisticOrbitParams(
+    x_init=1.5e4,          # initial areal radius on +x diagram axis (m)
+    u_init=1.2e8,          # initial dy/dtau (m/s); not a local measured speed
+    dt=2.0e-6,             # maximum proper-time step (s)
+    max_steps=6_000,       # maximum accepted integration steps
+    max_orbits=10,         # maximum accumulated azimuthal revolutions
+    eps1=0.05,             # acceleration-vector timestep gate
+    eps2=1.0e-4,           # corrector velocity-convergence tolerance
+    model="schwarzschild", # "schwarzschild" or "newtonian"
+)
+
+show_isco = True
+show_periapsides = False
+
+
+# ---------------------------------------------------------------------------
+# Run and report
 # ---------------------------------------------------------------------------
 result = integrate_relativistic_orbit(params)
 
-if result.fell_into_hole:
-    print(f"Particle crossed the Schwarzschild horizon after "
-          f"{result.final_step} steps.")
-else:
-    print(f"Integration complete: {result.n_orbits:.0f} orbit(s) "
-          f"in {result.final_step} steps.")
+reason_text = {
+    "max_orbits": "requested revolution count reached",
+    "max_steps": "maximum accepted-step count reached",
+    "horizon": "Schwarzschild horizon crossed",
+}[result.termination_reason]
 
-plot_relativistic_orbit(result)
+print("RelativisticOrbit summary")
+print(f"  model             : {result.model}")
+print(f"  termination       : {reason_text}")
+print(f"  accepted steps    : {result.final_step}")
+print(f"  proper time       : {result.tau[-1]:.6g} s")
+print(f"  azimuthal turns   : {result.n_orbits:.6f}")
+print(f"  periapsides found : {len(result.periapsis_indices)}")
+print(f"  max |Δh/h0|       : {result.max_fractional_h_drift:.3e}")
+print(f"  max |ΔE/E0|       : {result.max_fractional_energy_drift:.3e}")
+
+if result.mean_periapsis_advance is not None:
+    degrees = math.degrees(result.mean_periapsis_advance)
+    print(
+        "  mean periapsis advance per radial period: "
+        f"{result.mean_periapsis_advance:.6g} rad = {degrees:.6g} deg"
+    )
+
+plot_relativistic_orbit(
+    result,
+    show_isco=show_isco,
+    show_periapsides=show_periapsides,
+)

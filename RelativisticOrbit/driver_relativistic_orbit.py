@@ -1,218 +1,359 @@
 """
-RelativisticOrbit driver module
+Adaptive predictor-corrector driver for RelativisticOrbit.
 
-This module performs the time integration of the relativistic orbit,
-using a variable time-step predictor-corrector scheme and orbit counting.
+The independent variable is the test particle's proper time tau.  The driver
+also tracks unwrapped azimuth, periapsides, conserved-quantity drift, horizon
+crossing, and the reason the integration terminated.
 """
 
+from __future__ import annotations
+
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from physics_relativistic_orbit import (
-    kepler_constants,
-    schwarzschild_acceleration,
     HORIZON_RADIUS,
+    central_acceleration,
+    effective_specific_energy,
+    orbital_constants,
+    specific_angular_momentum,
 )
 
 
 @dataclass
 class RelativisticOrbitParams:
-    x_init: float      # initial x position (m)
-    u_init: float      # initial y velocity (m/s)
-    dt: float          # initial time step (s)
-    max_steps: int     # maximum number of integration steps
-    max_orbits: int    # maximum number of completed orbits
-    eps1: float        # time-step accuracy control
-    eps2: float        # predictor–corrector accuracy control
+    x_init: float
+    u_init: float
+    dt: float
+    max_steps: int
+    max_orbits: int
+    eps1: float
+    eps2: float
+    model: str = "schwarzschild"  # "schwarzschild" or "newtonian"
 
 
 @dataclass
 class RelativisticOrbitResult:
     x: list[float]
     y: list[float]
-    horizon_x: list[float]
-    horizon_y: list[float]
+    vx: list[float]
+    vy: list[float]
+    tau: list[float]
+    azimuth_unwrapped: list[float]
     n_orbits: float
     final_step: int
     fell_into_hole: bool
+    termination_reason: str
+    model: str
+    periapsis_indices: list[int] = field(default_factory=list)
+    periapsis_tau: list[float] = field(default_factory=list)
+    periapsis_radius: list[float] = field(default_factory=list)
+    periapsis_azimuth: list[float] = field(default_factory=list)
+    mean_periapsis_advance: float | None = None
+    max_fractional_h_drift: float = 0.0
+    max_fractional_energy_drift: float = 0.0
 
 
-def _build_horizon_circle() -> tuple[list[float], list[float]]:
-    """Build 101 points on the Schwarzschild horizon circle."""
-    horizon_x = []
-    horizon_y = []
-    angle_step = math.pi / 50.0  # 0..2π with 101 points
-    for i in range(101):
-        angle = angle_step * i
-        horizon_x.append(HORIZON_RADIUS * math.cos(angle))
-        horizon_y.append(HORIZON_RADIUS * math.sin(angle))
-    return horizon_x, horizon_y
+def _validate_params(params: RelativisticOrbitParams) -> None:
+    finite_values = {
+        "x_init": params.x_init,
+        "u_init": params.u_init,
+        "dt": params.dt,
+        "eps1": params.eps1,
+        "eps2": params.eps2,
+    }
+    for name, value in finite_values.items():
+        if not math.isfinite(value):
+            raise ValueError(f"{name} must be finite.")
+
+    if params.x_init <= 0.0:
+        raise ValueError("x_init must be positive.")
+    if params.model.lower() == "schwarzschild" and params.x_init <= HORIZON_RADIUS:
+        raise ValueError("x_init must lie outside the Schwarzschild horizon.")
+    if params.model.lower() not in ("schwarzschild", "newtonian"):
+        raise ValueError('model must be "schwarzschild" or "newtonian".')
+    if params.dt <= 0.0:
+        raise ValueError("dt must be positive.")
+    if not isinstance(params.max_steps, int) or isinstance(params.max_steps, bool) or params.max_steps <= 0:
+        raise ValueError("max_steps must be a positive integer.")
+    if not isinstance(params.max_orbits, int) or isinstance(params.max_orbits, bool) or params.max_orbits <= 0:
+        raise ValueError("max_orbits must be a positive integer.")
+    if not (0.0 < params.eps2 < params.eps1 < 1.0):
+        raise ValueError("Require 0 < eps2 < eps1 < 1.")
 
 
-def integrate_relativistic_orbit(params: RelativisticOrbitParams) -> RelativisticOrbitResult:
-    """
-    Perform the relativistic orbit integration using
-    predictor–corrector and orbit counting.
-    """
+def _relative_vector_change(
+    old_x: float,
+    old_y: float,
+    new_x: float,
+    new_y: float,
+) -> float:
+    diff = math.hypot(new_x - old_x, new_y - old_y)
+    scale = max(math.hypot(old_x, old_y), math.hypot(new_x, new_y))
+    if scale == 0.0:
+        return 0.0 if diff == 0.0 else math.inf
+    return diff / scale
 
-    # Initial conditions
-    dt1 = params.dt
-    v = 0.0
-    u = params.u_init
-    x0 = params.x_init
+
+def _unwrap_delta(new_angle: float, old_angle: float) -> float:
+    """Return the signed angular change in (-pi, pi]."""
+    delta = new_angle - old_angle
+    while delta <= -math.pi:
+        delta += 2.0 * math.pi
+    while delta > math.pi:
+        delta -= 2.0 * math.pi
+    return delta
+
+
+def _segment_circle_first_fraction(
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    radius: float,
+) -> float | None:
+    """Return first t in [0,1] where the line segment intersects the circle."""
+    dx = x1 - x0
+    dy = y1 - y0
+    a = dx * dx + dy * dy
+    if a == 0.0:
+        return None
+
+    b = 2.0 * (x0 * dx + y0 * dy)
+    c = x0 * x0 + y0 * y0 - radius * radius
+    disc = b * b - 4.0 * a * c
+    if disc < 0.0:
+        return None
+
+    root = math.sqrt(max(0.0, disc))
+    candidates = [(-b - root) / (2.0 * a), (-b + root) / (2.0 * a)]
+    valid = [t for t in candidates if 0.0 <= t <= 1.0]
+    return min(valid) if valid else None
+
+
+def _fractional_drift(value: float, reference: float) -> float:
+    scale = abs(reference)
+    if scale == 0.0:
+        return abs(value - reference)
+    return abs(value - reference) / scale
+
+
+def integrate_relativistic_orbit(
+    params: RelativisticOrbitParams,
+) -> RelativisticOrbitResult:
+    """Integrate until max_orbits, max_steps, or horizon crossing."""
+    _validate_params(params)
+
+    model = params.model.lower()
+    dt_work = float(params.dt)
+    max_corrector_iterations = 10
+    max_retries_per_step = 80
+
+    # State: vx=dx/dtau, vy=dy/dtau.
+    x0 = float(params.x_init)
     y0 = 0.0
+    vx0 = 0.0
+    vy0 = float(params.u_init)
+    tau0 = 0.0
 
-    # Kepler constants (fixed along the orbit)
-    K, Q = kepler_constants(x0, u)
+    h_constant, _q = orbital_constants(x0, vy0)
+    ax0, ay0 = central_acceleration(x0, y0, h_constant, model)
 
-    # Initial acceleration
-    ax0, ay0 = schwarzschild_acceleration(x0, y0, K, Q)
+    h_initial = specific_angular_momentum(x0, y0, vx0, vy0)
+    energy_initial = effective_specific_energy(
+        x0, y0, vx0, vy0, h_constant, model
+    )
 
-    # Storage for trajectory
-    x_coordinate = [0.0] * params.max_steps
-    y_coordinate = [0.0] * params.max_steps
-    x_coordinate[0] = x0
-    y_coordinate[0] = y0
+    x = [x0]
+    y = [y0]
+    vx = [vx0]
+    vy = [vy0]
+    tau = [tau0]
 
-    # Horizon circle
-    horizon_x, horizon_y = _build_horizon_circle()
+    angle0 = math.atan2(y0, x0)
+    azimuth_unwrapped = [angle0]
+    accumulated_angle = 0.0
 
-    # Orbit counting
-    n_orbits = 0.0
-    counterclockwise = (params.u_init > 0.0)
-    full_orbit = False
-    half_orbit = False
+    max_h_drift = 0.0
+    max_energy_drift = 0.0
 
-    # Helper to compute current radius and angle
-    def current_radius_angle(x: float, y: float) -> tuple[float, float]:
-        r = math.sqrt(x * x + y * y)
-        angle = math.atan2(y, x)
-        return r, angle
+    periapsis_indices: list[int] = []
+    periapsis_tau: list[float] = []
+    periapsis_radius: list[float] = []
+    periapsis_azimuth: list[float] = []
 
-    # Initial radius
-    r, angle_now = current_radius_angle(x0, y0)
-
+    termination_reason = "max_steps"
     fell_into_hole = False
-    final_step = 0
 
-    # Main integration loop
-    j = 1
-    while (r > HORIZON_RADIUS) and (n_orbits < params.max_orbits) and (j < params.max_steps):
-        # --- Predictor step (Euler + kinematics) ---
-        dv = ax0 * dt1
-        du = ay0 * dt1
+    accepted_steps = 0
 
-        dx = v * dt1
-        dy = u * dt1
-
-        # extra displacement due to changing velocity (average velocity)
-        ddx0 = 0.5 * dv * dt1
-        ddy0 = 0.5 * du * dt1
-
-        # initial guess for new position
-        x1 = x0 + dx + ddx0
-        y1 = y0 + dy + ddy0
-
-        # acceleration at predicted position
-        ax1, ay1 = schwarzschild_acceleration(x1, y1, K, Q)
-
-        # --- Time-step accuracy control (eps1) ---
-        # Time-step accuracy control Checks against the
-        # cheap predictor's acceleration, BEFORE spending effort on the
-        # corrector iterations below, using the sum-of-absolute-values
-        # test (not a Euclidean-norm ratio, and not a component-wise
-        # test divided by a single component -- the real algorithm sums
-        # |ax0|+|ay0| together, so it is never at risk of a lone-axis
-        # division by zero in the first place).
-        accel_change = abs(ax1 - ax0) + abs(ay1 - ay0)
-        accel_ref = abs(ax0) + abs(ay0)
-        if accel_ref > 0.0 and accel_change > params.eps1 * accel_ref:
-            dt1 *= 0.5
-            # recompute with smaller step on next iteration
-            continue
-
-        # --- Predictor–corrector iteration ---
-        # We iteratively refine ddx1, ddy1 using averaged acceleration.
-        ddx1 = ddx0
-        ddy1 = ddy0
-
-        # Simple iteration: average old and new acceleration until change small
-        test_prediction = abs(ddx0) + abs(ddy0)
-        for _ in range(10):  # cap iterations
-            dv1 = ax1 * dt1
-            du1 = ay1 * dt1
-
-            new_ddx1 = 0.5 * (dv + dv1) * dt1 / 2.0
-            new_ddy1 = 0.5 * (du + du1) * dt1 / 2.0
-
-            # relative change test: sum of absolute changes compared
-            # against a threshold fixed once, before the loop, as
-            # eps2 * (abs(ddx0)+abs(ddy0))
-            change = abs(new_ddx1 - ddx1) + abs(new_ddy1 - ddy1)
-
-            ddx1 = new_ddx1
-            ddy1 = new_ddy1
-
-            # update predicted position with refined ddx1, ddy1
-            x1 = x0 + dx + ddx1
-            y1 = y0 + dy + ddy1
-            ax1, ay1 = schwarzschild_acceleration(x1, y1, K, Q)
-
-            if change < params.eps2 * test_prediction:
-                break
-
-        # Accept step: update velocities and positions, using the
-        # averaged acceleration for the velocity update which is
-        # computed from (ax0+ax1)/2*dt1 inside
-        # the corrector loop and then applied as v+=dv; u+=du;).
-        v += 0.5 * (ax0 + ax1) * dt1
-        u += 0.5 * (ay0 + ay1) * dt1
-        x0 = x1
-        y0 = y1
-        ax0, ay0 = ax1, ay1
-
-        x_coordinate[j] = x0
-        y_coordinate[j] = y0
-
-        # Update radius and angle
-        r, angle_now = current_radius_angle(x0, y0)
-
-        # --- Orbit counting ---
-        # We detect crossings of the x-axis to count half and full orbits.
-        if counterclockwise:
-            if (y0 > 0.0) and (not half_orbit):
-                half_orbit = True
-            if (y0 < 0.0) and half_orbit and (not full_orbit):
-                full_orbit = True
-                n_orbits += 1.0
-                half_orbit = False
-        else:
-            if (y0 < 0.0) and (not half_orbit):
-                half_orbit = True
-            if (y0 > 0.0) and half_orbit and (not full_orbit):
-                full_orbit = True
-                n_orbits += 1.0
-                half_orbit = False
-
-        full_orbit = False  # reset flag each step
-
-        final_step = j
-        j += 1
-
-        if r <= HORIZON_RADIUS:
-            fell_into_hole = True
+    while accepted_steps < params.max_steps:
+        if abs(accumulated_angle) >= 2.0 * math.pi * params.max_orbits:
+            termination_reason = "max_orbits"
             break
 
-    # Trim arrays to actual length
-    x_out = x_coordinate[: final_step + 1]
-    y_out = y_coordinate[: final_step + 1]
+        accepted = False
+
+        for _retry in range(max_retries_per_step):
+            # Constant-acceleration predictor.
+            x_pred = x0 + vx0 * dt_work + 0.5 * ax0 * dt_work * dt_work
+            y_pred = y0 + vy0 * dt_work + 0.5 * ay0 * dt_work * dt_work
+            vx_pred = vx0 + ax0 * dt_work
+            vy_pred = vy0 + ay0 * dt_work
+
+            ax_pred, ay_pred = central_acceleration(
+                x_pred, y_pred, h_constant, model
+            )
+
+            if _relative_vector_change(ax0, ay0, ax_pred, ay_pred) > params.eps1:
+                dt_work *= 0.5
+                continue
+
+            # Iterated trapezoidal corrector.
+            x_guess, y_guess = x_pred, y_pred
+            vx_guess, vy_guess = vx_pred, vy_pred
+            ax_end, ay_end = ax_pred, ay_pred
+            converged = False
+
+            for _ in range(max_corrector_iterations):
+                vx_corr = vx0 + 0.5 * (ax0 + ax_end) * dt_work
+                vy_corr = vy0 + 0.5 * (ay0 + ay_end) * dt_work
+                x_corr = x0 + 0.5 * (vx0 + vx_corr) * dt_work
+                y_corr = y0 + 0.5 * (vy0 + vy_corr) * dt_work
+
+                velocity_change = _relative_vector_change(
+                    vx_guess, vy_guess, vx_corr, vy_corr
+                )
+
+                x_guess, y_guess = x_corr, y_corr
+                vx_guess, vy_guess = vx_corr, vy_corr
+
+                if velocity_change < params.eps2:
+                    converged = True
+                    break
+
+                ax_end, ay_end = central_acceleration(
+                    x_guess, y_guess, h_constant, model
+                )
+
+            if not converged:
+                dt_work *= 0.5
+                continue
+
+            accepted = True
+            break
+
+        if not accepted:
+            raise RuntimeError(
+                "RelativisticOrbit could not find a converged timestep after "
+                f"{max_retries_per_step} retries."
+            )
+
+        x1, y1 = x_guess, y_guess
+        vx1, vy1 = vx_guess, vy_guess
+        tau1 = tau0 + dt_work
+
+        # Detect the first crossing of the true Schwarzschild horizon.  This is
+        # disabled for the Newtonian comparison model.
+        horizon_fraction = None
+        if model == "schwarzschild":
+            horizon_fraction = _segment_circle_first_fraction(
+                x0, y0, x1, y1, HORIZON_RADIUS
+            )
+
+        if horizon_fraction is not None:
+            f = horizon_fraction
+            x1 = x0 + f * (x1 - x0)
+            y1 = y0 + f * (y1 - y0)
+            vx1 = vx0 + f * (vx1 - vx0)
+            vy1 = vy0 + f * (vy1 - vy0)
+            tau1 = tau0 + f * dt_work
+            fell_into_hole = True
+            termination_reason = "horizon"
+
+        angle_old = math.atan2(y0, x0)
+        angle_new = math.atan2(y1, x1)
+        delta_angle = _unwrap_delta(angle_new, angle_old)
+        accumulated_angle += delta_angle
+
+        x.append(x1)
+        y.append(y1)
+        vx.append(vx1)
+        vy.append(vy1)
+        tau.append(tau1)
+        azimuth_unwrapped.append(azimuth_unwrapped[-1] + delta_angle)
+
+        accepted_steps += 1
+
+        h_now = specific_angular_momentum(x1, y1, vx1, vy1)
+        e_now = effective_specific_energy(
+            x1, y1, vx1, vy1, h_constant, model
+        )
+        max_h_drift = max(max_h_drift, _fractional_drift(h_now, h_initial))
+        max_energy_drift = max(
+            max_energy_drift,
+            _fractional_drift(e_now, energy_initial),
+        )
+
+        # Local radius minimum at the previous accepted point.
+        if len(x) >= 3:
+            r_a = math.hypot(x[-3], y[-3])
+            r_b = math.hypot(x[-2], y[-2])
+            r_c = math.hypot(x[-1], y[-1])
+            if r_b < r_a and r_b <= r_c:
+                idx = len(x) - 2
+                periapsis_indices.append(idx)
+                periapsis_tau.append(tau[idx])
+                periapsis_radius.append(r_b)
+                periapsis_azimuth.append(azimuth_unwrapped[idx])
+
+        x0, y0, vx0, vy0, tau0 = x1, y1, vx1, vy1, tau1
+        ax0, ay0 = central_acceleration(x0, y0, h_constant, model)
+
+        if fell_into_hole:
+            break
+
+        # Recover gradually after a close passage, never above the user's dt.
+        dt_work = min(dt_work * 1.1, params.dt)
+
+    else:
+        termination_reason = "max_steps"
+
+    # If we exited after the loop condition became true, identify max_orbits.
+    if (
+        termination_reason == "max_steps"
+        and abs(accumulated_angle) >= 2.0 * math.pi * params.max_orbits
+    ):
+        termination_reason = "max_orbits"
+
+    n_orbits = abs(accumulated_angle) / (2.0 * math.pi)
+
+    mean_advance = None
+    if len(periapsis_azimuth) >= 2:
+        direction = 1.0 if periapsis_azimuth[-1] >= periapsis_azimuth[0] else -1.0
+        advances = []
+        for a0, a1 in zip(periapsis_azimuth[:-1], periapsis_azimuth[1:]):
+            radial_period_angle = direction * (a1 - a0)
+            advances.append(radial_period_angle - 2.0 * math.pi)
+        mean_advance = sum(advances) / len(advances)
 
     return RelativisticOrbitResult(
-        x=x_out,
-        y=y_out,
-        horizon_x=horizon_x,
-        horizon_y=horizon_y,
+        x=x,
+        y=y,
+        vx=vx,
+        vy=vy,
+        tau=tau,
+        azimuth_unwrapped=azimuth_unwrapped,
         n_orbits=n_orbits,
-        final_step=final_step,
+        final_step=accepted_steps,
         fell_into_hole=fell_into_hole,
+        termination_reason=termination_reason,
+        model=model,
+        periapsis_indices=periapsis_indices,
+        periapsis_tau=periapsis_tau,
+        periapsis_radius=periapsis_radius,
+        periapsis_azimuth=periapsis_azimuth,
+        mean_periapsis_advance=mean_advance,
+        max_fractional_h_drift=max_h_drift,
+        max_fractional_energy_drift=max_energy_drift,
     )
