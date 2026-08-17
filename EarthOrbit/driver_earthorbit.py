@@ -10,6 +10,9 @@ using the average of the old and new velocities.
 This is not velocity Verlet/leapfrog and is not generally symplectic.
 """
 
+import math
+import numbers
+
 import numpy as np
 from physics_earthorbit import compute_acceleration, R_EARTH, ForceLaw
 
@@ -55,11 +58,26 @@ def run_earth_orbit(
     xs, ys, xEarth, yEarth, ts, us, vs
         Returned when return_diagnostics is True.
     """
+    # Validate user-editable inputs before allocating arrays or integrating.
+    if force_law not in ("simplified", "inverse_square"):
+        raise ValueError("force_law must be 'simplified' or 'inverse_square'")
+
+    for name, value in (("h0", h0), ("uInit", uInit), ("vInit", vInit), ("dt", dt)):
+        if not isinstance(value, numbers.Real) or isinstance(value, bool) or not math.isfinite(value):
+            raise ValueError(f"{name} must be a finite real number")
+
+    if h0 < 0:
+        raise ValueError("h0 must be non-negative for this Earth-surface launch model")
+    if dt <= 0:
+        raise ValueError("dt must be a positive finite timestep in seconds")
+    if not isinstance(maxSteps, numbers.Integral) or isinstance(maxSteps, bool) or maxSteps < 2:
+        raise ValueError("maxSteps must be an integer >= 2")
+
     x = 0.0
     y = R_EARTH + h0
 
-    u0 = uInit
-    v0 = vInit
+    u0 = float(uInit)
+    v0 = float(vInit)
 
     xs = np.zeros(maxSteps)
     ys = np.zeros(maxSteps)

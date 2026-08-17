@@ -60,8 +60,13 @@ def compute_acceleration(
     ax, ay : float
         Acceleration components in m/s^2.
     """
+    if not math.isfinite(x) or not math.isfinite(y):
+        raise ValueError("x and y must be finite positions in metres")
+
     r2 = x * x + y * y
     r = math.sqrt(r2)
+    if r == 0.0:
+        raise ValueError("gravitational acceleration is undefined at Earth's centre")
 
     if force_law == "simplified":
         ax = -G_SURFACE * x / r
