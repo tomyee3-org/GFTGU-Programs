@@ -16,10 +16,30 @@ import numpy as np
 OutputType = Literal["acceleration", "relative difference"]
 
 
+def _validate_nDiv(nDiv):
+    """Validate the angular-division count used by the shell calculation."""
+    if not isinstance(nDiv, (int, np.integer)) or isinstance(nDiv, bool) or nDiv <= 0:
+        raise ValueError("nDiv must be a positive integer.")
+
+
+def _validate_epsilon(epsilon):
+    """Validate the shell mass-scale factor."""
+    if (
+        not isinstance(epsilon, (int, float, np.integer, np.floating))
+        or isinstance(epsilon, (bool, np.bool_))
+        or not np.isfinite(epsilon)
+        or epsilon <= 0
+    ):
+        raise ValueError("epsilon must be a positive finite number.")
+
+
 def compute_shell_mass(nDiv, epsilon=0.001):
     """
     Compute total mass of the spherical shell by summing tile masses.
     """
+    _validate_nDiv(nDiv)
+    _validate_epsilon(epsilon)
+
     degToRad = np.pi / 180.0
     dPhi = 360.0 * degToRad / nDiv
     dTheta = 0.5 * dPhi
@@ -37,7 +57,7 @@ def compute_shell_mass(nDiv, epsilon=0.001):
 
 def compute_acceleration_profile(nDiv, outputType: OutputType = "acceleration", epsilon=0.001):
     """
-    Compute gravitational acceleration at 1000 radii from r = 0 to r = 4.99
+    Compute gravitational acceleration at 1000 radii from r = 0 to r = 4.995
     (step 0.005), spanning 5 times the shell radius for a clear view of
     both interior and exterior behaviour.
 
@@ -51,14 +71,12 @@ def compute_acceleration_profile(nDiv, outputType: OutputType = "acceleration", 
         acceleration[]  — computed acceleration or relative difference
     """
 
-    if not isinstance(nDiv, (int, np.integer)) or isinstance(nDiv, bool) or nDiv <= 0:
-        raise ValueError("nDiv must be a positive integer.")
+    _validate_nDiv(nDiv)
     if outputType not in ("acceleration", "relative difference"):
         raise ValueError(
             "outputType must be 'acceleration' or 'relative difference'."
         )
-    if epsilon <= 0:
-        raise ValueError("epsilon must be positive.")
+    _validate_epsilon(epsilon)
 
     degToRad = np.pi / 180.0
     dPhi = 360.0 * degToRad / nDiv

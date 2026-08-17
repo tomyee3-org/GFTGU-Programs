@@ -6,6 +6,7 @@ Displays acceleration or relative difference vs radius.
 """
 
 import matplotlib.pyplot as plt
+import numpy as np
 
 from physics_spheregravity import OutputType
 
@@ -15,6 +16,20 @@ def plot_spheregravity(radius, acceleration, outputType: OutputType = "accelerat
         raise ValueError(
             "outputType must be 'acceleration' or 'relative difference'."
         )
+
+    radius = np.asarray(radius)
+    acceleration = np.asarray(acceleration)
+
+    if radius.ndim != 1 or acceleration.ndim != 1:
+        raise ValueError("radius and acceleration must be one-dimensional arrays.")
+    if radius.size == 0 or acceleration.size == 0:
+        raise ValueError("radius and acceleration must not be empty.")
+    if radius.size != acceleration.size:
+        raise ValueError("radius and acceleration must have the same length.")
+    if not np.issubdtype(radius.dtype, np.number) or not np.issubdtype(acceleration.dtype, np.number):
+        raise ValueError("radius and acceleration must contain numeric values.")
+    if not np.all(np.isfinite(radius)) or not np.all(np.isfinite(acceleration)):
+        raise ValueError("radius and acceleration must contain only finite values.")
 
     fig, ax = plt.subplots(figsize=(8, 6))
     ax.plot(radius, acceleration, linewidth=2)
