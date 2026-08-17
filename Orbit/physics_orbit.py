@@ -26,6 +26,11 @@ GM_SUN = 1.3271244e20
 
 def compute_acceleration(x: float, y: float, mu: float) -> tuple[float, float]:
     """Return Newtonian gravitational acceleration components."""
+    if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(mu)):
+        raise ValueError("x, y, and mu must be finite.")
+    if mu <= 0.0:
+        raise ValueError("mu=GM must be positive.")
+
     r2 = x * x + y * y
     if r2 <= 0.0:
         raise ValueError("The point-mass gravitational field is singular at r=0.")
@@ -43,6 +48,11 @@ def specific_energy(
     mu: float,
 ) -> float:
     """Return specific mechanical energy, v^2/2 - mu/r (J/kg)."""
+    if not all(math.isfinite(value) for value in (x, y, vx, vy, mu)):
+        raise ValueError("Position, velocity, and mu must be finite.")
+    if mu <= 0.0:
+        raise ValueError("mu=GM must be positive.")
+
     r = math.hypot(x, y)
     if r <= 0.0:
         raise ValueError("Specific energy is undefined at r=0.")
@@ -56,4 +66,6 @@ def specific_angular_momentum(
     vy: float,
 ) -> float:
     """Return signed specific angular momentum h_z = x*vy - y*vx."""
+    if not all(math.isfinite(value) for value in (x, y, vx, vy)):
+        raise ValueError("Position and velocity components must be finite.")
     return x * vy - y * vx

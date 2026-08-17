@@ -1,7 +1,7 @@
 """
 Plotting routine for Orbit.
 
-Five display modes are retained from the original program:
+Five display modes are available:
   "orbit"          -- x-y trajectory
   "velocity"       -- velocity-space hodograph
   "position_time"  -- x(t), y(t)

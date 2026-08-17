@@ -57,7 +57,7 @@ class OrbitResult:
     revolutions_completed: float
 
     max_fractional_energy_drift: float
-    max_fractional_angular_momentum_drift: float
+    max_fractional_angular_momentum_drift: float | None
 
     closure_radius_residual: float | None
     closure_velocity_residual: float | None
@@ -98,8 +98,10 @@ def _validate_inputs(
         raise ValueError("dt0 must be positive.")
     if not isinstance(maxSteps, int) or isinstance(maxSteps, bool) or maxSteps <= 0:
         raise ValueError("maxSteps must be a positive integer.")
-    if not (0.0 < eps2 < eps1 < 1.0):
-        raise ValueError("Require 0 < eps2 < eps1 < 1.")
+    if eps1 <= 0.0:
+        raise ValueError("eps1 must be positive.")
+    if eps2 <= 0.0:
+        raise ValueError("eps2 must be positive.")
     if maxOrbits <= 0.0:
         raise ValueError("maxOrbits must be positive.")
 
@@ -112,6 +114,22 @@ def _relative_vector_change(
 ) -> float:
     difference = math.hypot(new_x - old_x, new_y - old_y)
     scale = max(math.hypot(old_x, old_y), math.hypot(new_x, new_y))
+    if scale == 0.0:
+        return 0.0 if difference == 0.0 else math.inf
+    return difference / scale
+
+
+def _relative_increment_change(
+    old_dx: float,
+    old_dy: float,
+    new_dx: float,
+    new_dy: float,
+    reference_dx: float,
+    reference_dy: float,
+) -> float:
+    """Change between correction increments, scaled by the initial increment."""
+    difference = math.hypot(new_dx - old_dx, new_dy - old_dy)
+    scale = math.hypot(reference_dx, reference_dy)
     if scale == 0.0:
         return 0.0 if difference == 0.0 else math.inf
     return difference / scale
@@ -167,8 +185,7 @@ def run_orbit(
     """
     Integrate a Newtonian test-particle orbit.
 
-    Parameters retain the historical public names.  k is the central
-    gravitational parameter GM.
+    k is the central gravitational parameter GM.
 
     A bound orbit normally terminates at maxOrbits accumulated azimuthal
     revolutions.  An unbound or radial orbit generally terminates at maxSteps,
@@ -204,7 +221,12 @@ def run_orbit(
     Hs = [h0]
 
     max_energy_drift = 0.0
-    max_h_drift = 0.0
+
+    # A fractional angular-momentum drift is not meaningful when the initial
+    # angular momentum is zero (or numerically indistinguishable from zero).
+    h_scale = initial_radius * max(initial_speed, 1.0)
+    report_fractional_h_drift = abs(h0) > 1.0e-12 * h_scale
+    max_h_drift = 0.0 if report_fractional_h_drift else None
 
     dt_work = float(dt0)
     max_corrector_iterations = 10
@@ -242,10 +264,17 @@ def run_orbit(
                 dt_work *= 0.5
                 continue
 
-            # Iterated trapezoidal corrector.
+            # Iterated trapezoidal corrector.  Convergence is measured on
+            # the velocity increment over the step, scaled by the initial
+            # predicted increment.  This keeps eps2 tied to the correction
+            # itself rather than to the much larger orbital velocity.
             vx_guess, vy_guess = vx_pred, vy_pred
             x_guess, y_guess = x_pred, y_pred
             ax_end, ay_end = ax_pred, ay_pred
+            dvx_reference = vx_pred - vx
+            dvy_reference = vy_pred - vy
+            dvx_guess = dvx_reference
+            dvy_guess = dvy_reference
             converged = False
 
             for _ in range(max_corrector_iterations):
@@ -259,14 +288,22 @@ def run_orbit(
                     converged = False
                     break
 
-                velocity_change = _relative_vector_change(
-                    vx_guess, vy_guess, vx_corr, vy_corr
+                dvx_corr = vx_corr - vx
+                dvy_corr = vy_corr - vy
+                correction_change = _relative_increment_change(
+                    dvx_guess,
+                    dvy_guess,
+                    dvx_corr,
+                    dvy_corr,
+                    dvx_reference,
+                    dvy_reference,
                 )
 
                 x_guess, y_guess = x_corr, y_corr
                 vx_guess, vy_guess = vx_corr, vy_corr
+                dvx_guess, dvy_guess = dvx_corr, dvy_corr
 
-                if velocity_change <= eps2:
+                if correction_change <= eps2:
                     converged = True
                     break
 
@@ -288,7 +325,8 @@ def run_orbit(
         if not accepted:
             raise RuntimeError(
                 "Orbit could not find a converged timestep after "
-                f"{max_retries_per_step} retries."
+                f"{max_retries_per_step} retries at t={t:.6g} s, "
+                f"r={math.hypot(x, y):.6g} m, dt={dt_work:.6g} s."
             )
 
         x1, y1 = x_guess, y_guess
@@ -356,19 +394,24 @@ def run_orbit(
             max_energy_drift,
             _fractional_drift(energy_now, energy0),
         )
-        max_h_drift = max(
-            max_h_drift,
-            _fractional_drift(h_now, h0),
-        )
+        if max_h_drift is not None:
+            max_h_drift = max(
+                max_h_drift,
+                _fractional_drift(h_now, h0),
+            )
 
         if crossed_target:
-            closure_radius_residual = abs(radius - initial_radius) / initial_radius
-            if initial_speed > 0.0:
-                closure_velocity_residual = (
-                    math.hypot(vx - vxInit, vy - vyInit) / initial_speed
-                )
-            else:
-                closure_velocity_residual = math.hypot(vx - vxInit, vy - vyInit)
+            # Closure residuals compare the final state with the initial state
+            # and are meaningful only after an integral number of revolutions.
+            nearest_integer_orbits = round(maxOrbits)
+            if math.isclose(maxOrbits, nearest_integer_orbits, rel_tol=0.0, abs_tol=1.0e-12):
+                closure_radius_residual = abs(radius - initial_radius) / initial_radius
+                if initial_speed > 0.0:
+                    closure_velocity_residual = (
+                        math.hypot(vx - vxInit, vy - vyInit) / initial_speed
+                    )
+                else:
+                    closure_velocity_residual = math.hypot(vx - vxInit, vy - vyInit)
             break
 
         # Gradual recovery after demanding portions of the orbit.

@@ -28,22 +28,26 @@ def main() -> None:
     eps1 = 0.05          # acceleration-vector timestep tolerance
     eps2 = 1.0e-4        # corrector velocity-convergence tolerance
 
-    # Five historical display modes:
+    # Five display modes are available:
     #   "orbit", "velocity", "position_time", "velocity_time", "energy"
     output: OutputType = "orbit"
 
-    result = run_orbit(
-        xInit=xInit,
-        yInit=yInit,
-        vxInit=vxInit,
-        vyInit=vyInit,
-        k=k,
-        dt0=dt0,
-        maxSteps=maxSteps,
-        eps1=eps1,
-        eps2=eps2,
-        maxOrbits=maxOrbits,
-    )
+    try:
+        result = run_orbit(
+            xInit=xInit,
+            yInit=yInit,
+            vxInit=vxInit,
+            vyInit=vyInit,
+            k=k,
+            dt0=dt0,
+            maxSteps=maxSteps,
+            eps1=eps1,
+            eps2=eps2,
+            maxOrbits=maxOrbits,
+        )
+    except (ValueError, RuntimeError) as exc:
+        print(f"Orbit could not run: {exc}")
+        return
 
     reason = {
         "max_orbits": "requested revolution count reached",
@@ -60,22 +64,28 @@ def main() -> None:
         "  max fractional energy drift       : "
         f"{result.max_fractional_energy_drift:.3e}"
     )
-    print(
-        "  max fractional angular-momentum drift: "
-        f"{result.max_fractional_angular_momentum_drift:.3e}"
-    )
+    if result.max_fractional_angular_momentum_drift is None:
+        print("  max fractional angular-momentum drift: n/a (initial h is zero)")
+    else:
+        print(
+            "  max fractional angular-momentum drift: "
+            f"{result.max_fractional_angular_momentum_drift:.3e}"
+        )
 
     if result.closure_radius_residual is not None:
         print(
-            "  one-revolution radius residual     : "
+            "  closure radius residual            : "
             f"{result.closure_radius_residual:.3e}"
         )
         print(
-            "  one-revolution velocity residual   : "
+            "  closure velocity residual          : "
             f"{result.closure_velocity_residual:.3e}"
         )
 
-    plot_orbit(result, output=output)
+    try:
+        plot_orbit(result, output=output)
+    except ValueError as exc:
+        print(f"Orbit could not display the selected output: {exc}")
 
 
 if __name__ == "__main__":
