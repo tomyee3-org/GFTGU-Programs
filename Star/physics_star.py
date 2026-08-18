@@ -7,7 +7,8 @@ held to one polytropic law throughout the star, and hydrostatic equilibrium
 and enclosed mass are integrated outward.
 """
 
-from math import pi, sqrt
+from math import isfinite, pi, sqrt
+from numbers import Real
 
 # Physical constants in SI units.  These values are retained from the
 # educational model so that its default results remain consistent with the
@@ -17,8 +18,15 @@ MPROTON = 1.67e-27          # kg
 G_NEWTON = 6.672e-11        # m^3 kg^-1 s^-2
 
 
+def _validate_finite_real(name, value):
+    """Require a finite real scalar, excluding bool values."""
+    if isinstance(value, bool) or not isinstance(value, Real) or not isfinite(value):
+        raise ValueError(f"{name} must be a finite real number.")
+
+
 def q_factor(mu: float) -> float:
     """Return m_p * mu / k_B for the ideal-gas relation."""
+    _validate_finite_real("mu", mu)
     if mu <= 0.0:
         raise ValueError("mu must be positive.")
     return MPROTON * mu / k_BOLTZMANN
@@ -26,6 +34,9 @@ def q_factor(mu: float) -> float:
 
 def central_density(p_c: float, T_c: float, mu: float) -> float:
     """Compute central density from central pressure and temperature."""
+    _validate_finite_real("p_c", p_c)
+    _validate_finite_real("T_c", T_c)
+    _validate_finite_real("mu", mu)
     if p_c <= 0.0:
         raise ValueError("p_c must be positive.")
     if T_c <= 0.0:
@@ -35,6 +46,9 @@ def central_density(p_c: float, T_c: float, mu: float) -> float:
 
 def polytropic_D(rho_c: float, p_c: float, gamma: float) -> float:
     """Return D in rho = D * p**(1/gamma), fixed by central conditions."""
+    _validate_finite_real("rho_c", rho_c)
+    _validate_finite_real("p_c", p_c)
+    _validate_finite_real("gamma", gamma)
     if rho_c <= 0.0:
         raise ValueError("rho_c must be positive.")
     if p_c <= 0.0:
@@ -53,6 +67,8 @@ def radial_scale(p_c: float, rho_c: float) -> float:
     This is a dimensional scale for the model, not a literal local pressure
     scale height at the stellar center (where dp/dr tends to zero).
     """
+    _validate_finite_real("p_c", p_c)
+    _validate_finite_real("rho_c", rho_c)
     if p_c <= 0.0:
         raise ValueError("p_c must be positive.")
     if rho_c <= 0.0:
@@ -68,6 +84,15 @@ def scale_height(p_c: float, rho_c: float) -> float:
 def hydrostatic_step(p_prev: float, rho_prev: float,
                      mass_prev: float, r_prev: float, dr: float) -> float:
     """One forward-Euler step of dp/dr = -G rho m(r) / r^2."""
+    for name, value in (("p_prev", p_prev), ("rho_prev", rho_prev),
+                        ("mass_prev", mass_prev), ("r_prev", r_prev), ("dr", dr)):
+        _validate_finite_real(name, value)
+    if p_prev < 0.0:
+        raise ValueError("p_prev must not be negative.")
+    if rho_prev < 0.0:
+        raise ValueError("rho_prev must not be negative.")
+    if mass_prev < 0.0:
+        raise ValueError("mass_prev must not be negative.")
     if r_prev <= 0.0:
         raise ValueError("r_prev must be positive in hydrostatic_step().")
     if dr <= 0.0:
@@ -77,6 +102,11 @@ def hydrostatic_step(p_prev: float, rho_prev: float,
 
 def mass_step(mass_prev: float, r_prev: float, rho_prev: float, dr: float) -> float:
     """One forward-Euler step of dm/dr = 4*pi*r^2*rho."""
+    for name, value in (("mass_prev", mass_prev), ("r_prev", r_prev),
+                        ("rho_prev", rho_prev), ("dr", dr)):
+        _validate_finite_real(name, value)
+    if mass_prev < 0.0:
+        raise ValueError("mass_prev must not be negative.")
     if r_prev < 0.0:
         raise ValueError("r_prev must not be negative.")
     if rho_prev < 0.0:
@@ -88,6 +118,9 @@ def mass_step(mass_prev: float, r_prev: float, rho_prev: float, dr: float) -> fl
 
 def density_from_pressure(p: float, D: float, gamma: float) -> float:
     """Polytropic equation of state rho = D * p**(1/gamma)."""
+    _validate_finite_real("p", p)
+    _validate_finite_real("D", D)
+    _validate_finite_real("gamma", gamma)
     if p < 0.0:
         raise ValueError("p must not be negative when computing density.")
     if D <= 0.0:
@@ -99,6 +132,9 @@ def density_from_pressure(p: float, D: float, gamma: float) -> float:
 
 def temperature_from_prho(p: float, rho: float, mu: float) -> float:
     """Recover temperature from the ideal-gas relation T = q*p/rho."""
+    _validate_finite_real("p", p)
+    _validate_finite_real("rho", rho)
+    _validate_finite_real("mu", mu)
     if p < 0.0:
         raise ValueError("p must not be negative when computing temperature.")
     if rho <= 0.0:

@@ -9,7 +9,8 @@ adaptive integrator.
 
 from dataclasses import dataclass
 from typing import List, Literal
-from math import pi
+from math import isfinite, pi
+from numbers import Real
 
 from physics_star import (
     central_density,
@@ -43,7 +44,16 @@ class StarResult:
         return self.surface_index
 
 
+def _validate_finite_real(name, value):
+    """Require a finite real scalar, excluding bool values."""
+    if isinstance(value, bool) or not isinstance(value, Real) or not isfinite(value):
+        raise ValueError(f"{name} must be a finite real number.")
+
+
 def _validate_inputs(p_c, T_c, mu, gamma, max_points, steps_per_scale, output_type):
+    for name, value in (("p_c", p_c), ("T_c", T_c), ("mu", mu), ("gamma", gamma)):
+        _validate_finite_real(name, value)
+
     if p_c <= 0.0:
         raise ValueError("p_c must be positive.")
     if T_c <= 0.0:
@@ -83,6 +93,7 @@ def integrate_star(
     scale = radial_scale(p_c, rho_c)
     dr = scale / steps_per_scale
     restart_count = 0
+    max_restarts = 64
 
     while True:
         radius = [0.0] * max_points
@@ -159,3 +170,7 @@ def integrate_star(
         # and restart; this sacrifices resolution to obtain sufficient range.
         dr *= 2.0
         restart_count += 1
+        if restart_count > max_restarts or not isfinite(dr):
+            raise RuntimeError(
+                "Unable to reach the zero-pressure surface with finite radial steps."
+            )
