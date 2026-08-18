@@ -31,7 +31,7 @@ def plot_relativistic_orbit(
         label="Orbit",
     )
 
-    # Fixed-size origin marker; unlike the old plotter this does not change the
+    # Fixed-size origin marker keeps the origin visible without changing the
     # physical size of the horizon.
     ax.plot(
         [0.0],

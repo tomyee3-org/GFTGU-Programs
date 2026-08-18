@@ -31,9 +31,23 @@ def orbital_constants(x_init: float, u_init: float) -> tuple[float, float]:
       h = x_init * u_init
       K = h/2
       Q = 12 K^2/c^2 = 3 h^2/c^2
+
+    Q is retained because it provides a direct bridge to Schutz's notation.
     """
+    if not (math.isfinite(x_init) and math.isfinite(u_init)):
+        raise ValueError("x_init and u_init must be finite.")
+
     h = x_init * u_init
-    q = 3.0 * h * h / C2
+    if not math.isfinite(h):
+        raise ValueError("The initial data produce a non-finite angular momentum.")
+
+    h2 = h * h
+    if not math.isfinite(h2):
+        raise ValueError("The initial data are too large to evaluate h^2 safely.")
+
+    q = 3.0 * h2 / C2
+    if not math.isfinite(q):
+        raise ValueError("The initial data produce a non-finite relativistic correction.")
     return h, q
 
 
@@ -57,16 +71,28 @@ def central_acceleration(
     "acceleration" here is a coordinate second derivative; a freely falling
     particle's physical proper acceleration is zero.
     """
+    if not all(math.isfinite(value) for value in (x, y, h)):
+        raise ValueError("Orbit state must remain finite.")
+
     r2 = x * x + y * y
+    if not math.isfinite(r2):
+        raise ValueError("Orbit coordinates are too large to evaluate r^2 safely.")
     if r2 <= 0.0:
         raise ValueError("The test particle reached r=0, where this coordinate equation is singular.")
 
     r = math.sqrt(r2)
     r3 = r * r2
+    if not math.isfinite(r3):
+        raise ValueError("Orbit coordinates are too large to evaluate r^3 safely.")
 
+    if not isinstance(model, str):
+        raise ValueError('model must be "schwarzschild" or "newtonian".')
     model_key = model.lower()
     if model_key == "schwarzschild":
-        correction = 1.0 + 3.0 * h * h / (C2 * r2)
+        h2 = h * h
+        if not math.isfinite(h2):
+            raise ValueError("Angular momentum is too large to evaluate h^2 safely.")
+        correction = 1.0 + 3.0 * h2 / (C2 * r2)
     elif model_key == "newtonian":
         correction = 1.0
     else:
@@ -100,19 +126,39 @@ def effective_specific_energy(
     This is a numerical diagnostic for the equation being integrated, not the
     locally measured kinetic-plus-potential energy of a relativistic observer.
     """
+    if not all(math.isfinite(value) for value in (x, y, vx, vy, h_constant)):
+        raise ValueError("Orbit state must remain finite.")
+
     r = math.hypot(x, y)
+    if not math.isfinite(r):
+        raise ValueError("Orbit coordinates are too large to evaluate the effective energy safely.")
     if r <= 0.0:
         raise ValueError("Effective energy is undefined at r=0.")
 
-    kinetic = 0.5 * (vx * vx + vy * vy)
+    speed2 = vx * vx + vy * vy
+    if not math.isfinite(speed2):
+        raise ValueError("Velocity is too large to evaluate the effective energy safely.")
+    kinetic = 0.5 * speed2
     potential = -GM_SUN / r
 
-    if model.lower() == "schwarzschild":
-        potential -= GM_SUN * h_constant * h_constant / (C2 * r**3)
-    elif model.lower() != "newtonian":
+    if not isinstance(model, str):
+        raise ValueError('model must be "schwarzschild" or "newtonian".')
+    model_key = model.lower()
+    if model_key == "schwarzschild":
+        h2 = h_constant * h_constant
+        if not math.isfinite(h2):
+            raise ValueError("Angular momentum is too large to evaluate the effective energy safely.")
+        relativistic_term = GM_SUN * h2 / (C2 * r * r * r)
+        if not math.isfinite(relativistic_term):
+            raise ValueError("The relativistic energy term is non-finite.")
+        potential -= relativistic_term
+    elif model_key != "newtonian":
         raise ValueError('model must be "schwarzschild" or "newtonian".')
 
-    return kinetic + potential
+    energy = kinetic + potential
+    if not math.isfinite(energy):
+        raise ValueError("The effective energy became non-finite.")
+    return energy
 
 
 def circular_proper_time_speed(radius: float) -> float:
@@ -122,6 +168,9 @@ def circular_proper_time_speed(radius: float) -> float:
     Valid only for radius > 3 GM/c^2.  Circular timelike geodesics between
     3 GM/c^2 and 6 GM/c^2 are unstable; those above 6 GM/c^2 are stable.
     """
+    if not math.isfinite(radius):
+        raise ValueError("radius must be finite.")
+
     denominator = radius - 3.0 * GM_SUN / C2
     if denominator <= 0.0:
         raise ValueError("No timelike circular Schwarzschild geodesic exists at or below 3GM/c^2.")

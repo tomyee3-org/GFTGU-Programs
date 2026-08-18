@@ -55,6 +55,9 @@ class RelativisticOrbitResult:
 
 
 def _validate_params(params: RelativisticOrbitParams) -> None:
+    if not isinstance(params.model, str):
+        raise ValueError('model must be "schwarzschild" or "newtonian".')
+
     finite_values = {
         "x_init": params.x_init,
         "u_init": params.u_init,
@@ -138,6 +141,15 @@ def _fractional_drift(value: float, reference: float) -> float:
     return abs(value - reference) / scale
 
 
+def _require_finite_state(stage: str, *values: float) -> None:
+    """Raise a student-facing error if an attempted integration state is non-finite."""
+    if not all(math.isfinite(value) for value in values):
+        raise RuntimeError(
+            f"RelativisticOrbit produced a non-finite value during {stage}. "
+            "Use less extreme initial data and/or a smaller dt."
+        )
+
+
 def integrate_relativistic_orbit(
     params: RelativisticOrbitParams,
 ) -> RelativisticOrbitResult:
@@ -200,10 +212,14 @@ def integrate_relativistic_orbit(
             y_pred = y0 + vy0 * dt_work + 0.5 * ay0 * dt_work * dt_work
             vx_pred = vx0 + ax0 * dt_work
             vy_pred = vy0 + ay0 * dt_work
+            _require_finite_state(
+                "the predictor", x_pred, y_pred, vx_pred, vy_pred
+            )
 
             ax_pred, ay_pred = central_acceleration(
                 x_pred, y_pred, h_constant, model
             )
+            _require_finite_state("the predicted acceleration", ax_pred, ay_pred)
 
             if _relative_vector_change(ax0, ay0, ax_pred, ay_pred) > params.eps1:
                 dt_work *= 0.5
@@ -220,6 +236,9 @@ def integrate_relativistic_orbit(
                 vy_corr = vy0 + 0.5 * (ay0 + ay_end) * dt_work
                 x_corr = x0 + 0.5 * (vx0 + vx_corr) * dt_work
                 y_corr = y0 + 0.5 * (vy0 + vy_corr) * dt_work
+                _require_finite_state(
+                    "the corrector", x_corr, y_corr, vx_corr, vy_corr
+                )
 
                 velocity_change = _relative_vector_change(
                     vx_guess, vy_guess, vx_corr, vy_corr
@@ -234,6 +253,9 @@ def integrate_relativistic_orbit(
 
                 ax_end, ay_end = central_acceleration(
                     x_guess, y_guess, h_constant, model
+                )
+                _require_finite_state(
+                    "the corrected acceleration", ax_end, ay_end
                 )
 
             if not converged:
@@ -313,18 +335,15 @@ def integrate_relativistic_orbit(
         if fell_into_hole:
             break
 
+        if abs(accumulated_angle) >= 2.0 * math.pi * params.max_orbits:
+            termination_reason = "max_orbits"
+            break
+
         # Recover gradually after a close passage, never above the user's dt.
         dt_work = min(dt_work * 1.1, params.dt)
 
     else:
         termination_reason = "max_steps"
-
-    # If we exited after the loop condition became true, identify max_orbits.
-    if (
-        termination_reason == "max_steps"
-        and abs(accumulated_angle) >= 2.0 * math.pi * params.max_orbits
-    ):
-        termination_reason = "max_orbits"
 
     n_orbits = abs(accumulated_angle) / (2.0 * math.pi)
 
