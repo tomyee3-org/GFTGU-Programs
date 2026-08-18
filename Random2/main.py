@@ -6,8 +6,8 @@ User entry point for Random2.
 Choose one display:
 
     "scaled_distance"
-        Statistical random-walk experiment showing the sqrt(N)
-        diffusion law.
+        Statistical three-dimensional random-walk experiment showing
+        the sqrt(N) displacement law.
 
     "walk2d"
         A small number of fixed-step, isotropic 2D walks drawn inside

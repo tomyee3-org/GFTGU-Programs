@@ -4,7 +4,7 @@ random2_driver.py
 Driver routines for Random2.
 
 "scaled_distance"
-    For a sequence of step counts, perform many independent 2D random
+    For a sequence of step counts, perform many independent 3D random
     walks and average the net displacement after dividing by that
     walk's mean step length. The experiment demonstrates the sqrt(N)
     scaling of random-walk displacement.
@@ -16,7 +16,8 @@ Driver routines for Random2.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Literal, Optional, Tuple
+from numbers import Real
+from typing import List, Optional, Tuple
 import math
 
 from random2_physics import (
@@ -35,33 +36,53 @@ def _require_positive_int(name: str, value: int) -> None:
         raise ValueError(f"{name} must be a positive integer.")
 
 
+def _require_positive_finite_number(name: str, value: Real) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise ValueError(f"{name} must be a positive finite number.")
+    numeric = float(value)
+    if not math.isfinite(numeric) or numeric <= 0.0:
+        raise ValueError(f"{name} must be a positive finite number.")
+    return numeric
+
+
+def _require_nonnegative_finite_number(name: str, value: Real) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise ValueError(f"{name} must be a nonnegative finite number.")
+    numeric = float(value)
+    if not math.isfinite(numeric) or numeric < 0.0:
+        raise ValueError(f"{name} must be a nonnegative finite number.")
+    return numeric
+
+
 # ---------------------------------------------------------------------
 # "scaled_distance" mode
 # ---------------------------------------------------------------------
 
-def _perform_single_walk_2d(
+def _perform_single_walk_3d(
     n_steps: int,
     step_distribution: StepDistribution = "uniform",
 ) -> Tuple[float, float]:
-    """Return (net_distance, mean_step_length) for one 2D walk."""
+    """Return (net_distance, mean_step_length) for one 3D walk."""
     _require_positive_int("n_steps", n_steps)
 
     x = 0.0
     y = 0.0
+    z = 0.0
     step_size_total = 0.0
 
     for _ in range(n_steps):
-        dx, dy = generate_component_step(step_distribution)
-        step_size_total += math.hypot(dx, dy)
+        dx, dy, dz = generate_component_step(step_distribution)
+        step_size_total += math.sqrt(dx * dx + dy * dy + dz * dz)
         x += dx
         y += dy
+        z += dz
 
-    net_distance = math.hypot(x, y)
+    net_distance = math.sqrt(x * x + y * y + z * z)
     mean_step_length = step_size_total / n_steps
     return net_distance, mean_step_length
 
 
-def _perform_trials_2d(
+def _perform_trials_3d(
     n_steps: int,
     n_trials: int,
     step_distribution: StepDistribution = "uniform",
@@ -71,9 +92,13 @@ def _perform_trials_2d(
 
     total = 0.0
     for _ in range(n_trials):
-        net_distance, mean_step = _perform_single_walk_2d(
+        net_distance, mean_step = _perform_single_walk_3d(
             n_steps, step_distribution
         )
+        if not math.isfinite(mean_step) or mean_step <= 0.0:
+            raise RuntimeError(
+                "generated walk has a nonpositive or non-finite mean step length."
+            )
         total += net_distance / mean_step
     return total / n_trials
 
@@ -108,7 +133,7 @@ def run_scaled_distance_experiment(
         pairs.append(
             (
                 float(n_steps),
-                _perform_trials_2d(
+                _perform_trials_3d(
                     n_steps,
                     n_trials,
                     step_distribution,
@@ -169,12 +194,15 @@ def run_walk2d(
     _require_positive_int("n_walks", n_walks)
     _require_positive_int("step_cap", step_cap)
 
-    if mean_free_path <= 0.0:
-        raise ValueError("mean_free_path must be positive.")
-    if radius_factor <= 0.0:
-        raise ValueError("radius_factor must be positive.")
-    if ray_length_factor < 0.0:
-        raise ValueError("ray_length_factor must not be negative.")
+    mean_free_path = _require_positive_finite_number(
+        "mean_free_path", mean_free_path
+    )
+    radius_factor = _require_positive_finite_number(
+        "radius_factor", radius_factor
+    )
+    ray_length_factor = _require_nonnegative_finite_number(
+        "ray_length_factor", ray_length_factor
+    )
 
     if radius is None:
         radius = default_radius(
@@ -182,8 +210,8 @@ def run_walk2d(
             mean_free_path,
             radius_factor,
         )
-    elif radius <= 0.0:
-        raise ValueError("radius must be positive when supplied.")
+    else:
+        radius = _require_positive_finite_number("radius", radius)
 
     walks: List[WalkPath] = []
 
@@ -205,11 +233,12 @@ def run_walk2d(
                     (x_new, y_new),
                     radius,
                 )
-                exit_point = (
-                    point_at((x, y), (x_new, y_new), t)
-                    if t is not None
-                    else (x_new, y_new)
-                )
+                if t is None:
+                    raise RuntimeError(
+                        "boundary crossing was detected but no circle "
+                        "intersection could be computed."
+                    )
+                exit_point = point_at((x, y), (x_new, y_new), t)
                 points.append(exit_point)
 
                 if ray_length_factor > 0.0:

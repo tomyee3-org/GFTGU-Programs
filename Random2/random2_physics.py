@@ -6,7 +6,7 @@ Physics and geometry for Random2.
 Two step generators are provided for two different purposes:
 
     generate_component_step()
-        Used by the scaled-distance experiment. The x and y components
+        Used by the scaled-distance experiment. The x, y, and z components
         are independent random variables. The default distribution is
         uniform on [-1, 1], matching the component-based construction
         used in Schutz's original Random program. A Gaussian option is
@@ -26,23 +26,35 @@ a circular boundary.
 
 import math
 import random
+from numbers import Real
 from typing import Literal, Optional, Tuple
 
 Point = Tuple[float, float]
+ComponentStep3D = Tuple[float, float, float]
 StepDistribution = Literal["uniform", "gaussian"]
+
+
+def _require_positive_finite_number(name: str, value: Real) -> float:
+    """Validate and return a positive finite real number."""
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise ValueError(f"{name} must be a positive finite number.")
+    numeric = float(value)
+    if not math.isfinite(numeric) or numeric <= 0.0:
+        raise ValueError(f"{name} must be a positive finite number.")
+    return numeric
 
 
 def generate_component_step(
     distribution: StepDistribution = "uniform",
-) -> Point:
+) -> ComponentStep3D:
     """
-    Generate one 2D step for the scaled-distance experiment.
+    Generate one 3D step for the scaled-distance experiment.
 
     "uniform":
-        dx and dy are independent and uniform on [-1, 1].
+        dx, dy, and dz are independent and uniform on [-1, 1].
 
     "gaussian":
-        dx and dy are independent standard normal random variables.
+        dx, dy, and dz are independent standard normal random variables.
 
     These component-based steps are not isotropic in direction for the
     uniform case; that does not affect the sqrt(N) scaling experiment.
@@ -50,14 +62,16 @@ def generate_component_step(
     if distribution == "uniform":
         dx = 2.0 * random.random() - 1.0
         dy = 2.0 * random.random() - 1.0
+        dz = 2.0 * random.random() - 1.0
     elif distribution == "gaussian":
         dx = random.gauss(0.0, 1.0)
         dy = random.gauss(0.0, 1.0)
+        dz = random.gauss(0.0, 1.0)
     else:
         raise ValueError(
             'distribution must be "uniform" or "gaussian".'
         )
-    return dx, dy
+    return dx, dy, dz
 
 
 def generate_isotropic_step(mean_free_path: float = 1.0) -> Point:
@@ -67,8 +81,9 @@ def generate_isotropic_step(mean_free_path: float = 1.0) -> Point:
     theta is uniform on [0, 2*pi), so every direction is equally
     probable, and the step length is exactly mean_free_path.
     """
-    if mean_free_path <= 0.0:
-        raise ValueError("mean_free_path must be positive.")
+    mean_free_path = _require_positive_finite_number(
+        "mean_free_path", mean_free_path
+    )
 
     theta = 2.0 * math.pi * random.random()
     return (
@@ -95,10 +110,13 @@ def default_radius(
         raise ValueError("reference_steps must be a positive integer.")
     if reference_steps <= 0:
         raise ValueError("reference_steps must be a positive integer.")
-    if mean_free_path <= 0.0:
-        raise ValueError("mean_free_path must be positive.")
-    if radius_factor <= 0.0:
-        raise ValueError("radius_factor must be positive.")
+
+    mean_free_path = _require_positive_finite_number(
+        "mean_free_path", mean_free_path
+    )
+    radius_factor = _require_positive_finite_number(
+        "radius_factor", radius_factor
+    )
 
     return radius_factor * mean_free_path * math.sqrt(reference_steps)
 
@@ -116,8 +134,7 @@ def circle_crossing_fraction(
 
     Return None if the segment has no crossing in (0, 1].
     """
-    if radius <= 0.0:
-        raise ValueError("radius must be positive.")
+    radius = _require_positive_finite_number("radius", radius)
 
     x0, y0 = p0
     dx, dy = p1[0] - p0[0], p1[1] - p0[1]
