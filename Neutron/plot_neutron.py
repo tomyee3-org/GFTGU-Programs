@@ -38,16 +38,21 @@ def plot_neutron(data: dict, output_type: str, *, log_y: bool = False) -> None:
         ylabel = r"Enclosed mass ($M_\odot$)"
 
     fig, ax = plt.subplots(figsize=(8, 6))
-    ax.plot(r_km, y, lw=2)
+
+    if log_y and output_type in {"Pressure", "Density"}:
+        # A logarithmic axis cannot display the exact zero-valued surface point.
+        # Mask nonpositive values explicitly rather than relying on Matplotlib to
+        # discard them.
+        positive = y > 0.0
+        ax.plot(r_km[positive], y[positive], lw=2)
+        ax.set_yscale("log")
+    else:
+        ax.plot(r_km, y, lw=2)
+
     ax.set_xlabel("Radius (km)")
     ax.set_ylabel(ylabel)
     ax.set_title(f"Neutron Star: {output_type}")
     ax.grid(True, alpha=0.3)
-
-    if log_y and output_type in {"Pressure", "Density"}:
-        # The final surface point is exactly zero and cannot appear on a log
-        # axis. Matplotlib naturally omits that endpoint.
-        ax.set_yscale("log")
 
     plt.tight_layout()
     plt.show()
