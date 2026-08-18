@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Literal, Tuple
 
 import matplotlib.pyplot as plt
+import math
 
 from planck2_driver import Planck2Result
 
@@ -35,8 +36,13 @@ def plot_planck2(
     if corner not in _CORNER_TO_ANCHOR:
         allowed = ", ".join(repr(x) for x in _CORNER_TO_ANCHOR)
         raise ValueError(f"corner must be one of: {allowed}.")
-    if y_frac_window < 0.0:
-        raise ValueError("y_frac_window must not be negative.")
+    if (
+        not isinstance(y_frac_window, (int, float))
+        or isinstance(y_frac_window, bool)
+        or not math.isfinite(y_frac_window)
+        or not 0.0 <= y_frac_window <= 1.0
+    ):
+        raise ValueError("y_frac_window must be a finite number from 0 to 1.")
 
     fig, ax = plt.subplots(figsize=(9, 6))
 

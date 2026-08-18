@@ -49,6 +49,14 @@ class PlanckDomain:
     x_high: float = 20.0
 
     def validate(self) -> None:
+        values = (self.x_min, self.x_max, self.x_low, self.x_high)
+        if not all(
+            isinstance(v, (int, float))
+            and not isinstance(v, bool)
+            and math.isfinite(v)
+            for v in values
+        ):
+            raise ValueError("Domain values must be finite numbers.")
         if not (0.0 < self.x_min < self.x_max):
             raise ValueError("Require 0 < x_min < x_max.")
         if not (self.x_min <= self.x_low < self.x_high <= self.x_max):
@@ -66,8 +74,8 @@ def validate_quantity(quantity: str) -> None:
 
 def ln_shape_function(x: float, p: int, domain: PlanckDomain) -> float:
     """Return ln[x^p/(exp(x)-1)] using stable small/exact/large-x branches."""
-    if x <= 0.0:
-        raise ValueError("x must be positive.")
+    if not isinstance(x, (int, float)) or isinstance(x, bool) or not math.isfinite(x) or x <= 0.0:
+        raise ValueError("x must be a finite positive number.")
 
     if x > domain.x_high:
         # exp(x) >> 1, so ln(exp(x)-1) ~= x.
@@ -91,8 +99,8 @@ def shape_function(x: float, quantity: PlanckQuantity, domain: PlanckDomain) -> 
 def prefactor(quantity: PlanckQuantity, T: float) -> float:
     """Return the SI prefactor multiplying the selected dimensionless shape."""
     validate_quantity(quantity)
-    if T <= 0.0:
-        raise ValueError("Temperature must be positive.")
+    if not isinstance(T, (int, float)) or isinstance(T, bool) or not math.isfinite(T) or T <= 0.0:
+        raise ValueError("Temperature must be a finite positive number.")
 
     if quantity == "wavelength":
         # B_lambda = [2 k^5 T^5/(h^4 c^3)] x^5/(exp(x)-1)
@@ -108,10 +116,10 @@ def prefactor(quantity: PlanckQuantity, T: float) -> float:
 def coordinate_jacobian(quantity: PlanckQuantity, x: float, T: float) -> float:
     """Return |d(lambda)/dx| or d(nu)/dx for integrating the physical spectrum."""
     validate_quantity(quantity)
-    if T <= 0.0:
-        raise ValueError("Temperature must be positive.")
-    if x <= 0.0:
-        raise ValueError("x must be positive.")
+    if not isinstance(T, (int, float)) or isinstance(T, bool) or not math.isfinite(T) or T <= 0.0:
+        raise ValueError("Temperature must be a finite positive number.")
+    if not isinstance(x, (int, float)) or isinstance(x, bool) or not math.isfinite(x) or x <= 0.0:
+        raise ValueError("x must be a finite positive number.")
 
     if quantity == "wavelength":
         # lambda = hc/(x k T)
@@ -123,8 +131,8 @@ def coordinate_jacobian(quantity: PlanckQuantity, x: float, T: float) -> float:
 def exact_physical_integral(quantity: PlanckQuantity, T: float) -> float:
     """Exact bolometric integral for the selected physical spectral quantity."""
     validate_quantity(quantity)
-    if T <= 0.0:
-        raise ValueError("Temperature must be positive.")
+    if not isinstance(T, (int, float)) or isinstance(T, bool) or not math.isfinite(T) or T <= 0.0:
+        raise ValueError("Temperature must be a finite positive number.")
 
     if quantity in ("wavelength", "frequency"):
         # Integral of spectral radiance over wavelength or frequency.
@@ -135,15 +143,33 @@ def exact_physical_integral(quantity: PlanckQuantity, T: float) -> float:
 
 def x_to_wavelength(x: float, T: float) -> float:
     """lambda = hc/(x k T), in metres."""
-    if x <= 0.0 or T <= 0.0:
-        raise ValueError("x and T must be positive.")
+    if (
+        not isinstance(x, (int, float))
+        or isinstance(x, bool)
+        or not math.isfinite(x)
+        or x <= 0.0
+        or not isinstance(T, (int, float))
+        or isinstance(T, bool)
+        or not math.isfinite(T)
+        or T <= 0.0
+    ):
+        raise ValueError("x and T must be finite positive numbers.")
     return H_PLANCK * C_LIGHT / (x * K_BOLTZMANN * T)
 
 
 def x_to_frequency(x: float, T: float) -> float:
     """nu = x k T/h, in hertz."""
-    if x <= 0.0 or T <= 0.0:
-        raise ValueError("x and T must be positive.")
+    if (
+        not isinstance(x, (int, float))
+        or isinstance(x, bool)
+        or not math.isfinite(x)
+        or x <= 0.0
+        or not isinstance(T, (int, float))
+        or isinstance(T, bool)
+        or not math.isfinite(T)
+        or T <= 0.0
+    ):
+        raise ValueError("x and T must be finite positive numbers.")
     return x * K_BOLTZMANN * T / H_PLANCK
 
 

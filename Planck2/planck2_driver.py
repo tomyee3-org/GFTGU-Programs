@@ -55,8 +55,8 @@ def run_planck2(
 
     validate_quantity(quantity)
     domain.validate()
-    if T <= 0.0:
-        raise ValueError("Temperature must be positive.")
+    if not isinstance(T, (int, float)) or isinstance(T, bool) or not math.isfinite(T) or T <= 0.0:
+        raise ValueError("Temperature must be a finite positive number.")
     if not isinstance(n_steps, int) or isinstance(n_steps, bool) or n_steps < 1:
         raise ValueError("n_steps must be a positive integer.")
 
