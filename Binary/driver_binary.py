@@ -8,7 +8,8 @@ corrector fails to converge.
 """
 
 from dataclasses import dataclass
-from math import atan2, hypot, pi
+from math import atan2, hypot, isfinite, pi
+from numbers import Real
 from typing import List
 
 from physics_binary import BinaryState, accelerations, energies
@@ -35,6 +36,23 @@ class BinaryResult:
 def _positive_int(name: str, value: int) -> None:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise ValueError(f"{name} must be a positive integer.")
+
+
+def _finite_real(name: str, value: float) -> None:
+    if not isinstance(value, Real) or isinstance(value, bool) or not isfinite(value):
+        raise ValueError(f"{name} must be a finite real number.")
+
+
+def _halve_timestep(dt_work: float, dt_min: float) -> float:
+    """Halve a trial timestep, but refuse numerically meaningless collapse."""
+    new_dt = 0.5 * dt_work
+    if new_dt < dt_min or new_dt == 0.0 or new_dt == dt_work:
+        raise RuntimeError(
+            "The required timestep has fallen below the numerical safety limit. "
+            "This usually indicates a near-collision or extremely rapid motion; "
+            "the calculation cannot continue reliably."
+        )
+    return new_dt
 
 
 def _vector_relative_change(old_x, old_y, new_x, new_y) -> float:
@@ -75,6 +93,16 @@ def integrate_binary(
     If stop_after_one_orbit is True, a bound orbit normally stops after
     the relative position vector has accumulated one full revolution.
     """
+    for name, value in [
+        ("MA", MA), ("MB", MB),
+        ("xInitA", xInitA), ("yInitA", yInitA),
+        ("vInitA", vInitA), ("uInitA", uInitA),
+        ("xInitB", xInitB), ("yInitB", yInitB),
+        ("vInitB", vInitB), ("uInitB", uInitB),
+        ("dt", dt), ("eps1", eps1), ("eps2", eps2),
+    ]:
+        _finite_real(name, value)
+
     if MA <= 0.0 or MB <= 0.0:
         raise ValueError("MA and MB must both be positive.")
     if dt <= 0.0:
@@ -131,6 +159,8 @@ def integrate_binary(
     record(state)
 
     dt_work = dt
+    # Prevent repeated adaptive halving from collapsing to a zero-time step.
+    dt_min = dt * 1.0e-12
     max_corrector_iterations = 10
     max_retries_per_step = 60
     accepted_steps = 0
@@ -166,7 +196,7 @@ def integrate_binary(
                 axA, ayA, axA_pred, ayA_pred
             )
             if acc_change > eps1:
-                dt_work *= 0.5
+                dt_work = _halve_timestep(dt_work, dt_min)
                 continue
 
             vA_corr, uA_corr = vA_pred, uA_pred
@@ -206,7 +236,7 @@ def integrate_binary(
                 )
 
             if not converged:
-                dt_work *= 0.5
+                dt_work = _halve_timestep(dt_work, dt_min)
                 continue
 
             accepted = True
@@ -219,8 +249,15 @@ def integrate_binary(
                 "conditions or a smaller dt."
             )
 
+        new_time = state.t + dt_work
+        if new_time == state.t:
+            raise RuntimeError(
+                "The timestep is too small to advance time numerically; "
+                "the calculation cannot continue reliably."
+            )
+
         state = BinaryState(
-            t=state.t + dt_work,
+            t=new_time,
             xA=xA_new, yA=yA_new, vA=vA_corr, uA=uA_corr,
             xB=xB_new, yB=yB_new, vB=vB_corr, uB=uB_corr,
         )
