@@ -6,6 +6,8 @@ in altitude, hydrostatic equilibrium, ideal gas law, and temperature.
 """
 
 from dataclasses import dataclass
+import math
+from numbers import Real
 from typing import List, Literal
 
 from physics_atmosphere import TemperatureProfile, ideal_gas_density, hydrostatic_step
@@ -60,14 +62,15 @@ class AtmosphereModel:
 
     def _validate_parameters(self) -> None:
         """Raise ValueError with a clear message for invalid user inputs."""
-        if not self.params.planet_name.strip():
-            raise ValueError("planet_name must not be empty.")
-        if self.params.g_accel <= 0.0:
-            raise ValueError("g_accel must be positive.")
-        if self.params.mu <= 0.0:
-            raise ValueError("mu must be positive.")
-        if self.params.p0 <= 0.0:
-            raise ValueError("p0 must be positive.")
+        if not isinstance(self.params.planet_name, str) or not self.params.planet_name.strip():
+            raise ValueError("planet_name must be a non-empty string.")
+
+        for name, value in (("g_accel", self.params.g_accel),
+                            ("mu", self.params.mu),
+                            ("p0", self.params.p0)):
+            if (not isinstance(value, Real) or isinstance(value, bool)
+                    or not math.isfinite(value) or value <= 0.0):
+                raise ValueError(f"{name} must be a finite positive number.")
         if self.params.output_type not in ("Pressure", "Density", "Temperature"):
             raise ValueError(
                 'output_type must be "Pressure", "Density", or "Temperature".'
@@ -112,10 +115,18 @@ class AtmosphereModel:
         rho[0] = rho0
 
         last_step = 0
+        retry_count = 0
+        max_retries = 25
 
         # Outer while-loop: repeat with larger dh if we do not reach the
         # numerical upper boundary within max_steps.
         while last_step == 0:
+            if retry_count >= max_retries:
+                raise RuntimeError(
+                    "Could not reach the numerical zero-pressure boundary "
+                    "after repeated step-size increases."
+                )
+            retry_count += 1
             # Each retry is a fresh integration. The upper-atmosphere
             # extrapolation coefficient must therefore be recomputed.
             self.temp_profile.reached_top = False
@@ -133,8 +144,9 @@ class AtmosphereModel:
                 Temp[j] = self.temp_profile.get_temp(alt[j], p[j])
                 rho[j] = ideal_gas_density(p[j], mu, Temp[j])
 
-            # If still zero, all steps were used without crossing zero pressure: increase dh
-            dh *= 2.0
+            # If still zero, all steps were used without crossing zero pressure: increase dh.
+            if last_step == 0:
+                dh *= 2.0
 
         # Prepare output arrays up to last_step (excluding the negative-pressure point)
         final_alt = alt[:last_step]

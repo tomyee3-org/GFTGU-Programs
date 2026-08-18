@@ -3,11 +3,18 @@ Atmosphere physics module
 """
 
 from dataclasses import dataclass
+import math
+from numbers import Real
 from typing import List
 
 # Physical constants (SI)
 K_BOLTZMANN = 1.38e-23  # Boltzmann constant, J/K
 M_PROTON = 1.67e-27     # Proton mass, kg
+
+
+def _is_finite_number(value) -> bool:
+    """Return True for finite real numbers, excluding booleans."""
+    return isinstance(value, Real) and not isinstance(value, bool) and math.isfinite(value)
 
 
 @dataclass
@@ -29,8 +36,10 @@ class TemperatureProfile:
             raise ValueError("h_points and T_points must contain the same number of values.")
         if len(self.h) < 2:
             raise ValueError("At least two altitude-temperature points are required.")
-        if any(t <= 0.0 for t in self.T):
-            raise ValueError("All temperatures must be greater than zero kelvin.")
+        if any(not _is_finite_number(h) for h in self.h):
+            raise ValueError("h_points must contain only finite numbers.")
+        if any(not _is_finite_number(t) or t <= 0.0 for t in self.T):
+            raise ValueError("T_points must contain only finite temperatures greater than zero kelvin.")
         if any(self.h[i + 1] <= self.h[i] for i in range(len(self.h) - 1)):
             raise ValueError("h_points must be in strictly increasing order.")
 
@@ -41,6 +50,11 @@ class TemperatureProfile:
         T is continuous at the first integration point above the highest
         supplied temperature measurement.
         """
+        if not _is_finite_number(altitude):
+            raise ValueError("altitude must be a finite number.")
+        if not _is_finite_number(pressure) or pressure < 0.0:
+            raise ValueError("pressure must be a finite non-negative number.")
+
         # If we are still below or within measured range, do linear interpolation
         if altitude <= self.h[-1]:
             # Find bracketing indices
@@ -62,7 +76,7 @@ class TemperatureProfile:
         # Above highest measurement: upper atmosphere model
         if not self.reached_top:
             # First time we go above the measured region: fix beta so that
-            # T_last = beta * p_last^power at the top of the measured region.
+            # the extrapolated temperature at this first computed point equals T_last.
             t_last = self.T[-1]
             p_last = pressure
             if p_last > 0.0:
@@ -90,12 +104,12 @@ def ideal_gas_density(pressure: float, mu: float, temperature: float) -> float:
     mu: mean molecular weight (in units of proton mass)
     temperature: T (K)
     """
-    if pressure < 0.0:
-        raise ValueError("pressure must not be negative.")
-    if mu <= 0.0:
-        raise ValueError("mu must be positive.")
-    if temperature <= 0.0:
-        raise ValueError("temperature must be greater than zero kelvin.")
+    if not _is_finite_number(pressure) or pressure < 0.0:
+        raise ValueError("pressure must be a finite non-negative number.")
+    if not _is_finite_number(mu) or mu <= 0.0:
+        raise ValueError("mu must be a finite positive number.")
+    if not _is_finite_number(temperature) or temperature <= 0.0:
+        raise ValueError("temperature must be a finite number greater than zero kelvin.")
 
     q = M_PROTON * mu / K_BOLTZMANN
     return pressure * q / temperature
@@ -107,13 +121,13 @@ def hydrostatic_step(pressure_prev: float, rho_prev: float, g_accel: float, dh: 
 
         p[j] = p[j-1] - gAccel * rho[j-1] * dh
     """
-    if pressure_prev < 0.0:
-        raise ValueError("pressure_prev must not be negative.")
-    if rho_prev < 0.0:
-        raise ValueError("rho_prev must not be negative.")
-    if g_accel <= 0.0:
-        raise ValueError("g_accel must be positive.")
-    if dh <= 0.0:
-        raise ValueError("dh must be positive.")
+    if not _is_finite_number(pressure_prev) or pressure_prev < 0.0:
+        raise ValueError("pressure_prev must be a finite non-negative number.")
+    if not _is_finite_number(rho_prev) or rho_prev < 0.0:
+        raise ValueError("rho_prev must be a finite non-negative number.")
+    if not _is_finite_number(g_accel) or g_accel <= 0.0:
+        raise ValueError("g_accel must be a finite positive number.")
+    if not _is_finite_number(dh) or dh <= 0.0:
+        raise ValueError("dh must be a finite positive number.")
 
     return pressure_prev - g_accel * rho_prev * dh
