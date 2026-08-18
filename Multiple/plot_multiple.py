@@ -41,6 +41,9 @@ def plot_trajectories(
     projection: str = "xy",
 ) -> None:
     """Plot complete trajectories in the selected 2-D projection."""
+    if result.get("type") != "trajectories":
+        raise ValueError("plot_trajectories requires a trajectories result.")
+
     positions = result["positions"]
     _, n_bodies, _ = positions.shape
     i1, i2, label1, label2 = _projection_indices(projection)
@@ -100,6 +103,9 @@ def animate_multiple(result: Dict[str, Any]):
     Space resumes from the currently displayed frame. If the final frame is
     displayed, Space replays from the beginning.
     """
+    if result.get("type") != "animation":
+        raise ValueError("animate_multiple requires an animation result.")
+
     frame_times = np.asarray(result["frame_times"], dtype=float)
     positions = np.asarray(result["frame_positions"], dtype=float)
 

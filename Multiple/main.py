@@ -7,7 +7,7 @@ from plot_multiple import animate_multiple, plot_energy_drift, plot_trajectories
 
 
 def main():
-    # Schutz's default three-body encounter. The initial positions and
+    # A Schutz-style planar three-body encounter. The initial positions and
     # velocities all lie in the xy plane; an out-of-plane velocity is a useful
     # later experiment.
     n_bodies = 3
@@ -48,6 +48,7 @@ def main():
         axis_mode="fixed",             # "fixed" or "auto"
     )
 
+    # This optional diagnostic is displayed only in trajectories mode.
     show_energy_diagnostic = False
 
     result = run_simulation(params)

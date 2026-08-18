@@ -27,7 +27,7 @@ class SimulationParams:
     eps1: float
     eps2: float
 
-    animation_mode: str = "current positions"  # or "trails"
+    animation_mode: str = "trails"             # or "current positions"
     frame_time: float = 2.0e5          # simulated seconds between frames
     frame_interval_ms: int = 50        # real milliseconds between frames
     trail_time: float = 6.0e5          # simulated seconds shown behind each body
@@ -41,20 +41,25 @@ def _validate_params(params: SimulationParams) -> None:
     if params.n_bodies < 2:
         raise ValueError("n_bodies must be at least 2.")
 
-    if len(params.masses_solar) != params.n_bodies:
-        raise ValueError("masses_solar must contain exactly n_bodies values.")
-    if len(params.positions_init) != params.n_bodies:
-        raise ValueError("positions_init must contain exactly n_bodies vectors.")
-    if len(params.velocities_init) != params.n_bodies:
-        raise ValueError("velocities_init must contain exactly n_bodies vectors.")
-    if any(len(v) != 3 for v in params.positions_init):
-        raise ValueError("Each initial position must contain exactly 3 values.")
-    if any(len(v) != 3 for v in params.velocities_init):
-        raise ValueError("Each initial velocity must contain exactly 3 values.")
+    try:
+        masses = np.asarray(params.masses_solar, dtype=float)
+        positions = np.asarray(params.positions_init, dtype=float)
+        velocities = np.asarray(params.velocities_init, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "Masses, positions, and velocities must contain numeric values."
+        ) from exc
 
-    masses = np.asarray(params.masses_solar, dtype=float)
-    positions = np.asarray(params.positions_init, dtype=float)
-    velocities = np.asarray(params.velocities_init, dtype=float)
+    if masses.shape != (params.n_bodies,):
+        raise ValueError("masses_solar must contain exactly n_bodies values.")
+    if positions.shape != (params.n_bodies, 3):
+        raise ValueError(
+            "positions_init must contain exactly n_bodies three-component vectors."
+        )
+    if velocities.shape != (params.n_bodies, 3):
+        raise ValueError(
+            "velocities_init must contain exactly n_bodies three-component vectors."
+        )
 
     if not np.all(np.isfinite(masses)) or np.any(masses <= 0.0):
         raise ValueError("All masses must be finite and positive.")
@@ -111,6 +116,9 @@ def _max_relative_vector_change(old: np.ndarray, new: np.ndarray) -> float:
     old and new have shape (n_bodies, 3). Each body is tested independently so
     a close encounter involving one body cannot be diluted by quiet bodies.
     """
+    if not (np.all(np.isfinite(old)) and np.all(np.isfinite(new))):
+        return float("inf")
+
     changes = np.linalg.norm(new - old, axis=1)
     scales = np.maximum(
         np.linalg.norm(old, axis=1),
@@ -233,7 +241,18 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
                 + 0.5 * acc0 * dt_work * dt_work
             )
             vel_pred = velocities + acc0 * dt_work
+
+            if not (
+                np.all(np.isfinite(pos_pred))
+                and np.all(np.isfinite(vel_pred))
+            ):
+                dt_work *= 0.5
+                continue
+
             acc_pred = compute_accelerations(pos_pred, masses)
+            if not np.all(np.isfinite(acc_pred)):
+                dt_work *= 0.5
+                continue
 
             # eps1: test each body's acceleration vector independently.
             if _max_relative_vector_change(acc0, acc_pred) > params.eps1:
@@ -250,6 +269,12 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
                 vel_corr = velocities + 0.5 * (acc0 + acc_end) * dt_work
                 pos_corr = positions + 0.5 * (velocities + vel_corr) * dt_work
 
+                if not (
+                    np.all(np.isfinite(pos_corr))
+                    and np.all(np.isfinite(vel_corr))
+                ):
+                    break
+
                 velocity_change = _max_relative_vector_change(
                     vel_guess, vel_corr
                 )
@@ -262,6 +287,8 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
                     break
 
                 acc_end = compute_accelerations(pos_guess, masses)
+                if not np.all(np.isfinite(acc_end)):
+                    break
 
             if not converged:
                 dt_work *= 0.5
@@ -287,6 +314,16 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
         accepted_steps += 1
 
         current_cons = conservation_state(positions, velocities, masses)
+        if not (
+            np.isfinite(current_cons["energy"])
+            and np.all(np.isfinite(current_cons["momentum"]))
+            and np.all(np.isfinite(current_cons["angular_momentum"]))
+        ):
+            raise RuntimeError(
+                "Multiple produced a non-finite conservation diagnostic. "
+                "Try a smaller dt or less extreme initial conditions."
+            )
+
         max_energy_drift = max(
             max_energy_drift,
             _fractional_scalar_drift(
