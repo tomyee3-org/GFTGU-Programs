@@ -40,8 +40,9 @@ def main():
         eps2=0.0001,
 
         # Stop if Mercury enters the nominal solar radius. This prevents a
-        # trajectory from passing unscathed through the Sun. The companion
-        # radius is left at zero because its physical nature is user-selectable.
+        # trajectory from passing through the Sun without a stopping condition.
+        # The companion radius is left at zero because its physical nature is
+        # user-selectable.
         sun_collision_radius=R_SUN,
         companion_collision_radius=0.0,
     )
