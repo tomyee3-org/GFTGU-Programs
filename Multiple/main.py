@@ -2,11 +2,32 @@
 Multiple: Newtonian N-body motion in three dimensions.
 """
 
+import argparse
+
+import physics_multiple
 from driver_multiple import SimulationParams, run_simulation
 from plot_multiple import animate_multiple, plot_energy_drift, plot_trajectories
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        prog="Multiple",
+        description="Simulate Newtonian motion for multiple gravitating bodies.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=(
+            f"Multiple {physics_multiple.MODEL_VERSION} "
+            f"(build {physics_multiple.BUILD_ID})"
+        ),
+    )
+    return parser.parse_args()
+
+
 def main():
+    parse_args()
+
     # A Schutz-style planar three-body encounter. The initial positions and
     # velocities all lie in the xy plane; an out-of-plane velocity is a useful
     # later experiment.
@@ -54,7 +75,8 @@ def main():
     result = run_simulation(params)
 
     print(
-        f"Accepted steps: {result['accepted_steps']}; "
+        f"Multiple {result['model_version']} (build {result['build_id']}) — "
+        f"accepted steps: {result['accepted_steps']}; "
         f"simulated time: {result['final_time'] / 86400.0:.3f} days"
     )
     print(

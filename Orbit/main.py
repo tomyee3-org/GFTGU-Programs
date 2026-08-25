@@ -6,12 +6,33 @@ parameters below to explore planets, satellites, comets, bound/unbound motion,
 accuracy, and conservation laws.
 """
 
+import argparse
+
+import physics_orbit
 from driver_orbit import run_orbit, OutputType
 from physics_orbit import GM_SUN
 from plot_orbit import plot_orbit
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        prog="Orbit",
+        description="Simulate Newtonian test-particle motion around a fixed mass.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=(
+            f"Orbit {physics_orbit.MODEL_VERSION} "
+            f"(build {physics_orbit.BUILD_ID})"
+        ),
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
+    parse_args()
+
     # Approximate Mercury-at-perihelion initial conditions.
     xInit = 4.6e10       # m
     yInit = 0.0          # m
@@ -55,7 +76,9 @@ def main() -> None:
         "central_singularity": "point-mass singularity approached",
     }.get(result.termination_reason, result.termination_reason)
 
-    print("Orbit summary")
+    print(
+        f"Orbit {result.model_version} (build {result.build_id}) summary"
+    )
     print(f"  termination             : {reason}")
     print(f"  accepted steps          : {result.accepted_steps}")
     print(f"  elapsed simulated time  : {result.final_time:.6g} s")

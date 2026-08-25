@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
+import physics_relativistic_orbit as phys
 from physics_relativistic_orbit import (
     HORIZON_RADIUS,
     central_acceleration,
@@ -34,6 +35,8 @@ class RelativisticOrbitParams:
 
 @dataclass
 class RelativisticOrbitResult:
+    model_version: str
+    build_id: str
     x: list[float]
     y: list[float]
     vx: list[float]
@@ -357,6 +360,8 @@ def integrate_relativistic_orbit(
         mean_advance = sum(advances) / len(advances)
 
     return RelativisticOrbitResult(
+        model_version=phys.MODEL_VERSION,
+        build_id=phys.BUILD_ID,
         x=x,
         y=y,
         vx=vx,

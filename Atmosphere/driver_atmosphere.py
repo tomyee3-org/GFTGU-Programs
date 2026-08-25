@@ -10,6 +10,7 @@ import math
 from numbers import Real
 from typing import List, Literal
 
+import physics_atmosphere as phys
 from physics_atmosphere import TemperatureProfile, ideal_gas_density, hydrostatic_step
 
 
@@ -35,6 +36,8 @@ class AtmosphereResult:
     temperatures: List[float]
     output_type: OutputType
     planet_name: str
+    model_version: str = phys.MODEL_VERSION
+    build_id: str = phys.BUILD_ID
 
 
 @dataclass
@@ -161,6 +164,8 @@ class AtmosphereModel:
             temperatures=final_T,
             output_type=self.params.output_type,
             planet_name=self.params.planet_name,
+            model_version=phys.MODEL_VERSION,
+            build_id=phys.BUILD_ID,
         )
 
 

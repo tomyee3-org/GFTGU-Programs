@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 import math
 
+import planck2_physics as phys
 from planck2_physics import (
     PlanckDomain,
     PlanckQuantity,
@@ -22,6 +23,8 @@ from planck2_physics import (
 
 @dataclass
 class Planck2Result:
+    model_version: str
+    build_id: str
     quantity: PlanckQuantity
     T: float
     x_values: List[float]
@@ -122,6 +125,8 @@ def run_planck2(
     x_label, y_label = units_label(quantity)
 
     return Planck2Result(
+        model_version=phys.MODEL_VERSION,
+        build_id=phys.BUILD_ID,
         quantity=quantity,
         T=T,
         x_values=x_values,

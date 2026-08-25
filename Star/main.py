@@ -1,10 +1,31 @@
 """Compute the structure of a simple Newtonian polytropic star."""
 
+import argparse
+
+import physics_star
 from driver_star import integrate_star, OutputType
 from plot_star import plot_star_structure
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        prog="Star",
+        description="Compute a simple Newtonian polytropic stellar model.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=(
+            f"Star {physics_star.MODEL_VERSION} "
+            f"(build {physics_star.BUILD_ID})"
+        ),
+    )
+    return parser.parse_args()
+
+
 def main():
+    parse_args()
+
     # Default pedagogical model: chosen to give approximately solar total
     # mass and radius.  The parameters should not be interpreted as a
     # high-fidelity model of the Sun's detailed interior or composition.
@@ -34,6 +55,7 @@ def main():
         output_type=output_type,
     )
 
+    print(f"Star {result.model_version} (build {result.build_id})")
     plot_star_structure(result, log_y=log_y)
 
 

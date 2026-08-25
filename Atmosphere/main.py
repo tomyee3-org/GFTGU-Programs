@@ -8,11 +8,33 @@ and pressure depend on altitude.
 User sets parameters here; they can overwrite the example values.
 """
 
+import argparse
+
+import physics_atmosphere
 from driver_atmosphere import AtmosphereParameters, AtmosphereModel, OutputType, extract_output
 from plot_atmosphere import plot_atmosphere
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        prog="Atmosphere",
+        description=(
+            "Compute atmospheric pressure, density, or temperature as a "
+            "function of altitude using the parameters defined in main.py."
+        ),
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=(f"Atmosphere {physics_atmosphere.MODEL_VERSION} "
+                 f"(build {physics_atmosphere.BUILD_ID})"),
+    )
+    return parser.parse_args()
+
+
 def main():
+    parse_args()
+
     # Example: Earth's atmosphere, rough values
     planet_name = "Earth"
     g_accel = 9.81          # m/s^2
@@ -84,6 +106,10 @@ def main():
 
     model = AtmosphereModel(params)
     result = model.run()
+    print(
+        f"Atmosphere {result.model_version} (build {result.build_id}) — "
+        f"{result.planet_name}: {result.output_type}"
+    )
     curve_data = extract_output(result)
     plot_atmosphere(curve_data)
 

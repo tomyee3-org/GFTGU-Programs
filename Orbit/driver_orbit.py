@@ -22,6 +22,7 @@ import math
 import numpy as np
 from numpy.typing import NDArray
 
+import physics_orbit as phys
 from physics_orbit import (
     compute_acceleration,
     specific_angular_momentum,
@@ -41,6 +42,9 @@ OutputType = Literal[
 @dataclass
 class OrbitResult:
     """Full trajectory history plus run diagnostics."""
+
+    model_version: str
+    build_id: str
 
     xs: NDArray[np.float64]
     ys: NDArray[np.float64]
@@ -420,6 +424,8 @@ def run_orbit(
     revolutions = abs(accumulated_angle) / (2.0 * math.pi)
 
     return OrbitResult(
+        model_version=phys.MODEL_VERSION,
+        build_id=phys.BUILD_ID,
         xs=np.asarray(xs, dtype=float),
         ys=np.asarray(ys, dtype=float),
         vxs=np.asarray(vxs, dtype=float),

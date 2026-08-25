@@ -7,13 +7,35 @@ x-y curve is a convenient orbital diagram built from Schwarzschild areal radius
 and azimuth; x and y are not global Cartesian coordinates of flat space.
 """
 
+import argparse
 import math
 
+import physics_relativistic_orbit
 from driver_relativistic_orbit import (
     RelativisticOrbitParams,
     integrate_relativistic_orbit,
 )
 from plot_relativistic_orbit import plot_relativistic_orbit
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        prog="RelativisticOrbit",
+        description="Compare Schwarzschild and Newtonian test-particle orbits.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=(
+            f"RelativisticOrbit {physics_relativistic_orbit.MODEL_VERSION} "
+            f"(build {physics_relativistic_orbit.BUILD_ID})"
+        ),
+    )
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    parse_args()
 
 
 # ---------------------------------------------------------------------------
@@ -45,7 +67,10 @@ reason_text = {
     "horizon": "Schwarzschild horizon crossed",
 }[result.termination_reason]
 
-print("RelativisticOrbit summary")
+print(
+    f"RelativisticOrbit {result.model_version} "
+    f"(build {result.build_id}) summary"
+)
 print(f"  model             : {result.model}")
 print(f"  termination       : {reason_text}")
 print(f"  accepted steps    : {result.final_step}")

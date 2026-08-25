@@ -1,7 +1,9 @@
 """User entry point for Planck2."""
 
+import argparse
 import math
 
+import planck2_physics
 from planck2_driver import run_planck2
 from planck2_plot import Corner, plot_planck2
 from planck2_physics import PlanckDomain, PlanckQuantity, SHAPE_EXPONENT
@@ -16,7 +18,25 @@ def _exact_dimensionless_area(p: int) -> float:
     raise ValueError(f"No closed form on hand for p={p}")
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        prog="Planck2",
+        description="Explore black-body spectra in dimensionless and SI forms.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=(
+            f"Planck2 {planck2_physics.MODEL_VERSION} "
+            f"(build {planck2_physics.BUILD_ID})"
+        ),
+    )
+    return parser.parse_args()
+
+
 def main():
+    parse_args()
+
     # ----------------------------------------------------------------
     # User-editable parameters
     # ----------------------------------------------------------------
@@ -54,7 +74,10 @@ def main():
     )
 
     exact_shape = _exact_dimensionless_area(SHAPE_EXPONENT[quantity])
-    print(f"Peak at x = {result.x_peak:.6f}")
+    print(
+        f"Planck2 {result.model_version} (build {result.build_id}) — "
+        f"peak at x = {result.x_peak:.6f}"
+    )
     print(
         f"Dimensionless area = {result.dimensionless_area:.6f} "
         f"(0..infinity exact value: {exact_shape:.6f})"

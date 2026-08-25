@@ -6,6 +6,9 @@ Mercury is a negligible-mass test particle. Its user-supplied initial position
 and velocity are specified relative to the Sun.
 """
 
+import argparse
+
+import physics_mercpert
 from physics_mercpert import (
     AU,
     R_SUN,
@@ -16,7 +19,26 @@ from driver_mercpert import MercPertRunParams, run_mercpert
 from plot_mercpert import plot_jacobi_drift, plot_orbits
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        prog="MercPert",
+        description=(
+            "Integrate Mercury as a test particle in a planar circular "
+            "restricted three-body system using parameters defined in main.py."
+        ),
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=(f"MercPert {physics_mercpert.MODEL_VERSION} "
+                 f"(build {physics_mercpert.BUILD_ID})"),
+    )
+    return parser.parse_args()
+
+
 def main():
+    parse_args()
+
     # Binary system. The default companion is 0.1 solar masses:
     # about 100 Jupiter masses and therefore in the low-mass stellar regime.
     binary_params = BinarySystemParams(
@@ -55,7 +77,8 @@ def main():
     output = run_mercpert(binary_params, merc_ic, run_params)
 
     print(
-        f"Accepted steps: {output.accepted_steps}; "
+        f"MercPert {output.model_version} (build {output.build_id}) — "
+        f"accepted steps: {output.accepted_steps}; "
         f"termination: {output.termination_reason}"
     )
     if output.jacobi:

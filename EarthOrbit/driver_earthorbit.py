@@ -14,7 +14,16 @@ import math
 import numbers
 
 import numpy as np
+import physics_earthorbit as phys
 from physics_earthorbit import compute_acceleration, R_EARTH, ForceLaw
+
+
+def version_info():
+    """Return machine-readable model and source-build identifiers."""
+    return {
+        "model_version": phys.MODEL_VERSION,
+        "build_id": phys.BUILD_ID,
+    }
 
 
 def run_earth_orbit(

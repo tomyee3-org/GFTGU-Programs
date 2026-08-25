@@ -7,6 +7,7 @@ from math import hypot, isfinite
 import math
 from typing import List, Optional
 
+import physics_mercpert as phys
 from physics_mercpert import (
     BinarySystemParams,
     MercuryInitialConditions,
@@ -49,6 +50,8 @@ class MercPertOutput:
     accepted_steps: int
     termination_reason: str
     collision_body: Optional[str] = None
+    model_version: str = phys.MODEL_VERSION
+    build_id: str = phys.BUILD_ID
 
 
 def _vector_relative_change(
@@ -352,4 +355,6 @@ def run_mercpert(
         accepted_steps=accepted_steps,
         termination_reason=termination_reason,
         collision_body=collision_body,
+        model_version=phys.MODEL_VERSION,
+        build_id=phys.BUILD_ID,
     )

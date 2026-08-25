@@ -12,6 +12,7 @@ from typing import List, Literal
 from math import isfinite, pi
 from numbers import Real
 
+import physics_star as phys
 from physics_star import (
     central_density,
     polytropic_D,
@@ -28,6 +29,8 @@ OutputType = Literal["pressure", "density", "temperature", "mass"]
 @dataclass
 class StarResult:
     """Computed stellar profiles and numerical information for one run."""
+    model_version: str
+    build_id: str
     radius: List[float]
     pressure: List[float]
     density: List[float]
@@ -155,6 +158,8 @@ def integrate_star(
         if surface_found:
             end = surface_index + 1
             return StarResult(
+                model_version=phys.MODEL_VERSION,
+                build_id=phys.BUILD_ID,
                 radius=radius[:end],
                 pressure=pressure[:end],
                 density=density[:end],

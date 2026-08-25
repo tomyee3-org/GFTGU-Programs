@@ -11,6 +11,7 @@ from typing import List, Dict, Any
 
 import numpy as np
 
+import physics_multiple as phys
 from physics_multiple import compute_accelerations, conservation_state
 
 
@@ -375,6 +376,8 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
         dt_work = min(dt_work * 1.1, params.dt)
 
     common = {
+        "model_version": phys.MODEL_VERSION,
+        "build_id": phys.BUILD_ID,
         "accepted_steps": accepted_steps,
         "final_time": time,
         "initial_conservation": initial_cons,

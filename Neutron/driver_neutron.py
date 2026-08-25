@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import math
 
+import physics_neutron as phys
 from physics_neutron import (
     C2,
     G,
@@ -161,6 +162,8 @@ def compute_neutron_star(
     buchdahl_ratio = compactness  # Buchdahl requires 2GM/(Rc^2) <= 8/9.
 
     return {
+        "model_version": phys.MODEL_VERSION,
+        "build_id": phys.BUILD_ID,
         "radius": radius,
         "pressure": pressure,
         "density": density,

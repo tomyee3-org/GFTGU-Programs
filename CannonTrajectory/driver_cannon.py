@@ -9,7 +9,16 @@ can investigate timestep error and interpolate the ground crossing themselves.
 import math
 import numpy as np
 
+import physics_cannon as phys
 from physics_cannon import euler_step, improved_euler_step
+
+
+def version_info():
+    """Return machine-readable model and source-build identifiers."""
+    return {
+        "model_version": phys.MODEL_VERSION,
+        "build_id": phys.BUILD_ID,
+    }
 
 
 def _validate_inputs(speed, angle_deg, dt, max_steps, method):

@@ -10,6 +10,45 @@ and enclosed mass are integrated outward.
 from math import isfinite, pi, sqrt
 from numbers import Real
 
+# Public release metadata. MODEL_VERSION changes when the model's documented
+# behaviour changes; BUILD_ID changes whenever one of the core source files
+# changes.
+MODEL_VERSION = "1.0.0"
+BUILD_ID_COVERS = (
+    "physics_star.py",
+    "driver_star.py",
+    "main.py",
+    "plot_star.py",
+)
+
+
+def _compute_build_id() -> str:
+    """Return a short, reproducible identifier for the core source files.
+
+    Files are read as UTF-8 text with universal-newline conversion, so merely
+    switching between LF and CRLF line endings does not create a new build.
+    Filename and byte-length framing prevents ambiguous concatenations.
+    """
+    import hashlib
+    import os
+
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        digest = hashlib.sha256()
+        for name in BUILD_ID_COVERS:
+            path = os.path.join(here, name)
+            with open(path, "r", encoding="utf-8", newline=None) as source:
+                content = source.read().encode("utf-8")
+            digest.update(name.encode("utf-8"))
+            digest.update(len(content).to_bytes(8, "big"))
+            digest.update(content)
+        return digest.hexdigest()[:12]
+    except (OSError, UnicodeDecodeError):
+        return "unknown"
+
+
+BUILD_ID = _compute_build_id()
+
 # Physical constants in SI units.  These values are retained from the
 # educational model so that its default results remain consistent with the
 # accompanying material.

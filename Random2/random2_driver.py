@@ -20,6 +20,7 @@ from numbers import Real
 from typing import List, Optional, Tuple
 import math
 
+import random2_physics as phys
 from random2_physics import (
     Point,
     StepDistribution,
@@ -162,6 +163,8 @@ class WalkPath:
 
 @dataclass
 class Walk2DResult:
+    model_version: str
+    build_id: str
     radius: float
     mean_free_path: float
     reference_steps: int
@@ -267,6 +270,8 @@ def run_walk2d(
         )
 
     return Walk2DResult(
+        model_version=phys.MODEL_VERSION,
+        build_id=phys.BUILD_ID,
         radius=radius,
         mean_free_path=mean_free_path,
         reference_steps=reference_steps,

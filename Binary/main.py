@@ -5,11 +5,33 @@ Edit the parameters below to explore circular, elliptical, parabolic,
 and hyperbolic two-body trajectories.
 """
 
+import argparse
+
+import physics_binary
 from driver_binary import integrate_binary
 from plot_binary import OutputType, plot_binary
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        prog="Binary",
+        description=(
+            "Integrate the Newtonian motion of two mutually gravitating point "
+            "masses using the parameters defined in main.py."
+        ),
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=(f"Binary {physics_binary.MODEL_VERSION} "
+                 f"(build {physics_binary.BUILD_ID})"),
+    )
+    return parser.parse_args()
+
+
 def main():
+    parse_args()
+
     MA = 2.0e30
     MB = 2.0e30
 
@@ -59,6 +81,10 @@ def main():
         stop_after_one_orbit=stop_after_one_orbit,
     )
 
+    print(
+        f"Binary {result.model_version} (build {result.build_id}) — "
+        f"{result.accepted_steps:,} accepted steps"
+    )
     plot_binary(result, output_type)
 
 

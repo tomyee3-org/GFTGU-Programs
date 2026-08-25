@@ -14,15 +14,41 @@ Choose one display:
         a circular schematic star.
 """
 
+import argparse
+
+import random2_physics
 from random2_driver import run_scaled_distance_experiment, run_walk2d
 from random2_plot import plot_scaled_distance, plot_walk2d
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        prog="Random2",
+        description="Explore random-walk scaling and two-dimensional diffusion.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=(
+            f"Random2 {random2_physics.MODEL_VERSION} "
+            f"(build {random2_physics.BUILD_ID})"
+        ),
+    )
+    return parser.parse_args()
+
+
 def main():
+    parse_args()
+
     # ----------------------------------------------------------------
     # Choose which display to run
     # ----------------------------------------------------------------
     display = "scaled_distance"   # "scaled_distance" or "walk2d"
+
+    print(
+        f"Random2 {random2_physics.MODEL_VERSION} "
+        f"(build {random2_physics.BUILD_ID})"
+    )
 
     if display == "scaled_distance":
         maxSteps = 4096

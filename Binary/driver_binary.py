@@ -12,6 +12,7 @@ from math import atan2, hypot, isfinite, pi
 from numbers import Real
 from typing import List
 
+import physics_binary as phys
 from physics_binary import BinaryState, accelerations, energies
 
 
@@ -31,6 +32,8 @@ class BinaryResult:
     E: List[float]
     completed_orbit: bool
     accepted_steps: int
+    model_version: str = phys.MODEL_VERSION
+    build_id: str = phys.BUILD_ID
 
 
 def _positive_int(name: str, value: int) -> None:
@@ -284,4 +287,6 @@ def integrate_binary(
         U=U_list, K=K_list, E=E_list,
         completed_orbit=completed_orbit,
         accepted_steps=accepted_steps,
+        model_version=phys.MODEL_VERSION,
+        build_id=phys.BUILD_ID,
     )
