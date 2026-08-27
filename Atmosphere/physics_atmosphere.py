@@ -3,11 +3,12 @@ Atmosphere physics module
 """
 
 from dataclasses import dataclass
+from collections.abc import Sequence
 import math
 from numbers import Real
 from typing import List
 
-MODEL_VERSION = "1.1.0"
+MODEL_VERSION = "1.1.1"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -82,6 +83,9 @@ class TemperatureProfile:
 
     def validate(self) -> None:
         """Validate the supplied temperature profile."""
+        for name, values in (("h_points", self.h), ("T_points", self.T)):
+            if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+                raise ValueError(f"{name} must be a non-string sequence of numbers.")
         if len(self.h) != len(self.T):
             raise ValueError("h_points and T_points must contain the same number of values.")
         if len(self.h) < 2:
@@ -125,7 +129,12 @@ class TemperatureProfile:
             # If altitude is exactly at last measurement
             return self.T[-1]
 
-        # Above highest measurement: upper atmosphere model
+        # Above highest measurement: upper atmosphere model.  A zero-pressure
+        # query is already at the numerical boundary, so it must not initialize
+        # or alter the state used by a later positive-pressure calculation.
+        if pressure == 0.0:
+            return self.T[-1]
+
         if not self.reached_top:
             # First time we go above the measured region: fix beta so that
             # the extrapolated temperature at this first computed point equals T_last.
@@ -147,9 +156,6 @@ class TemperatureProfile:
                     raise ValueError(
                         "The upper-atmosphere coefficient is outside the usable numerical range."
                     )
-            else:
-                # Avoid division by zero; keep temperature constant if pressure ~ 0
-                self.beta = t_last
             self.reached_top = True
 
         # Use power-law relation T = beta * p^power
@@ -165,9 +171,8 @@ class TemperatureProfile:
                     "The upper-atmosphere temperature is outside the usable numerical range."
                 )
             return temperature
-        else:
-            # If pressure has gone to zero or negative, keep last meaningful T
-            return self.T[-1]
+        # The zero-pressure case returned before extrapolation state was touched.
+        return self.T[-1]
 
 
 def ideal_gas_density(pressure: float, mu: float, temperature: float) -> float:

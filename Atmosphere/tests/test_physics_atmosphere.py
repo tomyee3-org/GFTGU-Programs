@@ -10,13 +10,43 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 from pathlib import Path
+import random
+import re
+import subprocess
 import sys
 import unittest
 from unittest.mock import patch
 
 
-MODULE_DIR = Path(__file__).resolve().parents[1]
+CORE_MODULE_FILENAMES = (
+    "physics_atmosphere.py",
+    "driver_atmosphere.py",
+    "main.py",
+    "plot_atmosphere.py",
+)
+
+
+def find_module_dir(start: Path) -> Path:
+    """Return the nearest ancestor containing the complete Atmosphere module."""
+    start = start.resolve()
+    candidates = (start, *start.parents)
+    for candidate in candidates:
+        if all((candidate / name).is_file() for name in CORE_MODULE_FILENAMES):
+            return candidate
+    raise RuntimeError(
+        "Could not locate the Atmosphere module containing all four core files."
+    )
+
+
+def normalized_utf8_source(raw: bytes) -> bytes:
+    """Decode UTF-8 and explicitly normalize CRLF or CR source to LF."""
+    text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    return text.encode("utf-8")
+
+
+MODULE_DIR = find_module_dir(Path(__file__).resolve().parent)
 if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 
@@ -65,7 +95,37 @@ def closest_index(values, target):
     return min(range(len(values)), key=lambda index: abs(values[index] - target))
 
 
+def exact_piecewise_pressure(p0, g_accel, mu, h_points, T_points, target):
+    """Exact constant-g, constant-mu hydrostatic pressure within a linear profile."""
+    coefficient = g_accel * mu * phys.M_PROTON / phys.K_BOLTZMANN
+    pressure = p0
+    altitude = h_points[0]
+    if altitude != 0.0 or target < 0.0 or target > h_points[-1]:
+        raise ValueError("benchmark requires 0 <= target <= final breakpoint")
+
+    for index in range(len(h_points) - 1):
+        segment_end = min(target, h_points[index + 1])
+        if segment_end <= altitude:
+            break
+        segment_width = h_points[index + 1] - h_points[index]
+        lapse_rate = (T_points[index + 1] - T_points[index]) / segment_width
+        t_start = T_points[index] + lapse_rate * (altitude - h_points[index])
+        t_end = T_points[index] + lapse_rate * (segment_end - h_points[index])
+        if lapse_rate == 0.0:
+            pressure *= math.exp(-coefficient * (segment_end - altitude) / t_start)
+        else:
+            pressure *= (t_end / t_start) ** (-coefficient / lapse_rate)
+        altitude = segment_end
+        if altitude == target:
+            break
+    return pressure
+
+
 class BuildMetadataTests(unittest.TestCase):
+    def test_module_directory_locator_supports_both_delivery_layouts(self):
+        self.assertEqual(find_module_dir(MODULE_DIR), MODULE_DIR)
+        self.assertEqual(find_module_dir(MODULE_DIR / "tests"), MODULE_DIR)
+
     def test_declared_version_is_semantic(self):
         self.assertRegex(phys.MODEL_VERSION, r"^\d+\.\d+\.\d+$")
 
@@ -86,16 +146,40 @@ class BuildMetadataTests(unittest.TestCase):
     def test_build_id_matches_core_source_contents(self):
         digest = hashlib.sha256()
         for name in phys.BUILD_ID_COVERS:
-            content = (MODULE_DIR / name).read_text(encoding="utf-8").encode("utf-8")
+            content = normalized_utf8_source((MODULE_DIR / name).read_bytes())
             digest.update(name.encode("utf-8"))
             digest.update(len(content).to_bytes(8, "big"))
             digest.update(content)
         self.assertEqual(phys.BUILD_ID, digest.hexdigest()[:12])
 
+    def test_hash_input_normalization_treats_lf_crlf_and_cr_equally(self):
+        lf = b"first\nsecond\n"
+        self.assertEqual(normalized_utf8_source(lf), lf)
+        self.assertEqual(normalized_utf8_source(b"first\r\nsecond\r\n"), lf)
+        self.assertEqual(normalized_utf8_source(b"first\rsecond\r"), lf)
+
 
 class TemperatureProfileValidationTests(unittest.TestCase):
     def test_valid_profile(self):
         TemperatureProfile([0.0, 1000.0], [280.0, 275.0]).validate()
+
+    def test_tuple_profile_is_a_valid_non_string_sequence(self):
+        TemperatureProfile((0.0, 1000.0), (280.0, 275.0)).validate()
+
+    def test_profile_containers_must_be_non_string_sequences(self):
+        bad_pairs = (
+            (None, [280.0, 275.0]),
+            (42, [280.0, 275.0]),
+            ("0, 1000", [280.0, 275.0]),
+            ([0.0, 1000.0], None),
+            ([0.0, 1000.0], 42.0),
+            ([0.0, 1000.0], "280, 275"),
+        )
+        for altitudes, temperatures in bad_pairs:
+            with self.subTest(h=altitudes, T=temperatures), self.assertRaisesRegex(
+                ValueError, "non-string sequence"
+            ):
+                TemperatureProfile(altitudes, temperatures).validate()
 
     def test_mismatched_lengths(self):
         with self.assertRaisesRegex(ValueError, "same number"):
@@ -159,11 +243,27 @@ class TemperatureInterpolationTests(unittest.TestCase):
     def test_zero_pressure_above_profile_returns_last_meaningful_temperature(self):
         self.assertEqual(self.profile.get_temp(2200.0, 0.0), 350.0)
 
+    def test_zero_pressure_query_does_not_corrupt_later_upper_profile_state(self):
+        self.assertEqual(self.profile.get_temp(2200.0, 0.0), 350.0)
+        self.assertFalse(self.profile.reached_top)
+        self.assertEqual(self.profile.beta, 0.0)
+        self.assertEqual(self.profile.get_temp(2300.0, 4.0), 350.0)
+        self.assertTrue(self.profile.reached_top)
+        self.assertEqual(self.profile.beta, 175.0)
+        self.assertEqual(self.profile.get_temp(2400.0, 1.0), 175.0)
+
     def test_upper_power_law_numerical_overflow_is_rejected(self):
         profile = TemperatureProfile([0.0, 1.0], [300.0, 1e308])
         profile.validate()
         with self.assertRaisesRegex(ValueError, "coefficient"):
             profile.get_temp(2.0, 5e-324)
+
+    def test_upper_temperature_underflow_is_rejected(self):
+        profile = TemperatureProfile([0.0, 1.0], [300.0, 300.0], power=2.0)
+        profile.validate()
+        profile.get_temp(2.0, 1.0)
+        with self.assertRaisesRegex(ValueError, "temperature"):
+            profile.get_temp(3.0, 5e-324)
 
     def test_invalid_altitude_is_rejected(self):
         for bad in (math.nan, math.inf, True, "0"):
@@ -377,6 +477,40 @@ class AtmosphereIntegrationTests(unittest.TestCase):
                 self.assertAlmostEqual(result.pressures[index], discrete, delta=discrete * 2e-12)
                 self.assertLess(abs(result.pressures[index] / exact - 1.0), 0.03)
 
+    def test_linear_lapse_rate_against_independent_analytic_solution(self):
+        h_points = [0.0, 100_000.0]
+        T_points = [300.0, 400.0]
+        params = make_params(h_points=h_points, T_points=T_points)
+        result = AtmosphereModel(params).run()
+        index = closest_index(result.altitudes, 30_000.0)
+        exact = exact_piecewise_pressure(
+            params.p0,
+            params.g_accel,
+            params.mu,
+            h_points,
+            T_points,
+            result.altitudes[index],
+        )
+        self.assertLess(abs(result.pressures[index] / exact - 1.0), 0.015)
+
+    def test_multilayer_profile_against_exact_piecewise_linear_solution(self):
+        params = make_params()
+        with (
+            patch.object(driver, "STEPS_PER_SCALE_HEIGHT", 800),
+            patch.object(driver, "MAX_STEPS", 100_000),
+        ):
+            result = AtmosphereModel(params).run()
+        index = closest_index(result.altitudes, 80_000.0)
+        exact = exact_piecewise_pressure(
+            params.p0,
+            params.g_accel,
+            params.mu,
+            params.h_points,
+            params.T_points,
+            result.altitudes[index],
+        )
+        self.assertLess(abs(result.pressures[index] / exact - 1.0), 0.01)
+
     def test_surface_pressure_changes_scale_but_not_normalized_shape(self):
         low = AtmosphereModel(make_params(p0=1.013e4)).run()
         high = AtmosphereModel(make_params(p0=1.013e6)).run()
@@ -414,6 +548,90 @@ class AtmosphereIntegrationTests(unittest.TestCase):
             AtmosphereModel(
                 make_params(h_points=[0.0, 1000.0], T_points=[288.15, 288.15])
             ).run()
+
+    def test_one_successful_restart_matches_direct_coarse_integration(self):
+        params = make_params(
+            h_points=[0.0, 1000.0],
+            T_points=[288.15, 288.15],
+        )
+        restarted_model = AtmosphereModel(params)
+        with (
+            patch.object(driver, "STEPS_PER_SCALE_HEIGHT", 200),
+            patch.object(driver, "MAX_STEPS", 300),
+            patch.object(driver, "MAX_RETRIES", 2),
+            patch.object(driver, "hydrostatic_step", wraps=driver.hydrostatic_step) as step_mock,
+        ):
+            restarted = restarted_model.run()
+
+        self.assertEqual(step_mock.call_count, 299 + len(restarted.altitudes))
+        self.assertAlmostEqual(
+            restarted.altitudes[1],
+            2.0 * (
+                phys.K_BOLTZMANN * 288.15
+                / (params.g_accel * params.mu * phys.M_PROTON)
+                / 200.0
+            ),
+        )
+
+        direct_model = AtmosphereModel(params)
+        with (
+            patch.object(driver, "STEPS_PER_SCALE_HEIGHT", 100),
+            patch.object(driver, "MAX_STEPS", 300),
+            patch.object(driver, "MAX_RETRIES", 2),
+        ):
+            direct = direct_model.run()
+
+        self.assertEqual(restarted.altitudes, direct.altitudes)
+        self.assertEqual(restarted.pressures, direct.pressures)
+        self.assertEqual(restarted.temperatures, direct.temperatures)
+        self.assertEqual(restarted.densities, direct.densities)
+        self.assertEqual(restarted_model.temp_profile.beta, direct_model.temp_profile.beta)
+
+    def test_fixed_seed_randomized_profiles_preserve_invariants(self):
+        rng = random.Random(20260827)
+        for case_number in range(120):
+            g_accel = rng.uniform(1.0, 30.0)
+            mu = rng.uniform(2.0, 50.0)
+            p0 = 10.0 ** rng.uniform(2.0, 7.0)
+            t0 = rng.uniform(180.0, 600.0)
+            scale = phys.K_BOLTZMANN * t0 / (g_accel * mu * phys.M_PROTON)
+            h_points = [0.0, 2.0 * scale, 5.0 * scale, 8.0 * scale]
+            T_points = [
+                t0,
+                t0 * rng.uniform(0.75, 1.25),
+                t0 * rng.uniform(0.75, 1.50),
+                t0 * rng.uniform(0.75, 1.50),
+            ]
+            case = {
+                "case": case_number,
+                "g_accel": g_accel,
+                "mu": mu,
+                "p0": p0,
+                "h_points": h_points,
+                "T_points": T_points,
+            }
+            with self.subTest(case=case):
+                result = AtmosphereModel(
+                    make_params(
+                        g_accel=g_accel,
+                        mu=mu,
+                        p0=p0,
+                        h_points=h_points,
+                        T_points=T_points,
+                    )
+                ).run()
+                self.assertTrue(all(math.isfinite(x) for x in result.altitudes))
+                self.assertTrue(all(math.isfinite(x) and x > 0.0 for x in result.pressures))
+                self.assertTrue(all(math.isfinite(x) and x > 0.0 for x in result.densities))
+                self.assertTrue(all(math.isfinite(x) and x > 0.0 for x in result.temperatures))
+                self.assertTrue(all(b > a for a, b in zip(result.altitudes, result.altitudes[1:])))
+                self.assertTrue(all(b < a for a, b in zip(result.pressures, result.pressures[1:])))
+                stride = max(1, len(result.altitudes) // 12)
+                for index in range(0, len(result.altitudes), stride):
+                    expected = ideal_gas_density(
+                        result.pressures[index], mu, result.temperatures[index]
+                    )
+                    self.assertAlmostEqual(result.densities[index], expected)
 
     def test_extreme_values_fail_cleanly(self):
         for overrides in (
@@ -459,6 +677,87 @@ class OutputExtractionTests(unittest.TestCase):
         self.result.output_type = "Invalid"
         with self.assertRaisesRegex(ValueError, "output_type"):
             extract_output(self.result)
+
+
+class CommandLineHelpAndPlotTests(unittest.TestCase):
+    def test_version_command_matches_runtime_metadata(self):
+        completed = subprocess.run(
+            [sys.executable, str(MODULE_DIR / "main.py"), "--version"],
+            cwd=MODULE_DIR,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+        self.assertEqual(
+            completed.stdout.strip(),
+            f"Atmosphere {phys.MODEL_VERSION} (build {phys.BUILD_ID})",
+        )
+
+    def test_default_main_run_succeeds_headlessly(self):
+        environment = os.environ.copy()
+        environment["MPLBACKEND"] = "Agg"
+        completed = subprocess.run(
+            [sys.executable, str(MODULE_DIR / "main.py")],
+            cwd=MODULE_DIR,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+        self.assertIn(
+            f"Atmosphere {phys.MODEL_VERSION} (build {phys.BUILD_ID})",
+            completed.stdout,
+        )
+
+    def test_help_version_build_matches_runtime_and_html_parses(self):
+        from html.parser import HTMLParser
+
+        html = (MODULE_DIR / "Atmosphere.html").read_text(encoding="utf-8")
+        parser = HTMLParser()
+        parser.feed(html)
+        version_block = re.search(
+            r'<p\s+id="version_build"[^>]*>(.*?)</p>', html, re.DOTALL
+        )
+        self.assertIsNotNone(version_block)
+        visible = re.sub(r"<[^>]+>|&nbsp;", " ", version_block.group(1))
+        visible = " ".join(visible.split())
+        self.assertEqual(
+            visible,
+            f"Version {phys.MODEL_VERSION} Build {phys.BUILD_ID}",
+        )
+
+    def test_plotter_uses_curve_labels_and_calls_show(self):
+        import matplotlib
+
+        matplotlib.use("Agg", force=True)
+        import matplotlib.pyplot as plt
+        from plot_atmosphere import plot_atmosphere
+
+        curve = extract_output(
+            AtmosphereResult(
+                altitudes=[0.0, 1000.0],
+                pressures=[100_000.0, 90_000.0],
+                densities=[1.2, 1.1],
+                temperatures=[288.0, 282.0],
+                output_type="Pressure",
+                planet_name="Plot Test",
+            )
+        )
+        try:
+            with patch.object(plt, "show") as show_mock:
+                plot_atmosphere(curve)
+            figure = plt.gcf()
+            axes = figure.axes[0]
+            self.assertEqual(axes.get_xlabel(), curve.x_label)
+            self.assertEqual(axes.get_ylabel(), curve.y_label)
+            self.assertEqual(axes.get_title(), curve.title)
+            self.assertEqual(list(axes.lines[0].get_xdata()), curve.x)
+            self.assertEqual(list(axes.lines[0].get_ydata()), curve.y)
+            show_mock.assert_called_once_with()
+        finally:
+            plt.close("all")
 
 
 if __name__ == "__main__":
