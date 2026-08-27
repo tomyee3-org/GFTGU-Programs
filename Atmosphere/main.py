@@ -104,8 +104,11 @@ def main():
         output_type=output_type,
     )
 
-    model = AtmosphereModel(params)
-    result = model.run()
+    try:
+        model = AtmosphereModel(params)
+        result = model.run()
+    except (ValueError, RuntimeError) as exc:
+        raise SystemExit(f"Atmosphere input/model error: {exc}") from exc
     print(
         f"Atmosphere {result.model_version} (build {result.build_id}) — "
         f"{result.planet_name}: {result.output_type}"

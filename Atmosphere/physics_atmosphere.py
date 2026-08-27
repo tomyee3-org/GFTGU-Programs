@@ -7,7 +7,7 @@ import math
 from numbers import Real
 from typing import List
 
-MODEL_VERSION = "1.0.0"
+MODEL_VERSION = "1.1.0"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -92,6 +92,8 @@ class TemperatureProfile:
             raise ValueError("T_points must contain only finite temperatures greater than zero kelvin.")
         if any(self.h[i + 1] <= self.h[i] for i in range(len(self.h) - 1)):
             raise ValueError("h_points must be in strictly increasing order.")
+        if not _is_finite_number(self.power) or self.power <= 0.0:
+            raise ValueError("power must be a finite positive number.")
 
     def get_temp(self, altitude: float, pressure: float) -> float:
         """
@@ -130,7 +132,21 @@ class TemperatureProfile:
             t_last = self.T[-1]
             p_last = pressure
             if p_last > 0.0:
-                self.beta = t_last / (p_last ** self.power)
+                try:
+                    pressure_factor = p_last ** self.power
+                except OverflowError as exc:
+                    raise ValueError(
+                        "The upper-atmosphere pressure law overflowed."
+                    ) from exc
+                if not math.isfinite(pressure_factor) or pressure_factor <= 0.0:
+                    raise ValueError(
+                        "The upper-atmosphere pressure law is outside the usable numerical range."
+                    )
+                self.beta = t_last / pressure_factor
+                if not math.isfinite(self.beta) or self.beta <= 0.0:
+                    raise ValueError(
+                        "The upper-atmosphere coefficient is outside the usable numerical range."
+                    )
             else:
                 # Avoid division by zero; keep temperature constant if pressure ~ 0
                 self.beta = t_last
@@ -138,7 +154,17 @@ class TemperatureProfile:
 
         # Use power-law relation T = beta * p^power
         if pressure > 0.0:
-            return self.beta * (pressure ** self.power)
+            try:
+                temperature = self.beta * (pressure ** self.power)
+            except OverflowError as exc:
+                raise ValueError(
+                    "The upper-atmosphere temperature overflowed."
+                ) from exc
+            if not math.isfinite(temperature) or temperature <= 0.0:
+                raise ValueError(
+                    "The upper-atmosphere temperature is outside the usable numerical range."
+                )
+            return temperature
         else:
             # If pressure has gone to zero or negative, keep last meaningful T
             return self.T[-1]
@@ -162,7 +188,12 @@ def ideal_gas_density(pressure: float, mu: float, temperature: float) -> float:
         raise ValueError("temperature must be a finite number greater than zero kelvin.")
 
     q = M_PROTON * mu / K_BOLTZMANN
-    return pressure * q / temperature
+    density = pressure * q / temperature
+    if not math.isfinite(density):
+        raise ValueError("The supplied values produce a non-finite density.")
+    if pressure > 0.0 and density == 0.0:
+        raise ValueError("The supplied values produce a density that underflows to zero.")
+    return density
 
 
 def hydrostatic_step(pressure_prev: float, rho_prev: float, g_accel: float, dh: float) -> float:
@@ -180,4 +211,7 @@ def hydrostatic_step(pressure_prev: float, rho_prev: float, g_accel: float, dh: 
     if not _is_finite_number(dh) or dh <= 0.0:
         raise ValueError("dh must be a finite positive number.")
 
-    return pressure_prev - g_accel * rho_prev * dh
+    pressure = pressure_prev - g_accel * rho_prev * dh
+    if not math.isfinite(pressure):
+        raise ValueError("The hydrostatic step produced a non-finite pressure.")
+    return pressure

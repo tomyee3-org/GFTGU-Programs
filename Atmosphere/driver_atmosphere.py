@@ -16,6 +16,14 @@ from physics_atmosphere import TemperatureProfile, ideal_gas_density, hydrostati
 
 OutputType = Literal["Pressure", "Density", "Temperature"]
 
+# Preserve the intended Euler resolution for ordinary profiles.  Schutz's
+# original Java implementation used 1,000 array elements, which forced the
+# default extended Earth profile to restart with a much coarser step.  Python
+# can comfortably retain enough points to avoid that large accuracy loss.
+STEPS_PER_SCALE_HEIGHT = 200
+MAX_STEPS = 50_000
+MAX_RETRIES = 25
+
 
 @dataclass
 class AtmosphereParameters:
@@ -86,15 +94,17 @@ class AtmosphereModel:
 
         - Compute scale height and initial step dh
         - Use while-loop to adjust dh if top not reached within array size
-        - Use for-loop to step in altitude, stopping when pressure < 0
+        - Use for-loop to step in altitude, stopping when pressure <= 0
         - At each step: hydrostatic equilibrium, getTemp, ideal gas law
         """
         g = self.params.g_accel
         mu = self.params.mu
         p0 = self.params.p0
 
-        # Initial temperature at base from first measurement
-        T0 = self.params.T_points[0]
+        # The integration reference level is altitude zero.  This agrees with
+        # T_points[0] for the normal h_points[0] == 0 case and also handles a
+        # profile whose first measurement lies above or below the reference.
+        T0 = self.temp_profile.get_temp(0.0, p0)
 
         # Ideal gas law to get density at bottom
         rho0 = ideal_gas_density(p0, mu, T0)
@@ -102,11 +112,18 @@ class AtmosphereModel:
         # Scale height: for an isothermal atmosphere, pressure falls by a factor e
         scale = p0 / (g * rho0)
 
-        # Step size in altitude; Java uses scale / 200.
-        dh = scale / 200.0
+        if not math.isfinite(scale) or scale <= 0.0:
+            raise ValueError("The supplied values do not produce a finite positive scale height.")
 
-        # Arrays of fixed maximum length, as in Java (1000 elements)
-        max_steps = 1000
+        # Initial altitude step, following Schutz's choice of 200 steps per
+        # base scale height.
+        dh = scale / STEPS_PER_SCALE_HEIGHT
+        if not math.isfinite(dh) or dh <= 0.0:
+            raise ValueError("The supplied values do not produce a usable altitude step.")
+
+        # A larger modern point budget prevents the default 500 km Earth
+        # profile from silently losing resolution through restart doubling.
+        max_steps = MAX_STEPS
         alt = [0.0] * max_steps
         p = [0.0] * max_steps
         rho = [0.0] * max_steps
@@ -119,7 +136,7 @@ class AtmosphereModel:
 
         last_step = 0
         retry_count = 0
-        max_retries = 25
+        max_retries = MAX_RETRIES
 
         # Outer while-loop: repeat with larger dh if we do not reach the
         # numerical upper boundary within max_steps.
@@ -137,10 +154,13 @@ class AtmosphereModel:
 
             for j in range(1, max_steps):
                 alt[j] = alt[j - 1] + dh
+                if not math.isfinite(alt[j]):
+                    raise RuntimeError("Altitude overflowed during integration.")
                 p[j] = hydrostatic_step(p[j - 1], rho[j - 1], g, dh)
 
-                # Stop when the Euler step crosses the model's zero-pressure boundary
-                if p[j] < 0.0:
+                # Stop when the Euler step reaches or crosses the model's
+                # zero-pressure boundary.  The non-positive point is excluded.
+                if p[j] <= 0.0:
                     last_step = j
                     break
 
@@ -150,8 +170,10 @@ class AtmosphereModel:
             # If still zero, all steps were used without crossing zero pressure: increase dh.
             if last_step == 0:
                 dh *= 2.0
+                if not math.isfinite(dh):
+                    raise RuntimeError("Altitude step overflowed during restart doubling.")
 
-        # Prepare output arrays up to last_step (excluding the negative-pressure point)
+        # Prepare output arrays up to last_step (excluding the non-positive point)
         final_alt = alt[:last_step]
         final_p = p[:last_step]
         final_rho = rho[:last_step]
