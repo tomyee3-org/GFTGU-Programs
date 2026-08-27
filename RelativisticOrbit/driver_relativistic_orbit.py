@@ -324,15 +324,19 @@ def integrate_relativistic_orbit(
 
         accepted_steps += 1
 
-        h_now = specific_angular_momentum(x1, y1, vx1, vy1)
-        e_now = effective_specific_energy(
-            x1, y1, vx1, vy1, h_constant, model
-        )
-        max_h_drift = max(max_h_drift, _fractional_drift(h_now, h_initial))
-        max_energy_drift = max(
-            max_energy_drift,
-            _fractional_drift(e_now, energy_initial),
-        )
+        # A horizon endpoint is a linearly interpolated event record, not an
+        # accepted solution state.  Keep it in the trajectory arrays for a
+        # precise visual endpoint, but exclude it from conservation diagnostics.
+        if not fell_into_hole:
+            h_now = specific_angular_momentum(x1, y1, vx1, vy1)
+            e_now = effective_specific_energy(
+                x1, y1, vx1, vy1, h_constant, model
+            )
+            max_h_drift = max(max_h_drift, _fractional_drift(h_now, h_initial))
+            max_energy_drift = max(
+                max_energy_drift,
+                _fractional_drift(e_now, energy_initial),
+            )
 
         # Local radius minimum at the previous accepted point.
         if len(x) >= 3:
@@ -346,11 +350,11 @@ def integrate_relativistic_orbit(
                 periapsis_radius.append(r_b)
                 periapsis_azimuth.append(azimuth_unwrapped[idx])
 
-        x0, y0, vx0, vy0, tau0 = x1, y1, vx1, vy1, tau1
-        ax0, ay0 = central_acceleration(x0, y0, h_constant, model)
-
         if fell_into_hole:
             break
+
+        x0, y0, vx0, vy0, tau0 = x1, y1, vx1, vy1, tau1
+        ax0, ay0 = central_acceleration(x0, y0, h_constant, model)
 
         if abs(accumulated_angle) >= 2.0 * math.pi * params.max_orbits:
             termination_reason = "max_orbits"

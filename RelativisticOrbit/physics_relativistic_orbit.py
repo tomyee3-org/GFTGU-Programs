@@ -15,7 +15,7 @@ from numbers import Real
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.0.1"
+MODEL_VERSION = "1.0.2"
 BUILD_ID_COVERS = (
     "physics_relativistic_orbit.py",
     "driver_relativistic_orbit.py",
@@ -29,7 +29,8 @@ def _compute_build_id() -> str:
 
     Files are read as UTF-8 text with universal-newline conversion, so merely
     switching between LF and CRLF line endings does not create a new build.
-    Filename and byte-length framing prevents ambiguous concatenations.
+    Filename and byte-length framing prevents ambiguous concatenations.  A
+    physics-only copy without the complete core is labeled "unpackaged".
     """
     import hashlib
     import os
@@ -46,7 +47,9 @@ def _compute_build_id() -> str:
             digest.update(content)
         return digest.hexdigest()[:12]
     except (OSError, UnicodeDecodeError):
-        return "unknown"
+        # A physics-only copy remains importable for exploration, but it must
+        # not masquerade as a traceable release build without all four files.
+        return "unpackaged"
 
 
 BUILD_ID = _compute_build_id()

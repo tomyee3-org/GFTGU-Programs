@@ -11,14 +11,17 @@ the four program modules and RelativisticOrbit.html.
 from __future__ import annotations
 
 import contextlib
+from dataclasses import fields
 import hashlib
 import html
+from html.parser import HTMLParser
 import importlib
 import io
 import math
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -62,6 +65,42 @@ from driver_relativistic_orbit import (  # noqa: E402
     RelativisticOrbitParams,
     integrate_relativistic_orbit,
 )
+
+
+class _HelpStructureParser(HTMLParser):
+    """Collect IDs, fragment links, and table rows with the standard library."""
+
+    def __init__(self):
+        super().__init__()
+        self.ids: list[str] = []
+        self.fragments: list[str] = []
+        self.rows: list[list[str]] = []
+        self._row: list[str] | None = None
+        self._cell: list[str] | None = None
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if "id" in attributes:
+            self.ids.append(attributes["id"])
+        href = attributes.get("href", "")
+        if href.startswith("#"):
+            self.fragments.append(href[1:])
+        if tag == "tr":
+            self._row = []
+        elif tag in ("td", "th") and self._row is not None:
+            self._cell = []
+
+    def handle_data(self, data):
+        if self._cell is not None:
+            self._cell.append(data)
+
+    def handle_endtag(self, tag):
+        if tag in ("td", "th") and self._cell is not None and self._row is not None:
+            self._row.append(" ".join("".join(self._cell).split()))
+            self._cell = None
+        elif tag == "tr" and self._row is not None:
+            self.rows.append(self._row)
+            self._row = None
 
 
 def params(**changes) -> RelativisticOrbitParams:
@@ -114,6 +153,15 @@ class TestDiscoveryAndReleaseMetadata(unittest.TestCase):
     def test_build_id_coverage_is_exact(self):
         self.assertEqual(tuple(physics.BUILD_ID_COVERS), CORE_MODULE_FILENAMES)
 
+    def test_incomplete_core_is_explicitly_unpackaged(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            copied = Path(temp_dir) / "physics_relativistic_orbit.py"
+            shutil.copy2(MODULE_DIR / "physics_relativistic_orbit.py", copied)
+            spec = importlib.util.spec_from_file_location("isolated_relativistic_physics", copied)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            self.assertEqual(module.BUILD_ID, "unpackaged")
+
     def test_help_version_and_build_match_program(self):
         text = HELP_FILE.read_text(encoding="utf-8")
         match = re.search(
@@ -136,9 +184,76 @@ class TestDiscoveryAndReleaseMetadata(unittest.TestCase):
 
     def test_help_avoids_deprecated_porting_history(self):
         text = HELP_FILE.read_text(encoding="utf-8").lower()
-        for phrase in ("porting error", "previous python", "revised code", "no longer silently"):
+        for phrase in (
+            "porting error",
+            "previous python",
+            "revised code",
+            "no longer silently",
+            "original notation defined",
+            "program uses \\(h\\) directly",
+        ):
             with self.subTest(phrase=phrase):
                 self.assertNotIn(phrase, text)
+
+    def test_help_has_unique_ids_and_resolved_fragment_links(self):
+        parser = _HelpStructureParser()
+        parser.feed(HELP_FILE.read_text(encoding="utf-8"))
+        self.assertEqual(len(parser.ids), len(set(parser.ids)))
+        self.assertEqual(set(parser.fragments) - set(parser.ids), set())
+
+    def test_help_mathjax_delimiters_are_balanced(self):
+        text = HELP_FILE.read_text(encoding="utf-8")
+        self.assertEqual(text.count(r"\("), text.count(r"\)"))
+        self.assertEqual(text.count(r"\["), text.count(r"\]"))
+
+    def test_help_parameter_defaults_match_main(self):
+        parser = _HelpStructureParser()
+        parser.feed(HELP_FILE.read_text(encoding="utf-8"))
+        rows = {row[0]: row[1] for row in parser.rows if len(row) >= 2}
+        main_module = importlib.import_module("main")
+        documented_numeric = {
+            "x_init": float(rows["x_init"].split()[0]),
+            "u_init": float(rows["u_init"].split()[0]),
+            "dt": float(rows["dt"].split()[0]),
+            "max_steps": int(rows["max_steps"]),
+            "max_orbits": int(rows["max_orbits"]),
+            "eps1": float(rows["eps1"]),
+            "eps2": float(rows["eps2"]),
+        }
+        for name, value in documented_numeric.items():
+            with self.subTest(name=name):
+                self.assertEqual(value, getattr(main_module.params, name))
+        self.assertEqual(rows["model"].strip('"'), main_module.params.model)
+        self.assertEqual(rows["show_isco"], str(main_module.show_isco))
+        self.assertEqual(rows["show_periapsides"], str(main_module.show_periapsides))
+
+    def test_help_documents_models_termination_and_core_formulas(self):
+        text = HELP_FILE.read_text(encoding="utf-8")
+        required = (
+            'model="schwarzschild"',
+            '"newtonian"',
+            "<code>max_steps</code>",
+            "<code>max_orbits</code>",
+            "<code>horizon</code>",
+            r"1+\frac{3h^2}{c^2r^2}",
+            r"\sqrt{\frac{GM}{r-3GM/c^2}}",
+            r"\frac{6\pi GM}{a(1-e^2)c^2}",
+            r"N_{\rm rev}=\frac{|\Delta\phi_{\rm accumulated}|}{2\pi}",
+        )
+        for item in required:
+            with self.subTest(item=item):
+                self.assertIn(item, text)
+
+    def test_result_api_fields_are_stable(self):
+        actual = {field.name for field in fields(driver.RelativisticOrbitResult)}
+        expected = {
+            "model_version", "build_id", "x", "y", "vx", "vy", "tau",
+            "azimuth_unwrapped", "n_orbits", "final_step", "fell_into_hole",
+            "termination_reason", "model", "periapsis_indices", "periapsis_tau",
+            "periapsis_radius", "periapsis_azimuth", "mean_periapsis_advance",
+            "max_fractional_h_drift", "max_fractional_energy_drift",
+        }
+        self.assertEqual(actual, expected)
 
 
 class TestPhysicsConstantsAndEquations(unittest.TestCase):
@@ -212,6 +327,12 @@ class TestPhysicsConstantsAndEquations(unittest.TestCase):
             with self.subTest(radius=radius), self.assertRaises(ValueError):
                 physics.circular_proper_time_speed(radius)
 
+    def test_circular_speed_at_nearest_representable_allowed_radius(self):
+        radius = math.nextafter(physics.PHOTON_ORBIT_RADIUS, math.inf)
+        speed = physics.circular_proper_time_speed(radius)
+        self.assertTrue(math.isfinite(speed))
+        self.assertGreater(speed, physics.C)
+
     def test_physics_functions_reject_invalid_values_cleanly(self):
         calls = (
             lambda: physics.orbital_constants("bad", 1.0),
@@ -279,6 +400,52 @@ class TestDriverUtilitiesAndValidation(unittest.TestCase):
         )
         self.assertEqual(result.model, "newtonian")
         self.assertFalse(result.fell_into_hole)
+
+    def test_predictor_gate_rejects_then_retries_without_accepting_state(self):
+        values = [1.0, 0.0, 0.0]
+        with mock.patch.object(driver, "_relative_vector_change", side_effect=values):
+            result = integrate_relativistic_orbit(
+                params(dt=1e-6, max_steps=1, max_orbits=10)
+            )
+        self.assertEqual(result.final_step, 1)
+        self.assertEqual(len(result.tau), 2)
+        self.assertAlmostEqual(result.tau[-1], 0.5e-6)
+
+    def test_rejected_step_recovers_by_ten_percent_and_caps_at_user_dt(self):
+        values = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        with mock.patch.object(driver, "_relative_vector_change", side_effect=values):
+            result = integrate_relativistic_orbit(
+                params(dt=1e-6, max_steps=3, max_orbits=10)
+            )
+        increments = [b - a for a, b in zip(result.tau, result.tau[1:])]
+        expected = [0.5e-6, 0.55e-6, 0.605e-6]
+        for actual, target in zip(increments, expected):
+            self.assertAlmostEqual(actual, target, places=18)
+        self.assertTrue(all(step <= 1e-6 for step in increments))
+
+    def test_corrector_exhaustion_reaches_eighty_retry_safety_valve(self):
+        call_number = 0
+
+        def forced_change(*_args):
+            nonlocal call_number
+            value = 0.0 if call_number % 11 == 0 else 1.0
+            call_number += 1
+            return value
+
+        with (
+            mock.patch.object(driver, "_relative_vector_change", side_effect=forced_change),
+            self.assertRaisesRegex(RuntimeError, "80 retries"),
+        ):
+            integrate_relativistic_orbit(params(dt=1e-6, max_steps=1))
+        self.assertEqual(call_number, 80 * 11)
+
+    def test_no_progress_timestep_safety_error(self):
+        invalid = params(dt=0.0, max_steps=1)
+        with (
+            mock.patch.object(driver, "_validate_params"),
+            self.assertRaisesRegex(RuntimeError, "cannot advance proper time"),
+        ):
+            integrate_relativistic_orbit(invalid)
 
 
 class TestIntegratedOrbits(unittest.TestCase):
@@ -364,6 +531,37 @@ class TestIntegratedOrbits(unittest.TestCase):
         )
         self.assertEqual(result.max_fractional_h_drift, 0.0)
 
+    def test_nonradial_horizon_event_converges_and_is_excluded_from_drift(self):
+        runs = []
+        for dt in (2e-6, 1e-6, 0.5e-6):
+            runs.append(
+                integrate_relativistic_orbit(
+                    params(
+                        x_init=15_000.0,
+                        u_init=5.0e7,
+                        dt=dt,
+                        max_steps=10_000,
+                        max_orbits=10,
+                        eps1=0.05,
+                        eps2=1e-5,
+                    )
+                )
+            )
+        for result in runs:
+            self.assertEqual(result.termination_reason, "horizon")
+            self.assertAlmostEqual(math.hypot(result.x[-1], result.y[-1]), physics.HORIZON_RADIUS, places=8)
+        coarse_change = abs(runs[1].tau[-1] - runs[0].tau[-1])
+        fine_change = abs(runs[2].tau[-1] - runs[1].tau[-1])
+        self.assertLess(fine_change, coarse_change)
+
+        finest = runs[-1]
+        h_initial = 15_000.0 * 5.0e7
+        h_event = physics.specific_angular_momentum(
+            finest.x[-1], finest.y[-1], finest.vx[-1], finest.vy[-1]
+        )
+        event_drift = abs(h_event - h_initial) / abs(h_initial)
+        self.assertGreater(event_drift, finest.max_fractional_h_drift)
+
     def test_max_steps_termination(self):
         result = integrate_relativistic_orbit(params(max_steps=3, max_orbits=10))
         self.assertEqual(result.termination_reason, "max_steps")
@@ -385,6 +583,88 @@ class TestIntegratedOrbits(unittest.TestCase):
             params(model="NEWTONIAN", max_steps=1, max_orbits=10)
         )
         self.assertEqual(result.model, "newtonian")
+
+
+class TestIndependentBenchmarksAndConvergence(unittest.TestCase):
+    """Stored oracles generated independently with SciPy DOP853.
+
+    Provenance: kickoff audit, 2026-08-27; Cartesian first-order formulation,
+    rtol=2e-13, componentwise atol=(1e-8,1e-8,1e-5,1e-5), max_step=1e-6 s.
+    SciPy is not required to run these regression tests.
+    """
+
+    DOP853_FINAL_AT_TAU_0012 = (
+        -4600.295838439546,
+        19494.73428803206,
+        -83932611.77108411,
+        -35596848.80564334,
+    )
+    DOP853_APSIDAL_ADVANCE = 2.440369610158
+
+    @classmethod
+    def setUpClass(cls):
+        cls.default = integrate_relativistic_orbit(
+            params(max_steps=6_000, max_orbits=10)
+        )
+
+    def test_default_endpoint_agrees_with_independent_oracle(self):
+        reference = self.DOP853_FINAL_AT_TAU_0012
+        position_error = math.hypot(
+            self.default.x[-1] - reference[0], self.default.y[-1] - reference[1]
+        )
+        velocity_error = math.hypot(
+            self.default.vx[-1] - reference[2], self.default.vy[-1] - reference[3]
+        )
+        self.assertLess(position_error, 250.0)
+        self.assertLess(velocity_error, 1.1e6)
+
+    def test_default_apsidal_advance_agrees_with_independent_oracle(self):
+        self.assertLess(
+            abs(self.default.mean_periapsis_advance - self.DOP853_APSIDAL_ADVANCE),
+            5e-4,
+        )
+
+    def test_newtonian_circular_orbit_has_second_order_state_convergence(self):
+        radius = 1.0e7
+        speed = math.sqrt(physics.GM_SUN / radius)
+        period = 2.0 * math.pi * radius / speed
+        errors = []
+        for steps in (50, 100, 200):
+            result = integrate_relativistic_orbit(
+                params(
+                    x_init=radius,
+                    u_init=speed,
+                    dt=period / steps,
+                    max_steps=steps,
+                    max_orbits=100,
+                    eps1=0.9,
+                    eps2=1e-10,
+                    model="newtonian",
+                )
+            )
+            errors.append(math.hypot(result.x[-1] - radius, result.y[-1]))
+        self.assertGreater(errors[0], errors[1])
+        self.assertGreater(errors[1], errors[2])
+        for coarse, fine in zip(errors, errors[1:]):
+            self.assertGreater(coarse / fine, 3.5)
+            self.assertLess(coarse / fine, 4.5)
+
+    def test_selected_adversarial_matrix_remains_finite_and_ordered(self):
+        cases = (
+            params(x_init=physics.HORIZON_RADIUS * 1.001, u_init=0.0, dt=1e-8, max_steps=250),
+            params(x_init=15_000.0, u_init=-2.5e8, dt=1e-7, max_steps=250),
+            params(x_init=15_000.0, u_init=2.5e8, dt=1e-7, max_steps=250),
+            params(x_init=2.0e5, u_init=1.0e7, dt=1e-5, max_steps=250),
+            params(x_init=1_000.0, u_init=-1.5e8, dt=1e-9, max_steps=250, model="newtonian"),
+            params(x_init=1.0e5, u_init=0.0, dt=1e-7, max_steps=250, model="newtonian"),
+        )
+        for case in cases:
+            with self.subTest(case=case):
+                result = integrate_relativistic_orbit(case)
+                sequences = (result.x, result.y, result.vx, result.vy, result.tau)
+                self.assertEqual(len({len(sequence) for sequence in sequences}), 1)
+                self.assertTrue(all(math.isfinite(value) for sequence in sequences for value in sequence))
+                self.assertTrue(all(b > a for a, b in zip(result.tau, result.tau[1:])))
 
 
 class TestMainAndPlotIntegration(unittest.TestCase):
