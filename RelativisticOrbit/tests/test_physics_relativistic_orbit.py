@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 from dataclasses import fields
+import ast
 import hashlib
 import html
 from html.parser import HTMLParser
@@ -36,6 +37,7 @@ CORE_MODULE_FILENAMES = (
     "plot_relativistic_orbit.py",
 )
 HELP_FILENAME = "RelativisticOrbit.html"
+MINIMUM_PYTHON_VERSION = (3, 10)
 
 
 def find_module_dir(start: str | os.PathLike[str]) -> Path:
@@ -172,6 +174,24 @@ class TestDiscoveryAndReleaseMetadata(unittest.TestCase):
         visible = " ".join(visible.split())
         self.assertIn(f"Version {physics.MODEL_VERSION}", visible)
         self.assertIn(f"Build {physics.BUILD_ID}", visible)
+
+    def test_help_advertises_the_supported_minimum_python_version(self):
+        text = HELP_FILE.read_text(encoding="utf-8")
+        self.assertRegex(text, r"Python\s+3\.10\s+or\s+later")
+        self.assertNotRegex(text, r"Python\s+3\.9\s+or\s+later")
+
+    def test_release_sources_parse_with_python_310_grammar(self):
+        """Guard the advertised syntax floor without assuming one fixed layout."""
+        for name in (*CORE_MODULE_FILENAMES, Path(__file__).name):
+            source_file = MODULE_DIR / name
+            if not source_file.is_file():
+                source_file = Path(__file__).resolve().parent / name
+            with self.subTest(source=name):
+                ast.parse(
+                    source_file.read_text(encoding="utf-8"),
+                    filename=str(source_file),
+                    feature_version=MINIMUM_PYTHON_VERSION,
+                )
 
     def test_help_has_no_hidden_control_characters(self):
         text = HELP_FILE.read_text(encoding="utf-8")

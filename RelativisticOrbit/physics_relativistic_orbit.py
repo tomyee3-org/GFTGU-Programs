@@ -15,7 +15,7 @@ from numbers import Real
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.0.2"
+MODEL_VERSION = "1.0.3"
 BUILD_ID_COVERS = (
     "physics_relativistic_orbit.py",
     "driver_relativistic_orbit.py",
