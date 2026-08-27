@@ -69,8 +69,14 @@ def _validate_params(params: RelativisticOrbitParams) -> None:
         "eps2": params.eps2,
     }
     for name, value in finite_values.items():
-        if not math.isfinite(value):
-            raise ValueError(f"{name} must be finite.")
+        if isinstance(value, bool):
+            raise ValueError(f"{name} must be a finite real number.")
+        try:
+            finite = math.isfinite(value)
+        except (TypeError, ValueError):
+            finite = False
+        if not finite:
+            raise ValueError(f"{name} must be a finite real number.")
 
     if params.x_init <= 0.0:
         raise ValueError("x_init must be positive.")
@@ -140,7 +146,10 @@ def _segment_circle_first_fraction(
 def _fractional_drift(value: float, reference: float) -> float:
     scale = abs(reference)
     if scale == 0.0:
-        return abs(value - reference)
+        # A fractional error relative to zero is undefined unless the value is
+        # still exactly zero.  Returning infinity is dimensionally honest and
+        # prevents an absolute, unit-bearing difference from being mislabeled.
+        return 0.0 if value == reference else math.inf
     return abs(value - reference) / scale
 
 
@@ -210,6 +219,11 @@ def integrate_relativistic_orbit(
         accepted = False
 
         for _retry in range(max_retries_per_step):
+            if dt_work <= 0.0 or tau0 + dt_work == tau0:
+                raise RuntimeError(
+                    "RelativisticOrbit cannot advance proper time at the current "
+                    "timestep. Use a larger dt or less extreme tolerances."
+                )
             # Constant-acceleration predictor.
             x_pred = x0 + vx0 * dt_work + 0.5 * ax0 * dt_work * dt_work
             y_pred = y0 + vy0 * dt_work + 0.5 * ay0 * dt_work * dt_work

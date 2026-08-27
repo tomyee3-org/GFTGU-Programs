@@ -18,7 +18,7 @@ from driver_relativistic_orbit import (
 from plot_relativistic_orbit import plot_relativistic_orbit
 
 
-def parse_args():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         prog="RelativisticOrbit",
         description="Compare Schwarzschild and Newtonian test-particle orbits.",
@@ -31,11 +31,7 @@ def parse_args():
             f"(build {physics_relativistic_orbit.BUILD_ID})"
         ),
     )
-    return parser.parse_args()
-
-
-if __name__ == "__main__":
-    parse_args()
+    return parser.parse_args(argv)
 
 
 # ---------------------------------------------------------------------------
@@ -59,36 +55,44 @@ show_periapsides = False
 # ---------------------------------------------------------------------------
 # Run and report
 # ---------------------------------------------------------------------------
-result = integrate_relativistic_orbit(params)
+def main(argv=None):
+    """Run the configured simulation and return its result."""
+    parse_args(argv)
+    result = integrate_relativistic_orbit(params)
 
-reason_text = {
-    "max_orbits": "requested revolution count reached",
-    "max_steps": "maximum accepted-step count reached",
-    "horizon": "Schwarzschild horizon crossed",
-}[result.termination_reason]
+    reason_text = {
+        "max_orbits": "requested revolution count reached",
+        "max_steps": "maximum accepted-step count reached",
+        "horizon": "Schwarzschild horizon crossed",
+    }[result.termination_reason]
 
-print(
-    f"RelativisticOrbit {result.model_version} "
-    f"(build {result.build_id}) summary"
-)
-print(f"  model             : {result.model}")
-print(f"  termination       : {reason_text}")
-print(f"  accepted steps    : {result.final_step}")
-print(f"  proper time       : {result.tau[-1]:.6g} s")
-print(f"  azimuthal turns   : {result.n_orbits:.6f}")
-print(f"  periapsides found : {len(result.periapsis_indices)}")
-print(f"  max |Δh/h0|       : {result.max_fractional_h_drift:.3e}")
-print(f"  max |ΔE/E0|       : {result.max_fractional_energy_drift:.3e}")
-
-if result.mean_periapsis_advance is not None:
-    degrees = math.degrees(result.mean_periapsis_advance)
     print(
-        "  mean periapsis advance per radial period: "
-        f"{result.mean_periapsis_advance:.6g} rad = {degrees:.6g} deg"
+        f"RelativisticOrbit {result.model_version} "
+        f"(build {result.build_id}) summary"
     )
+    print(f"  model             : {result.model}")
+    print(f"  termination       : {reason_text}")
+    print(f"  accepted steps    : {result.final_step}")
+    print(f"  proper time       : {result.tau[-1]:.6g} s")
+    print(f"  azimuthal turns   : {result.n_orbits:.6f}")
+    print(f"  periapsides found : {len(result.periapsis_indices)}")
+    print(f"  max |Δh/h0|       : {result.max_fractional_h_drift:.3e}")
+    print(f"  max |ΔE/E0|       : {result.max_fractional_energy_drift:.3e}")
 
-plot_relativistic_orbit(
-    result,
-    show_isco=show_isco,
-    show_periapsides=show_periapsides,
-)
+    if result.mean_periapsis_advance is not None:
+        degrees = math.degrees(result.mean_periapsis_advance)
+        print(
+            "  mean periapsis advance per radial period: "
+            f"{result.mean_periapsis_advance:.6g} rad = {degrees:.6g} deg"
+        )
+
+    plot_relativistic_orbit(
+        result,
+        show_isco=show_isco,
+        show_periapsides=show_periapsides,
+    )
+    return result
+
+
+if __name__ == "__main__":
+    result = main()
