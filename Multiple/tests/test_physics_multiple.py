@@ -520,6 +520,27 @@ class TestDriverHelpers(unittest.TestCase):
         self.assertEqual(driver._fractional_scalar_drift(9, 10), 0.1)
         self.assertEqual(driver._vector_drift(np.array([3, 4, 0]), np.zeros(3)), 5)
 
+    def test_vector_drift_avoids_large_finite_norm_overflow(self):
+        reference = np.array([1.0e308, 1.0e308, 0.0])
+        value = np.array([9.0e307, 1.0e308, 0.0])
+        drift = driver._vector_drift(value, reference)
+        self.assertTrue(np.isfinite(drift))
+        self.assertAlmostEqual(drift, 1.0 / np.sqrt(200.0), places=15)
+
+    def test_vector_drift_rejects_out_of_range_difference(self):
+        reference = np.array([-1.0e308, 0.0, 0.0])
+        value = np.array([1.0e308, 0.0, 0.0])
+        with self.assertRaisesRegex(ValueError, "drift.*floating-point range"):
+            driver._vector_drift(value, reference)
+
+    def test_nonfinite_candidate_cannot_be_swallowed_by_maximum(self):
+        for quantity in ("momentum", "angular-momentum"):
+            with self.subTest(quantity=quantity):
+                with self.assertRaisesRegex(RuntimeError, quantity):
+                    driver._checked_maximum_drift(
+                        0.0, float("nan"), quantity
+                    )
+
     def test_energy_drift_scale_detects_near_cancellation(self):
         scale, mode = driver._energy_drift_scale(1.0, -1.0 + 1.0e-16)
         self.assertEqual(mode, "characteristic_energy")
@@ -545,6 +566,22 @@ class TestSimulation(unittest.TestCase):
         np.testing.assert_array_equal(result["velocities"][0], params.velocities_init)
         self.assertEqual(result["model_version"], phys.MODEL_VERSION)
         self.assertEqual(result["build_id"], phys.BUILD_ID)
+        self.assertEqual(
+            result["max_momentum_drift"],
+            result["max_fractional_momentum_drift"],
+        )
+        self.assertEqual(
+            result["max_angular_momentum_drift"],
+            result["max_fractional_angular_momentum_drift"],
+        )
+        self.assertEqual(
+            result["momentum_drift_normalization"], "absolute_scaled"
+        )
+        self.assertIsNone(result["momentum_drift_scale"])
+        self.assertEqual(
+            result["angular_momentum_drift_normalization"], "initial_norm"
+        )
+        self.assertGreater(result["angular_momentum_drift_scale"], 0.0)
 
     def test_no_input_mutation(self):
         params = make_params()
@@ -646,6 +683,22 @@ class TestSimulation(unittest.TestCase):
         self.assertEqual(result["frame_positions"].shape, (21, 2, 3))
         self.assertEqual(result["frame_velocities"].shape, (21, 2, 3))
 
+    def test_frame_schedule_uses_index_multiplication_without_accumulation(self):
+        frame_time = 0.1
+        result = driver.run_simulation(
+            make_params(
+                masses_solar=[1.0e-100, 1.0e-100],
+                positions_init=[[-1.0e12, 0, 0], [1.0e12, 0, 0]],
+                velocities_init=[[0, 0, 0], [0, 0, 0]],
+                dt=100.0,
+                max_steps=1,
+                output_type="animation",
+                frame_time=frame_time,
+            )
+        )
+        expected = np.arange(1001, dtype=float) * frame_time
+        np.testing.assert_array_equal(result["frame_times"], expected)
+
     def test_animation_omits_unreached_partial_final_frame(self):
         result = driver.run_simulation(
             make_params(
@@ -699,6 +752,10 @@ class TestPlotting(unittest.TestCase):
         self.assertEqual(plotting._projection_indices("yz"), (1, 2, "y", "z"))
         with self.assertRaises(ValueError):
             plotting._projection_indices("xyz")
+        for invalid in (None, 3, ["x", "y"]):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    plotting._projection_indices(invalid)
 
     def test_fixed_limits_are_square_and_nonzero(self):
         projected = np.array([[[1.0, 2.0]], [[1.0, 2.0]]])
@@ -713,6 +770,47 @@ class TestPlotting(unittest.TestCase):
     def test_plot_energy_rejects_wrong_result_type(self):
         with self.assertRaisesRegex(ValueError, "trajectories mode"):
             plotting.plot_energy_drift({"type": "animation"})
+
+    def test_plot_energy_validates_arrays_and_normalization_metadata(self):
+        malformed = (
+            {"type": "trajectories"},
+            {"type": "trajectories", "energies": [], "times": []},
+            {
+                "type": "trajectories",
+                "energies": [1.0, 2.0],
+                "times": [0.0],
+            },
+            {
+                "type": "trajectories",
+                "energies": [1.0, np.inf],
+                "times": [0.0, 1.0],
+            },
+        )
+        for result in malformed:
+            with self.subTest(result=result):
+                with self.assertRaises(ValueError):
+                    plotting.plot_energy_drift(result)
+
+        for normalization in ("initial_energy", "characteristic_energy"):
+            with self.subTest(normalization=normalization):
+                result = {
+                    "type": "trajectories",
+                    "energies": [1.0],
+                    "times": [0.0],
+                    "energy_drift_normalization": normalization,
+                    "energy_drift_scale": None,
+                }
+                with self.assertRaisesRegex(ValueError, "energy_drift_scale"):
+                    plotting.plot_energy_drift(result)
+
+        result = {
+            "type": "trajectories",
+            "energies": [1.0],
+            "times": [0.0],
+            "energy_drift_normalization": "mystery",
+        }
+        with self.assertRaisesRegex(ValueError, "energy_drift_normalization"):
+            plotting.plot_energy_drift(result)
 
     def test_animate_rejects_wrong_or_empty_result(self):
         with self.assertRaisesRegex(ValueError, "animation result"):

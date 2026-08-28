@@ -82,8 +82,8 @@ def main():
     print(
         "Maximum conservation drift: "
         f"energy={result['max_fractional_energy_drift']:.3e}, "
-        f"momentum={result['max_fractional_momentum_drift']:.3e}, "
-        f"angular momentum={result['max_fractional_angular_momentum_drift']:.3e}"
+        f"momentum={result['max_momentum_drift']:.3e}, "
+        f"angular momentum={result['max_angular_momentum_drift']:.3e}"
     )
 
     if result["type"] == "trajectories":

@@ -12,6 +12,8 @@ _COLORS = ["red", "green", "blue", "orange", "purple", "brown"]
 
 
 def _projection_indices(projection: str):
+    if not isinstance(projection, str):
+        raise ValueError('projection must be "xy", "xz", or "yz".')
     mapping = {
         "xy": (0, 1, "x", "y"),
         "xz": (0, 2, "x", "z"),
@@ -73,24 +75,47 @@ def plot_energy_drift(result: Dict[str, Any]) -> None:
             "Energy-drift history is available in trajectories mode."
         )
 
-    energies = np.asarray(result["energies"], dtype=float)
-    times_days = np.asarray(result["times"], dtype=float) / 86400.0
+    try:
+        energies = np.asarray(result["energies"], dtype=float)
+        times = np.asarray(result["times"], dtype=float)
+    except KeyError as exc:
+        raise ValueError(
+            "Trajectory results must contain energies and times."
+        ) from exc
+    except (TypeError, ValueError) as exc:
+        raise ValueError("energies and times must be numeric arrays.") from exc
+
+    if (
+        energies.ndim != 1
+        or times.ndim != 1
+        or energies.size == 0
+        or energies.shape != times.shape
+    ):
+        raise ValueError(
+            "energies and times must be non-empty one-dimensional arrays "
+            "with matching lengths."
+        )
+    if not (np.all(np.isfinite(energies)) and np.all(np.isfinite(times))):
+        raise ValueError("energies and times must contain only finite values.")
+
+    times_days = times / 86400.0
     e0 = float(energies[0])
     normalization = result.get("energy_drift_normalization")
     scale = result.get("energy_drift_scale")
 
     if normalization == "characteristic_energy":
-        scale = float(scale)
-        if not np.isfinite(scale) or scale <= 0.0:
-            raise ValueError("energy_drift_scale must be positive and finite.")
+        scale = _validated_energy_scale(scale)
         drift = (energies - e0) / scale
         ylabel = r"$(E-E_0)/(K_0+|U_0|)$"
     elif normalization == "initial_energy":
-        scale = float(scale)
-        if not np.isfinite(scale) or scale <= 0.0:
-            raise ValueError("energy_drift_scale must be positive and finite.")
+        scale = _validated_energy_scale(scale)
         drift = (energies - e0) / scale
         ylabel = r"$(E-E_0)/|E_0|$"
+    elif normalization is not None:
+        raise ValueError(
+            "energy_drift_normalization must be 'initial_energy' or "
+            "'characteristic_energy'."
+        )
     elif e0 != 0.0:
         # Backward-compatible handling for trajectory results produced before
         # the normalization metadata was added.
@@ -109,6 +134,23 @@ def plot_energy_drift(result: Dict[str, Any]) -> None:
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.show()
+
+
+def _validated_energy_scale(value) -> float:
+    """Return a positive finite energy scale or raise a public ValueError."""
+    try:
+        scale = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "energy_drift_scale must be a positive finite number when "
+            "normalization metadata is present."
+        ) from exc
+    if not np.isfinite(scale) or scale <= 0.0:
+        raise ValueError(
+            "energy_drift_scale must be a positive finite number when "
+            "normalization metadata is present."
+        )
+    return scale
 
 
 def animate_multiple(result: Dict[str, Any]):

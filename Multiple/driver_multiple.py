@@ -251,11 +251,58 @@ def _energy_drift_scale(
 
 
 def _vector_drift(value: np.ndarray, reference: np.ndarray) -> float:
-    scale = float(np.linalg.norm(reference))
-    diff = float(np.linalg.norm(value - reference))
+    if not (
+        np.all(np.isfinite(value))
+        and np.all(np.isfinite(reference))
+    ):
+        raise ValueError("Conservation vectors must contain finite values.")
+
+    with np.errstate(over="ignore", invalid="ignore"):
+        difference = value - reference
+    if not np.all(np.isfinite(difference)):
+        raise ValueError(
+            "Conservation-vector drift is outside the floating-point range."
+        )
+
+    scale = float(np.hypot.reduce(reference))
+    diff = float(np.hypot.reduce(difference))
+    if not (np.isfinite(scale) and np.isfinite(diff)):
+        raise ValueError(
+            "Conservation-vector norm is outside the floating-point range."
+        )
     if scale == 0.0:
         return diff
-    return diff / scale
+    drift = diff / scale
+    if not np.isfinite(drift):
+        raise ValueError(
+            "Conservation-vector drift is outside the floating-point range."
+        )
+    return drift
+
+
+def _vector_drift_metadata(reference: np.ndarray) -> tuple[Optional[float], str]:
+    """Return the vector-drift scale and its public normalization label."""
+    if not np.all(np.isfinite(reference)):
+        raise ValueError("Conservation vectors must contain finite values.")
+    scale = float(np.hypot.reduce(reference))
+    if not np.isfinite(scale):
+        raise ValueError(
+            "Conservation-vector norm is outside the floating-point range."
+        )
+    if scale == 0.0:
+        return None, "absolute_scaled"
+    return scale, "initial_norm"
+
+
+def _checked_maximum_drift(
+    current_maximum: float,
+    candidate: float,
+    quantity: str,
+) -> float:
+    """Update a maximum without silently swallowing a NaN diagnostic."""
+    if not np.isfinite(candidate):
+        raise RuntimeError(f"Non-finite {quantity} drift was produced.")
+    return max(current_maximum, candidate)
 
 
 def run_simulation(params: SimulationParams) -> Dict[str, Any]:
@@ -286,6 +333,12 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
         initial_cons["kinetic_energy"],
         initial_cons["potential_energy"],
     )
+    momentum_drift_scale, momentum_drift_normalization = (
+        _vector_drift_metadata(initial_cons["momentum"])
+    )
+    angular_drift_scale, angular_drift_normalization = (
+        _vector_drift_metadata(initial_cons["angular_momentum"])
+    )
     max_energy_drift = 0.0
     max_momentum_drift = 0.0
     max_angular_momentum_drift = 0.0
@@ -302,7 +355,8 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
         frame_times = [0.0]
         frame_positions = [positions.copy()]
         frame_velocities = [velocities.copy()]
-        next_frame_time = params.frame_time
+        next_frame_index = 1
+        next_frame_time = next_frame_index * params.frame_time
 
     accepted_steps = 0
 
@@ -424,26 +478,29 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
                 "Try a smaller dt or less extreme initial conditions."
             )
 
-        max_energy_drift = max(
+        max_energy_drift = _checked_maximum_drift(
             max_energy_drift,
             _fractional_scalar_drift(
                 current_cons["energy"],
                 initial_cons["energy"],
                 energy_drift_scale,
             ),
+            "energy",
         )
-        max_momentum_drift = max(
+        max_momentum_drift = _checked_maximum_drift(
             max_momentum_drift,
             _vector_drift(
                 current_cons["momentum"], initial_cons["momentum"]
             ),
+            "momentum",
         )
-        max_angular_momentum_drift = max(
+        max_angular_momentum_drift = _checked_maximum_drift(
             max_angular_momentum_drift,
             _vector_drift(
                 current_cons["angular_momentum"],
                 initial_cons["angular_momentum"],
             ),
+            "angular-momentum",
         )
 
         if output_type == "trajectories":
@@ -459,6 +516,11 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
         else:
             # One accepted step can cross multiple requested frame times.
             while next_frame_time <= time:
+                if not previous_time <= next_frame_time <= time:
+                    raise RuntimeError(
+                        "An animation frame time fell outside its accepted-step "
+                        "interpolation bracket."
+                    )
                 p_frame, v_frame = _hermite_state(
                     previous_time,
                     previous_positions,
@@ -476,7 +538,8 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
                         "The animation exceeded the stored-frame safety limit. "
                         "Increase frame_time or reduce the simulated duration."
                     )
-                next_frame_time += params.frame_time
+                next_frame_index += 1
+                next_frame_time = next_frame_index * params.frame_time
 
         # Gradually recover after close encounters, never exceeding user dt.
         dt_work = min(dt_work * 1.1, params.dt)
@@ -490,7 +553,15 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
         "final_conservation": current_cons,
         "energy_drift_scale": energy_drift_scale,
         "energy_drift_normalization": energy_drift_normalization,
+        "momentum_drift_scale": momentum_drift_scale,
+        "momentum_drift_normalization": momentum_drift_normalization,
+        "angular_momentum_drift_scale": angular_drift_scale,
+        "angular_momentum_drift_normalization": angular_drift_normalization,
         "max_fractional_energy_drift": max_energy_drift,
+        "max_momentum_drift": max_momentum_drift,
+        "max_angular_momentum_drift": max_angular_momentum_drift,
+        # Backward-compatible aliases retained for existing callers. Consult
+        # the normalization metadata above before interpreting these values.
         "max_fractional_momentum_drift": max_momentum_drift,
         "max_fractional_angular_momentum_drift": max_angular_momentum_drift,
     }
