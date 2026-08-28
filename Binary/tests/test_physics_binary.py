@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+from html.parser import HTMLParser
 import math
 import os
 from pathlib import Path
@@ -82,6 +83,63 @@ def energy_drift(result):
     return max(abs(value - initial) for value in result.E) / abs(initial)
 
 
+def unequal_moving_case():
+    """Return a nonsymmetric circular case with a moving centre of mass."""
+    mass_a, mass_b = 3e30, 1e30
+    total_mass = mass_a + mass_b
+    relative_x, relative_y = 9.2e10, 4.0e10
+    separation = math.hypot(relative_x, relative_y)
+    com_x, com_y = 2e10, -3e10
+    com_vx, com_vy = 500.0, -800.0
+    relative_speed = math.sqrt(physics.G * total_mass / separation)
+    relative_vx = -relative_speed * relative_y / separation
+    relative_vy = relative_speed * relative_x / separation
+    fraction_a = mass_b / total_mass
+    fraction_b = mass_a / total_mass
+    return {
+        "MA": mass_a,
+        "MB": mass_b,
+        "xInitA": com_x + fraction_a * relative_x,
+        "yInitA": com_y + fraction_a * relative_y,
+        "vInitA": com_vx + fraction_a * relative_vx,
+        "uInitA": com_vy + fraction_a * relative_vy,
+        "xInitB": com_x - fraction_b * relative_x,
+        "yInitB": com_y - fraction_b * relative_y,
+        "vInitB": com_vx - fraction_b * relative_vx,
+        "uInitB": com_vy - fraction_b * relative_vy,
+        "dt": 1000.0,
+        "max_steps": 1000,
+        "eps1": 0.05,
+        "eps2": 1e-4,
+        "stop_after_one_orbit": False,
+    }
+
+
+def fitted_circle_radial_variation(x_values, y_values):
+    """Fit a circle through three separated samples and return radial spread."""
+    indices = (0, len(x_values) // 3, 2 * len(x_values) // 3)
+    x1, x2, x3 = (x_values[index] for index in indices)
+    y1, y2, y3 = (y_values[index] for index in indices)
+    denominator = 2.0 * (
+        x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2)
+    )
+    center_x = (
+        (x1 * x1 + y1 * y1) * (y2 - y3)
+        + (x2 * x2 + y2 * y2) * (y3 - y1)
+        + (x3 * x3 + y3 * y3) * (y1 - y2)
+    ) / denominator
+    center_y = (
+        (x1 * x1 + y1 * y1) * (x3 - x2)
+        + (x2 * x2 + y2 * y2) * (x1 - x3)
+        + (x3 * x3 + y3 * y3) * (x2 - x1)
+    ) / denominator
+    radii = [
+        math.hypot(x - center_x, y - center_y)
+        for x, y in zip(x_values, y_values)
+    ]
+    return (max(radii) - min(radii)) / (sum(radii) / len(radii))
+
+
 class TestModuleDiscovery(unittest.TestCase):
     def test_canonical_layout(self):
         self.assertEqual(find_module_dir(Path(__file__).parent), MODULE_DIR)
@@ -131,6 +189,10 @@ class TestVersionAndBuild(unittest.TestCase):
             digest.update(content)
         self.assertEqual(physics.BUILD_ID, digest.hexdigest()[:12])
 
+    def test_build_id_fallback_is_unknown_on_source_read_failure(self):
+        with mock.patch("builtins.open", side_effect=OSError("unavailable")):
+            self.assertEqual(physics._compute_build_id(), "unknown")
+
     def test_result_carries_metadata(self):
         result = integrate(max_steps=1, stop_after_one_orbit=False)
         self.assertEqual(result.model_version, physics.MODEL_VERSION)
@@ -159,7 +221,7 @@ class TestPhysicsFunctions(unittest.TestCase):
     def test_relative_displacement(self):
         self.assertEqual(
             physics.relative_displacement(4.0, 6.0, 1.0, 2.0),
-            (3.0, 4.0, 5.0, 125.0),
+            (3.0, 4.0, 5.0),
         )
 
     def test_translation_invariance(self):
@@ -180,16 +242,23 @@ class TestPhysicsFunctions(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         physics.relative_displacement(*values)
 
-    def test_unrepresentable_separations(self):
-        cases = (
-            (1.0e308, 0.0, -1.0e308, 0.0),
-            (5.0e-324, 0.0, 0.0, 0.0),
-            (1.0e150, 0.0, 0.0, 0.0),
+    def test_unrepresentable_relative_displacement(self):
+        with self.assertRaisesRegex(ValueError, "relative displacement"):
+            physics.relative_displacement(1e308, 0.0, -1e308, 0.0)
+
+    def test_scaled_acceleration_avoids_r_cubed_overflow(self):
+        values = physics.accelerations(
+            2e30, 3e30, 1e150, 0.0, 0.0, 0.0
         )
-        for coordinates in cases:
-            with self.subTest(coordinates=coordinates):
-                with self.assertRaisesRegex(ValueError, "numerical range"):
-                    physics.relative_displacement(*coordinates)
+        self.assertTrue(all(math.isfinite(value) for value in values))
+        self.assertLess(values[0], 0.0)
+        self.assertGreater(values[2], 0.0)
+
+    def test_scaled_acceleration_rejects_unrepresentable_near_collision(self):
+        with self.assertRaisesRegex(ValueError, "calculated acceleration"):
+            physics.accelerations(
+                2e30, 3e30, 5e-324, 0.0, 0.0, 0.0
+            )
 
     def test_accelerations_and_signs(self):
         mass_a, mass_b, separation = 2.0e30, 3.0e30, 4.0e10
@@ -314,6 +383,24 @@ class TestDriverValidation(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, r"0 < .* < 1"):
                         integrate(**{name: bad})
 
+    def test_tolerances_immediately_inside_both_limits_are_accepted(self):
+        lower = math.nextafter(0.0, 1.0)
+        upper = math.nextafter(1.0, 0.0)
+        with mock.patch.object(
+            driver, "accelerations", return_value=(0.0, 0.0, 0.0, 0.0)
+        ):
+            for name in ("eps1", "eps2"):
+                for value in (lower, upper):
+                    with self.subTest(name=name, value=value):
+                        result = integrate(
+                            **{
+                                name: value,
+                                "max_steps": 1,
+                                "stop_after_one_orbit": False,
+                            }
+                        )
+                        self.assertEqual(result.accepted_steps, 1)
+
     def test_stop_flag_validation(self):
         for bad in (0, 1, 0.0, "True", None):
             with self.subTest(bad=bad):
@@ -331,6 +418,82 @@ class TestDriverValidation(unittest.TestCase):
             driver._halve_timestep(5e-324, 0.0)
         with self.assertRaisesRegex(RuntimeError, "non-finite vector"):
             driver._vector_relative_change(0.0, 0.0, math.inf, 0.0)
+        with self.assertRaisesRegex(RuntimeError, "cannot advance time"):
+            driver._advance_time(1e308, 1e308)
+        with self.assertRaisesRegex(RuntimeError, "cannot advance time"):
+            driver._advance_time(1e308, 1.0)
+
+
+class TestAdaptiveControllerBranches(unittest.TestCase):
+    def test_eps1_rejection_retries_without_recording_and_recovers_by_1_1(self):
+        original = driver._vector_relative_change
+        calls = 0
+
+        def reject_first(*args):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return 1.0
+            return original(*args)
+
+        with mock.patch.object(
+            driver, "_vector_relative_change", side_effect=reject_first
+        ), mock.patch.object(
+            driver,
+            "_signed_angle_increment",
+            wraps=driver._signed_angle_increment,
+        ) as angle:
+            result = integrate(max_steps=3, stop_after_one_orbit=False)
+
+        steps = [
+            later - earlier
+            for earlier, later in zip(result.times, result.times[1:])
+        ]
+        self.assertEqual(result.accepted_steps, 3)
+        self.assertEqual(len(result.times), 4)
+        self.assertEqual(angle.call_count, result.accepted_steps)
+        self.assertAlmostEqual(steps[0], DEFAULTS["dt"] / 2.0)
+        self.assertAlmostEqual(steps[1], steps[0] * 1.1)
+        self.assertAlmostEqual(steps[2], steps[1] * 1.1)
+        self.assertTrue(all(step <= DEFAULTS["dt"] for step in steps))
+
+    def test_corrector_nonconvergence_halves_and_retries_same_step(self):
+        # First trial: acceleration check passes, then both bodies fail all ten
+        # corrector iterations. Second trial: all three checks pass.
+        changes = [0.0] + [1.0] * 20 + [0.0, 0.0, 0.0]
+        with mock.patch.object(
+            driver, "_vector_relative_change", side_effect=changes
+        ), mock.patch.object(
+            driver, "accelerations", return_value=(0.0, 0.0, 0.0, 0.0)
+        ):
+            result = integrate(max_steps=1, stop_after_one_orbit=False)
+
+        self.assertEqual(result.accepted_steps, 1)
+        self.assertEqual(len(result.times), 2)
+        self.assertEqual(result.times[1], DEFAULTS["dt"] / 2.0)
+
+    def test_retry_exhaustion_raises_specific_error(self):
+        # Hold the mocked halving result constant so the explicit 60-retry
+        # ceiling, rather than the separate timestep-floor guard, is exercised.
+        with mock.patch.object(
+            driver, "_vector_relative_change", return_value=1.0
+        ), mock.patch.object(
+            driver, "_halve_timestep", side_effect=lambda value, _floor: value
+        ) as halve:
+            with self.assertRaisesRegex(
+                RuntimeError, "could not find a converged timestep after 60 retries"
+            ):
+                integrate(max_steps=1, stop_after_one_orbit=False)
+        self.assertEqual(halve.call_count, 60)
+
+    def test_signed_angle_increment_handles_both_branch_cut_directions(self):
+        angle = math.radians(170.0)
+        x0, y0 = math.cos(angle), math.sin(angle)
+        x1, y1 = math.cos(-angle), math.sin(-angle)
+        forward = driver._signed_angle_increment(x0, y0, x1, y1)
+        reverse = driver._signed_angle_increment(x1, y1, x0, y0)
+        self.assertAlmostEqual(forward, math.radians(20.0), places=14)
+        self.assertAlmostEqual(reverse, -math.radians(20.0), places=14)
 
 
 class TestIntegrationRegression(unittest.TestCase):
@@ -385,6 +548,95 @@ class TestIntegrationRegression(unittest.TestCase):
         ]
         self.assertTrue(all(value == 0.0 for value in com + momentum))
 
+    def test_unequal_mass_moving_com_conservation(self):
+        parameters = unequal_moving_case()
+        result = driver.integrate_binary(**parameters)
+        mass_a = parameters["MA"]
+        mass_b = parameters["MB"]
+        total_mass = mass_a + mass_b
+        initial_com_x = (
+            mass_a * parameters["xInitA"] + mass_b * parameters["xInitB"]
+        ) / total_mass
+        initial_com_y = (
+            mass_a * parameters["yInitA"] + mass_b * parameters["yInitB"]
+        ) / total_mass
+        initial_com_vx = (
+            mass_a * parameters["vInitA"] + mass_b * parameters["vInitB"]
+        ) / total_mass
+        initial_com_vy = (
+            mass_a * parameters["uInitA"] + mass_b * parameters["uInitB"]
+        ) / total_mass
+        initial_px = mass_a * result.vA[0] + mass_b * result.vB[0]
+        initial_py = mass_a * result.uA[0] + mass_b * result.uB[0]
+        momentum_scale = math.hypot(initial_px, initial_py)
+        separation_scale = math.hypot(
+            parameters["xInitA"] - parameters["xInitB"],
+            parameters["yInitA"] - parameters["yInitB"],
+        )
+
+        momentum_error = max(
+            math.hypot(
+                mass_a * va + mass_b * vb - initial_px,
+                mass_a * ua + mass_b * ub - initial_py,
+            )
+            for va, vb, ua, ub in zip(
+                result.vA, result.vB, result.uA, result.uB
+            )
+        )
+        com_error = max(
+            math.hypot(
+                (mass_a * xa + mass_b * xb) / total_mass
+                - (initial_com_x + initial_com_vx * time),
+                (mass_a * ya + mass_b * yb) / total_mass
+                - (initial_com_y + initial_com_vy * time),
+            )
+            for time, xa, xb, ya, yb in zip(
+                result.times, result.xA, result.xB, result.yA, result.yB
+            )
+        )
+        angular_momentum = [
+            mass_a * (xa * ua - ya * va)
+            + mass_b * (xb * ub - yb * vb)
+            for xa, ya, va, ua, xb, yb, vb, ub in zip(
+                result.xA, result.yA, result.vA, result.uA,
+                result.xB, result.yB, result.vB, result.uB,
+            )
+        ]
+        angular_drift = max(
+            abs(value - angular_momentum[0]) for value in angular_momentum
+        ) / abs(angular_momentum[0])
+
+        self.assertLess(momentum_error / momentum_scale, 1e-12)
+        self.assertLess(com_error / separation_scale, 1e-12)
+        self.assertLess(angular_drift, 1e-8)
+
+    def test_unequal_mass_body_label_swap_preserves_trajectories(self):
+        parameters = unequal_moving_case()
+        swapped = dict(parameters)
+        for name_a, name_b in (
+            ("MA", "MB"),
+            ("xInitA", "xInitB"),
+            ("yInitA", "yInitB"),
+            ("vInitA", "vInitB"),
+            ("uInitA", "uInitB"),
+        ):
+            swapped[name_a], swapped[name_b] = swapped[name_b], swapped[name_a]
+
+        original = driver.integrate_binary(**parameters)
+        relabeled = driver.integrate_binary(**swapped)
+        self.assertEqual(original.accepted_steps, relabeled.accepted_steps)
+        for original_values, relabeled_values in (
+            (original.xA, relabeled.xB),
+            (original.yA, relabeled.yB),
+            (original.vA, relabeled.vB),
+            (original.uA, relabeled.uB),
+            (original.xB, relabeled.xA),
+            (original.yB, relabeled.yA),
+            (original.vB, relabeled.vA),
+            (original.uB, relabeled.uA),
+        ):
+            self.assertEqual(original_values, relabeled_values)
+
     def test_angular_momentum_drift(self):
         result = self.default
         values = [
@@ -416,6 +668,18 @@ class TestIntegrationRegression(unittest.TestCase):
         self.assertLess(variation, 2e-5)
         self.assertLess(abs(result.times[-1] - period) / period, 5e-4)
 
+    def test_circular_and_eccentric_velocity_hodographs_are_circular(self):
+        radius = DEFAULTS["xInitA"]
+        speed = math.sqrt(physics.G * DEFAULTS["MA"] / (4.0 * radius))
+        circular = integrate(uInitA=speed, uInitB=-speed)
+        self.assertLess(
+            fitted_circle_radial_variation(circular.vA, circular.uA), 1e-6
+        )
+        self.assertLess(
+            fitted_circle_radial_variation(self.default.vA, self.default.uA),
+            2e-3,
+        )
+
     def test_timestep_convergence(self):
         finer = integrate(dt=1000.0)
         self.assertLess(energy_drift(finer), energy_drift(self.default))
@@ -428,12 +692,25 @@ class TestIntegrationRegression(unittest.TestCase):
             yInitB=-2e10,
         )
         self.assertEqual(shifted.accepted_steps, self.default.accepted_steps)
-        for first_pair, second_pair in (
-            ((self.default.xA, self.default.xB), (shifted.xA, shifted.xB)),
-            ((self.default.yA, self.default.yB), (shifted.yA, shifted.yB)),
-        ):
-            for a, b, c, d in zip(*first_pair, *second_pair):
-                self.assertAlmostEqual((c - d) - (a - b), 0.0, delta=1e-3)
+        scale = max(
+            math.hypot(xa - xb, ya - yb)
+            for xa, xb, ya, yb in zip(
+                self.default.xA, self.default.xB,
+                self.default.yA, self.default.yB,
+            )
+        )
+        error = max(
+            math.hypot(
+                (xc - xd) - (xa - xb),
+                (yc - yd) - (ya - yb),
+            )
+            for xa, xb, ya, yb, xc, xd, yc, yd in zip(
+                self.default.xA, self.default.xB,
+                self.default.yA, self.default.yB,
+                shifted.xA, shifted.xB, shifted.yA, shifted.yB,
+            )
+        )
+        self.assertLess(error / scale, 1e-12)
 
     def test_galilean_invariance_of_integrated_relative_motion(self):
         boosted = integrate(
@@ -477,6 +754,28 @@ class TestIntegrationRegression(unittest.TestCase):
         )
         self.assertGreater(unbound.E[0], 0.0)
 
+    def test_retrograde_orbit_completes_one_revolution(self):
+        result = integrate(uInitA=-13000.0, uInitB=13000.0)
+        self.assertTrue(result.completed_orbit)
+        self.assertTrue(4.4e6 < result.times[-1] < 4.8e6)
+
+    def test_radial_and_unbound_cases_do_not_false_complete(self):
+        radial = integrate(
+            uInitA=0.0,
+            uInitB=0.0,
+            max_steps=100,
+            stop_after_one_orbit=True,
+        )
+        unbound = integrate(
+            uInitA=60000.0,
+            uInitB=-60000.0,
+            max_steps=100,
+            stop_after_one_orbit=True,
+        )
+        self.assertFalse(radial.completed_orbit)
+        self.assertFalse(unbound.completed_orbit)
+        self.assertEqual((radial.accepted_steps, unbound.accepted_steps), (100, 100))
+
     def test_head_on_case_fails_instead_of_freezing(self):
         with self.assertRaisesRegex(RuntimeError, "numerical safety limit"):
             integrate(uInitA=0.0, uInitB=0.0, max_steps=100000)
@@ -488,6 +787,7 @@ class TestIntegrationRegression(unittest.TestCase):
 
 class TestPlotting(unittest.TestCase):
     OUTPUT_TYPES = (
+        "orbit",
         "orbits",
         "velocity space",
         "position vs. time, body A",
@@ -504,17 +804,76 @@ class TestPlotting(unittest.TestCase):
     def tearDown(self):
         plotting.plt.close("all")
 
-    def test_every_output(self):
-        for output_type in self.OUTPUT_TYPES:
+    def test_every_output_maps_exact_data_labels_titles_and_legends(self):
+        result = self.result
+        expectations = {
+            "orbit": (
+                ((result.xA, result.yA), (result.xB, result.yB)),
+                ("Body A", "Body B"), "x (m)", "y (m)", "Binary orbits",
+            ),
+            "orbits": (
+                ((result.xA, result.yA), (result.xB, result.yB)),
+                ("Body A", "Body B"), "x (m)", "y (m)", "Binary orbits",
+            ),
+            "velocity space": (
+                ((result.vA, result.uA), (result.vB, result.uB)),
+                ("Body A", "Body B"), "v_x (m/s)", "v_y (m/s)",
+                "Velocity space",
+            ),
+            "position vs. time, body A": (
+                ((result.times, result.xA), (result.times, result.yA)),
+                ("x_A(t)", "y_A(t)"), "t (s)", "position (m)",
+                "Position vs time, body A",
+            ),
+            "position vs. time, body B": (
+                ((result.times, result.xB), (result.times, result.yB)),
+                ("x_B(t)", "y_B(t)"), "t (s)", "position (m)",
+                "Position vs time, body B",
+            ),
+            "velocity vs. time, body A": (
+                ((result.times, result.vA), (result.times, result.uA)),
+                ("v_A(t)", "u_A(t)"), "t (s)", "velocity (m/s)",
+                "Velocity vs time, body A",
+            ),
+            "velocity vs. time, body B": (
+                ((result.times, result.vB), (result.times, result.uB)),
+                ("v_B(t)", "u_B(t)"), "t (s)", "velocity (m/s)",
+                "Velocity vs time, body B",
+            ),
+            "energy vs time": (
+                (
+                    (result.times, result.U),
+                    (result.times, result.K),
+                    (result.times, result.E),
+                ),
+                ("Potential U", "Kinetic K", "Total E"),
+                "t (s)", "Energy (J)", "Energy vs time",
+            ),
+        }
+
+        for output_type, expected in expectations.items():
             with self.subTest(output_type=output_type):
                 plotting.plt.close("all")
-                with mock.patch.object(plotting.plt, "show") as show:
+                with mock.patch.object(plotting.plt, "show") as show, \
+                     mock.patch.object(
+                         plotting.plt, "tight_layout", wraps=plotting.plt.tight_layout
+                     ) as tight_layout:
                     plotting.plot_binary(self.result, output_type)
                 show.assert_called_once_with()
-                self.assertEqual(len(plotting.plt.gcf().axes), 1)
+                tight_layout.assert_called_once_with()
+                axis = plotting.plt.gca()
+                data_pairs, labels, xlabel, ylabel, title = expected
+                self.assertEqual(len(axis.lines), len(data_pairs))
+                for line, (x_values, y_values) in zip(axis.lines, data_pairs):
+                    self.assertEqual(list(line.get_xdata()), list(x_values))
+                    self.assertEqual(list(line.get_ydata()), list(y_values))
+                self.assertEqual(tuple(axis.get_legend_handles_labels()[1]), labels)
+                self.assertEqual(axis.get_xlabel(), xlabel)
+                self.assertEqual(axis.get_ylabel(), ylabel)
+                self.assertEqual(axis.get_title(), title)
 
     def test_equal_aspect_outputs(self):
-        for output_type in ("orbits", "velocity space"):
+        for output_type in ("orbit", "orbits", "velocity space"):
             with self.subTest(output_type=output_type):
                 with mock.patch.object(plotting.plt, "show"):
                     plotting.plot_binary(self.result, output_type)
@@ -526,6 +885,81 @@ class TestPlotting(unittest.TestCase):
             plotting.plot_binary(self.result, "not an output")
 
 
+class HelpContractParser(HTMLParser):
+    """Extract contract-bearing Help elements with standard-library HTML parsing."""
+
+    def __init__(self):
+        super().__init__()
+        self.section = None
+        self.capture = None
+        self.buffer = []
+        self.version_build = ""
+        self.output_tags = []
+        self.parameter_rows = []
+        self.current_row = None
+        self.current_cell = None
+        self.exercise_headings = []
+        self.equation_labels = []
+        self.module_names = []
+
+    @staticmethod
+    def _classes(attributes):
+        value = dict(attributes).get("class", "")
+        return set(value.split())
+
+    def handle_starttag(self, tag, attributes):
+        attrs = dict(attributes)
+        classes = self._classes(attributes)
+        if tag == "section":
+            self.section = attrs.get("id")
+        if tag == "p" and attrs.get("id") == "version_build":
+            self.capture, self.buffer = "version", []
+        elif tag == "span" and "eq-label" in classes:
+            self.capture, self.buffer = "equation", []
+        elif self.section == "output-types" and tag == "span" and "tag" in classes:
+            self.capture, self.buffer = "output", []
+        elif self.section == "parameters" and tag == "tr":
+            self.current_row = []
+        elif self.current_row is not None and tag in ("th", "td"):
+            self.current_cell = []
+        elif self.section == "experiments" and tag == "h3":
+            self.capture, self.buffer = "exercise", []
+        elif tag == "div" and "mc-name" in classes:
+            self.capture, self.buffer = "module", []
+
+    def handle_data(self, data):
+        if self.capture is not None:
+            self.buffer.append(data)
+        if self.current_cell is not None:
+            self.current_cell.append(data)
+
+    def handle_endtag(self, tag):
+        if self.current_cell is not None and tag in ("th", "td"):
+            text = " ".join("".join(self.current_cell).split())
+            self.current_row.append(text)
+            self.current_cell = None
+        if self.current_row is not None and tag == "tr":
+            self.parameter_rows.append(tuple(self.current_row))
+            self.current_row = None
+        if self.capture == "version" and tag == "p":
+            self.version_build = " ".join("".join(self.buffer).split())
+            self.capture = None
+        elif self.capture == "equation" and tag == "span":
+            self.equation_labels.append(" ".join("".join(self.buffer).split()))
+            self.capture = None
+        elif self.capture == "output" and tag == "span":
+            self.output_tags.append(" ".join("".join(self.buffer).split()))
+            self.capture = None
+        elif self.capture == "exercise" and tag == "h3":
+            self.exercise_headings.append(" ".join("".join(self.buffer).split()))
+            self.capture = None
+        elif self.capture == "module" and tag == "div":
+            self.module_names.append(" ".join("".join(self.buffer).split()))
+            self.capture = None
+        if tag == "section":
+            self.section = None
+
+
 class TestHelpFile(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -533,30 +967,77 @@ class TestHelpFile(unittest.TestCase):
             raise AssertionError(f"Required Help file not found: {HELP_FILE}")
         cls.html = HELP_FILE.read_text(encoding="utf-8")
         cls.prose = re.sub(r"\s+", " ", cls.html)
+        cls.contract = HelpContractParser()
+        cls.contract.feed(cls.html)
+        cls.contract.close()
 
     def test_version_build_sync(self):
-        match = re.search(
-            r'<p\s+id="version_build"[^>]*>\s*'
-            r"Version\s+([0-9]+\.[0-9]+\.[0-9]+)"
-            r"(?:&nbsp;|\s)+Build\s+([0-9a-f]{12})",
-            self.html,
+        match = re.fullmatch(
+            r"Version\s+([0-9]+\.[0-9]+\.[0-9]+)\s+Build\s+([0-9a-f]{12})",
+            self.contract.version_build,
             flags=re.IGNORECASE,
         )
         self.assertIsNotNone(match)
         self.assertEqual(match.group(1), physics.MODEL_VERSION)
         self.assertEqual(match.group(2), physics.BUILD_ID)
 
-    def test_core_files_and_outputs_are_documented(self):
-        for item in CORE_MODULE_FILENAMES + TestPlotting.OUTPUT_TYPES:
-            with self.subTest(item=item):
-                self.assertIn(item, self.html)
+    def test_core_module_card_names_are_exact(self):
+        self.assertEqual(
+            tuple(self.contract.module_names),
+            ("main.py", "physics_binary.py", "driver_binary.py", "plot_binary.py"),
+        )
+
+    def test_output_tags_exactly_match_output_type_contract(self):
+        self.assertEqual(
+            tuple(tag.strip('"') for tag in self.contract.output_tags),
+            TestPlotting.OUTPUT_TYPES,
+        )
+
+    def test_parameter_table_has_exact_documented_variables_and_defaults(self):
+        rows = self.contract.parameter_rows
+        self.assertEqual(
+            rows[0], ("Variable", "Default", "Unit", "Description")
+        )
+        self.assertEqual(
+            tuple(row[0] for row in rows[1:]),
+            (
+                "MA, MB",
+                "xInitA",
+                "xInitB",
+                "yInitA, yInitB",
+                "vInitA, vInitB",
+                "uInitA",
+                "uInitB",
+                "dt",
+                "max_steps",
+                "eps1",
+                "eps2",
+                "stop_after_one_orbit",
+            ),
+        )
+        self.assertEqual(
+            tuple(row[1] for row in rows[1:]),
+            (
+                r"\(2.0\times10^{30}\)",
+                r"\(+4.6\times10^{10}\)",
+                r"\(-4.6\times10^{10}\)",
+                r"\(0\)",
+                r"\(0\)",
+                r"\(+1.3\times10^4\)",
+                r"\(-1.3\times10^4\)",
+                r"\(2000\)",
+                r"\(10000\)",
+                r"\(0.05\)",
+                r"\(10^{-4}\)",
+                "True",
+            ),
+        )
 
     def test_equation_numbers(self):
         labels = [
-            int(value)
-            for value in re.findall(
-                r'class="eq-label">\((\d+)\)</span>', self.html
-            )
+            int(match.group(1))
+            for value in self.contract.equation_labels
+            if (match := re.fullmatch(r"\((\d+)\)", value))
         ]
         self.assertEqual(labels, list(range(1, 11)))
 
@@ -569,6 +1050,10 @@ class TestHelpFile(unittest.TestCase):
             "nonzero initial separation",
         ):
             self.assertIn(phrase, self.prose)
+
+    def test_minimum_runtime_and_matplotlib_versions_are_documented(self):
+        self.assertIn("Python 3.10 or later", self.prose)
+        self.assertIn("matplotlib</code> 3.5 or later", self.prose)
 
     def test_termination_and_energy_qualifications(self):
         for phrase in (
@@ -583,9 +1068,14 @@ class TestHelpFile(unittest.TestCase):
             self.assertIn(phrase, self.prose)
 
     def test_exercise_order_and_difficulty(self):
-        headings = re.findall(r"<h3>(\d+) · ([^<]+)</h3>", self.html)
-        self.assertEqual([int(number) for number, _ in headings], list(range(1, 9)))
-        joined = " ".join(title for _, title in headings)
+        headings = self.contract.exercise_headings
+        numbers = [
+            int(match.group(1))
+            for heading in headings
+            if (match := re.match(r"(\d+) · ", heading))
+        ]
+        self.assertEqual(numbers, list(range(1, 9)))
+        joined = " ".join(headings)
         for level in ("Introductory", "Intermediate", "Advanced"):
             self.assertIn(level, joined)
 
@@ -596,6 +1086,25 @@ class TestHelpFile(unittest.TestCase):
             "precision Solar-System ephemeris",
         ):
             self.assertIn(phrase, self.html)
+
+    def test_relative_displacement_help_matches_three_value_contract(self):
+        self.assertIn(
+            "relative_displacement()</code> returns the separation vector "
+            r"\((\Delta x,\,\Delta y)\) and scalar distance \(r\)",
+            self.prose,
+        )
+        self.assertEqual(
+            len(physics.relative_displacement(4.0, 6.0, 1.0, 2.0)), 3
+        )
+
+    def test_restore_box_uses_css_classes_not_inline_styles(self):
+        match = re.search(
+            r'<section class="restore-section".*?</section>',
+            self.html,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        self.assertNotIn("style=", match.group(0))
 
     def test_no_development_history(self):
         for pattern in (

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from math import hypot, isfinite
 from numbers import Real
 
-MODEL_VERSION = "1.0.1"
+MODEL_VERSION = "1.1.0"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -86,7 +86,7 @@ def _positive_mass(name: str, value: float) -> None:
 
 
 def relative_displacement(xA: float, yA: float, xB: float, yB: float):
-    """Return A-minus-B displacement, separation, and separation cubed."""
+    """Return A-minus-B displacement components and scalar separation."""
     for name, value in (("xA", xA), ("yA", yA), ("xB", xB), ("yB", yB)):
         _finite_real(name, value)
 
@@ -106,14 +106,7 @@ def relative_displacement(xA: float, yA: float, xB: float, yB: float):
             "Newtonian point-mass gravity is singular at r = 0."
         )
 
-    rAB3 = rAB * rAB * rAB
-    if rAB3 == 0.0 or not isfinite(rAB3):
-        raise ValueError(
-            "The separation is outside the numerical range in which this "
-            "model can evaluate inverse-square gravity reliably."
-        )
-
-    return xAB, yAB, rAB, rAB3
+    return xAB, yAB, rAB
 
 
 def accelerations(
@@ -124,12 +117,19 @@ def accelerations(
     """Return the Newtonian acceleration components of bodies A and B."""
     _positive_mass("MA", MA)
     _positive_mass("MB", MB)
-    xAB, yAB, _, rAB3 = relative_displacement(xA, yA, xB, yB)
+    xAB, yAB, rAB = relative_displacement(xA, yA, xB, yB)
 
-    axA = -G * MB * xAB / rAB3
-    ayA = -G * MB * yAB / rAB3
-    axB =  G * MA * xAB / rAB3
-    ayB =  G * MA * yAB / rAB3
+    # Normalize first and divide sequentially by r. This is algebraically
+    # equivalent to displacement/r^3, but avoids constructing r^3 and thereby
+    # supports the full useful floating-point separation range.
+    direction_x = xAB / rAB
+    direction_y = yAB / rAB
+    acceleration_a = G * MB / rAB / rAB
+    acceleration_b = G * MA / rAB / rAB
+    axA = -acceleration_a * direction_x
+    ayA = -acceleration_a * direction_y
+    axB = acceleration_b * direction_x
+    ayB = acceleration_b * direction_y
     values = (axA, ayA, axB, ayB)
     if not all(isfinite(value) for value in values):
         raise ValueError(
@@ -149,9 +149,11 @@ def energies(
     _positive_mass("MB", MB)
     for name, value in (("vA", vA), ("uA", uA), ("vB", vB), ("uB", uB)):
         _finite_real(name, value)
-    _, _, rAB, _ = relative_displacement(xA, yA, xB, yB)
+    _, _, rAB = relative_displacement(xA, yA, xB, yB)
 
-    U = -G * MA * MB / rAB
+    # Divide before the final mass multiplication to avoid an avoidable
+    # intermediate overflow when the representable final value is finite.
+    U = -(G * MA / rAB) * MB
     KA = 0.5 * MA * (vA * vA + uA * uA)
     KB = 0.5 * MB * (vB * vB + uB * uB)
     K = KA + KB

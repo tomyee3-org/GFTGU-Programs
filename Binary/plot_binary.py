@@ -13,6 +13,7 @@ from driver_binary import BinaryResult
 
 
 OutputType = Literal[
+    "orbit",
     "orbits",
     "velocity space",
     "position vs. time, body A",
@@ -28,7 +29,7 @@ def plot_binary(result: BinaryResult, output_type: OutputType) -> None:
     Plot the requested quantity
     """
 
-    if output_type == "orbits":
+    if output_type in ("orbit", "orbits"):
         fig, ax = plt.subplots()
         ax.plot(result.xA, result.yA, label="Body A")
         ax.plot(result.xB, result.yB, label="Body B")

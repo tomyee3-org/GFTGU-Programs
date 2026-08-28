@@ -54,7 +54,7 @@ def main():
     # False: run to max_steps; useful for unbound or long-term energy tests.
     stop_after_one_orbit = True
 
-    # "orbits"
+    # "orbits" (preferred; legacy alias "orbit" is also accepted)
     # "velocity space"
     # "position vs. time, body A"
     # "position vs. time, body B"

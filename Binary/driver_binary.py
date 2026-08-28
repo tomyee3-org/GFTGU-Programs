@@ -77,6 +77,17 @@ def _signed_angle_increment(x0, y0, x1, y1) -> float:
     return atan2(x0 * y1 - y0 * x1, x0 * x1 + y0 * y1)
 
 
+def _advance_time(current_time: float, timestep: float) -> float:
+    """Advance time or fail if floating-point arithmetic cannot do so."""
+    new_time = current_time + timestep
+    if not isfinite(new_time) or new_time == current_time:
+        raise RuntimeError(
+            "The timestep cannot advance time within the numerical range; "
+            "the calculation cannot continue reliably."
+        )
+    return new_time
+
+
 def integrate_binary(
     MA: float,
     MB: float,
@@ -257,12 +268,7 @@ def integrate_binary(
                 "conditions or a smaller dt."
             )
 
-        new_time = state.t + dt_work
-        if not isfinite(new_time) or new_time == state.t:
-            raise RuntimeError(
-                "The timestep cannot advance time within the numerical range; "
-                "the calculation cannot continue reliably."
-            )
+        new_time = _advance_time(state.t, dt_work)
 
         state = BinaryState(
             t=new_time,
