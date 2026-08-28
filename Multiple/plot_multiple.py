@@ -75,13 +75,29 @@ def plot_energy_drift(result: Dict[str, Any]) -> None:
 
     energies = np.asarray(result["energies"], dtype=float)
     times_days = np.asarray(result["times"], dtype=float) / 86400.0
-    e0 = energies[0]
-    if e0 != 0.0:
+    e0 = float(energies[0])
+    normalization = result.get("energy_drift_normalization")
+    scale = result.get("energy_drift_scale")
+
+    if normalization == "characteristic_energy":
+        scale = float(scale)
+        if not np.isfinite(scale) or scale <= 0.0:
+            raise ValueError("energy_drift_scale must be positive and finite.")
+        drift = (energies - e0) / scale
+        ylabel = r"$(E-E_0)/(K_0+|U_0|)$"
+    elif normalization == "initial_energy":
+        scale = float(scale)
+        if not np.isfinite(scale) or scale <= 0.0:
+            raise ValueError("energy_drift_scale must be positive and finite.")
+        drift = (energies - e0) / scale
+        ylabel = r"$(E-E_0)/|E_0|$"
+    elif e0 != 0.0:
+        # Backward-compatible handling for trajectory results produced before
+        # the normalization metadata was added.
         drift = (energies - e0) / abs(e0)
         ylabel = r"$(E-E_0)/|E_0|$"
     else:
-        # A fractional error relative to zero is undefined. The physics module
-        # reports energy per solar-mass unit, hence the scaled units here.
+        # Legacy result with exactly zero E0 and no characteristic scale.
         drift = energies - e0
         ylabel = r"$E-E_0$ (scaled m$^2$/s$^2$)"
 

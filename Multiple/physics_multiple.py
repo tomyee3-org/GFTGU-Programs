@@ -7,7 +7,7 @@ import numpy as np
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.1.0"
+MODEL_VERSION = "1.1.1"
 BUILD_ID_COVERS = (
     "physics_multiple.py",
     "driver_multiple.py",
@@ -67,8 +67,11 @@ def _validated_positions_masses(
     masses = _as_finite_float_array(masses_solar, "masses_solar")
     pos = _as_finite_float_array(positions, "positions")
 
-    if masses.ndim != 1 or masses.size == 0:
-        raise ValueError("masses_solar must be a non-empty one-dimensional array.")
+    if masses.ndim != 1 or masses.size < 2:
+        raise ValueError(
+            "masses_solar must be a one-dimensional array with at least "
+            "two values."
+        )
     if np.any(masses <= 0.0):
         raise ValueError("All masses must be positive.")
     if pos.shape != (masses.size, 3):
@@ -124,7 +127,7 @@ def compute_accelerations(
 
             # Repeated hypot avoids the avoidable overflow that can occur in
             # sqrt(x*x + y*y + z*z) for large but finite coordinates.
-            r = float(np.hypot.reduce(np.abs(r_vec)))
+            r = float(np.hypot.reduce(r_vec))
             if r == 0.0:
                 raise ValueError(
                     f"Bodies {a + 1} and {b + 1} occupy exactly the same "
@@ -166,16 +169,16 @@ def compute_accelerations(
     return acc
 
 
-def scaled_total_energy(
+def scaled_energy_components(
     positions: np.ndarray,
     velocities: np.ndarray,
     masses_solar: np.ndarray,
-) -> float:
+) -> tuple[float, float]:
     """
-    Return total mechanical energy divided by one solar-mass unit.
+    Return kinetic and potential energy per solar-mass unit.
 
-    The result has units m^2/s^2. The overall solar-mass factor is omitted
-    because conservation tests depend on fractional changes, not on joules.
+    Both values have units m^2/s^2. The overall solar-mass factor is omitted
+    because conservation diagnostics depend on relative changes, not joules.
     """
     positions, velocities, masses_solar = _validated_state(
         positions, velocities, masses_solar
@@ -196,7 +199,7 @@ def scaled_total_energy(
                     f"The separation of bodies {a + 1} and {b + 1} is "
                     "outside the floating-point range."
                 )
-            r = float(np.hypot.reduce(np.abs(r_vec)))
+            r = float(np.hypot.reduce(r_vec))
             if r == 0.0:
                 raise ValueError(
                     f"Bodies {a + 1} and {b + 1} occupy exactly the same "
@@ -212,10 +215,26 @@ def scaled_total_energy(
                     (GM_SUN / r) * masses_solar[a] * masses_solar[b]
                 )
 
-    energy = float(kinetic + potential)
+    kinetic = float(kinetic)
+    potential = float(potential)
+    if not (np.isfinite(kinetic) and np.isfinite(potential)):
+        raise ValueError("Energy components are outside the floating-point range.")
+    return kinetic, potential
+
+
+def scaled_total_energy(
+    positions: np.ndarray,
+    velocities: np.ndarray,
+    masses_solar: np.ndarray,
+) -> float:
+    """Return total mechanical energy divided by one solar-mass unit."""
+    kinetic, potential = scaled_energy_components(
+        positions, velocities, masses_solar
+    )
+    energy = kinetic + potential
     if not np.isfinite(energy):
         raise ValueError("Total energy is outside the floating-point range.")
-    return energy
+    return float(energy)
 
 
 def scaled_total_momentum(
@@ -229,8 +248,11 @@ def scaled_total_momentum(
     """
     velocities = _as_finite_float_array(velocities, "velocities")
     masses_solar = _as_finite_float_array(masses_solar, "masses_solar")
-    if masses_solar.ndim != 1 or masses_solar.size == 0:
-        raise ValueError("masses_solar must be a non-empty one-dimensional array.")
+    if masses_solar.ndim != 1 or masses_solar.size < 2:
+        raise ValueError(
+            "masses_solar must be a one-dimensional array with at least "
+            "two values."
+        )
     if np.any(masses_solar <= 0.0):
         raise ValueError("All masses must be positive.")
     if velocities.shape != (masses_solar.size, 3):
@@ -274,8 +296,13 @@ def conservation_state(
     masses_solar: np.ndarray,
 ) -> dict:
     """Return energy, linear momentum, and angular momentum diagnostics."""
+    kinetic, potential = scaled_energy_components(
+        positions, velocities, masses_solar
+    )
     return {
-        "energy": scaled_total_energy(positions, velocities, masses_solar),
+        "energy": kinetic + potential,
+        "kinetic_energy": kinetic,
+        "potential_energy": potential,
         "momentum": scaled_total_momentum(velocities, masses_solar),
         "angular_momentum": scaled_total_angular_momentum(
             positions, velocities, masses_solar

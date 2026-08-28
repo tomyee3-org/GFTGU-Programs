@@ -198,9 +198,9 @@ class TestPhysicsAccelerations(unittest.TestCase):
         rotated = phys.compute_accelerations(positions @ rotation.T, masses)
         np.testing.assert_allclose(rotated, original @ rotation.T, rtol=2.0e-15)
 
-    def test_single_body_has_zero_acceleration(self):
-        acceleration = phys.compute_accelerations([[1, 2, 3]], [4])
-        np.testing.assert_array_equal(acceleration, np.zeros((1, 3)))
+    def test_single_body_is_rejected_consistently_with_program_contract(self):
+        with self.assertRaisesRegex(ValueError, "at least two"):
+            phys.compute_accelerations([[1, 2, 3]], [4])
 
     def test_inputs_are_not_modified(self):
         positions = np.array([[0.0, 0.0, 0.0], [1.0e10, 0.0, 0.0]])
@@ -250,6 +250,30 @@ class TestPhysicsAccelerations(unittest.TestCase):
                 [[-1.0e308, 0, 0], [1.0e308, 0, 0]], [1, 1]
             )
 
+    def test_very_close_noncoincident_pair_remains_finite(self):
+        acceleration = phys.compute_accelerations(
+            [[-0.5, 0, 0], [0.5, 0, 0]], [1.0e-20, 2.0e-20]
+        )
+        self.assertTrue(np.all(np.isfinite(acceleration)))
+        np.testing.assert_allclose(
+            acceleration,
+            [
+                [2.0e-20 * phys.GM_SUN, 0.0, 0.0],
+                [-1.0e-20 * phys.GM_SUN, 0.0, 0.0],
+            ],
+            rtol=0.0,
+            atol=5.0e-8,
+        )
+
+    def test_large_n_force_sanity(self):
+        rng = np.random.default_rng(8675309)
+        n_bodies = 200
+        positions = rng.normal(size=(n_bodies, 3)) * 1.0e13
+        masses = rng.uniform(0.1, 10.0, size=n_bodies)
+        acceleration = phys.compute_accelerations(positions, masses)
+        self.assertEqual(acceleration.shape, (n_bodies, 3))
+        self.assertTrue(np.all(np.isfinite(acceleration)))
+
 
 class TestConservationFunctions(unittest.TestCase):
     def test_known_energy(self):
@@ -260,6 +284,12 @@ class TestConservationFunctions(unittest.TestCase):
         self.assertAlmostEqual(
             phys.scaled_total_energy(positions, velocities, masses), expected
         )
+
+        kinetic, potential = phys.scaled_energy_components(
+            positions, velocities, masses
+        )
+        self.assertAlmostEqual(kinetic, 4.0e8)
+        self.assertAlmostEqual(potential, -phys.GM_SUN / 1.0e11)
 
     def test_known_momentum(self):
         momentum = phys.scaled_total_momentum(
@@ -280,7 +310,20 @@ class TestConservationFunctions(unittest.TestCase):
         velocities = [[0, -2, 0], [0, 2, 0]]
         masses = [1, 1]
         state = phys.conservation_state(positions, velocities, masses)
-        self.assertEqual(set(state), {"energy", "momentum", "angular_momentum"})
+        self.assertEqual(
+            set(state),
+            {
+                "energy",
+                "kinetic_energy",
+                "potential_energy",
+                "momentum",
+                "angular_momentum",
+            },
+        )
+        self.assertEqual(
+            state["energy"],
+            state["kinetic_energy"] + state["potential_energy"],
+        )
         self.assertTrue(np.isfinite(state["energy"]))
         np.testing.assert_array_equal(state["momentum"], np.zeros(3))
 
@@ -306,7 +349,7 @@ class TestConservationFunctions(unittest.TestCase):
                     phys.scaled_total_momentum(velocities, masses)
 
     def test_energy_overflow_raises_cleanly(self):
-        with self.assertRaisesRegex(ValueError, "energy.*floating-point range"):
+        with self.assertRaisesRegex(ValueError, "[Ee]nergy.*floating-point range"):
             phys.scaled_total_energy(
                 [[-1, 0, 0], [1, 0, 0]],
                 [[0, 0, 0], [0, 0, 0]],
@@ -405,13 +448,21 @@ class TestParameterValidation(unittest.TestCase):
             )
         )
 
-    def test_animation_frame_safety_limit(self):
+    def test_animation_frame_safety_limit_boundary(self):
+        driver._validate_params(
+            make_params(
+                output_type="animation",
+                dt=driver.MAX_ANIMATION_FRAMES - 1,
+                max_steps=1,
+                frame_time=1.0,
+            )
+        )
         with self.assertRaisesRegex(ValueError, "1,000,000 stored frames"):
             driver._validate_params(
                 make_params(
                     output_type="animation",
-                    dt=1.0e6,
-                    max_steps=1000,
+                    dt=driver.MAX_ANIMATION_FRAMES,
+                    max_steps=1,
                     frame_time=1.0,
                 )
             )
@@ -468,6 +519,15 @@ class TestDriverHelpers(unittest.TestCase):
         self.assertEqual(driver._fractional_scalar_drift(3, 0), 3)
         self.assertEqual(driver._fractional_scalar_drift(9, 10), 0.1)
         self.assertEqual(driver._vector_drift(np.array([3, 4, 0]), np.zeros(3)), 5)
+
+    def test_energy_drift_scale_detects_near_cancellation(self):
+        scale, mode = driver._energy_drift_scale(1.0, -1.0 + 1.0e-16)
+        self.assertEqual(mode, "characteristic_energy")
+        self.assertAlmostEqual(scale, 2.0)
+
+        scale, mode = driver._energy_drift_scale(1.0, -0.9)
+        self.assertEqual(mode, "initial_energy")
+        self.assertAlmostEqual(scale, 0.1)
 
 
 class TestSimulation(unittest.TestCase):
@@ -611,6 +671,23 @@ class TestSimulation(unittest.TestCase):
         self.assertEqual(result["projection"], "xz")
         self.assertEqual(result["axis_mode"], "auto")
 
+    def test_near_zero_initial_energy_uses_characteristic_scale(self):
+        separation = 1.0e11
+        speed = np.sqrt(phys.GM_SUN / separation)
+        result = driver.run_simulation(
+            make_params(
+                masses_solar=[1.0, 1.0],
+                positions_init=[[-separation / 2, 0, 0], [separation / 2, 0, 0]],
+                velocities_init=[[0, -speed, 0], [0, speed, 0]],
+                max_steps=1,
+            )
+        )
+        self.assertEqual(
+            result["energy_drift_normalization"], "characteristic_energy"
+        )
+        self.assertGreater(result["energy_drift_scale"], 0.0)
+        self.assertTrue(np.isfinite(result["max_fractional_energy_drift"]))
+
 
 class TestPlotting(unittest.TestCase):
     def tearDown(self):
@@ -653,14 +730,16 @@ class TestPlotting(unittest.TestCase):
         self.assertEqual(show.call_count, 2)
 
     @mock.patch.object(plotting.plt, "show")
-    def test_zero_initial_energy_plot_uses_absolute_label(self, show):
+    def test_near_zero_initial_energy_plot_uses_characteristic_label(self, show):
         result = {
             "type": "trajectories",
-            "energies": np.array([0.0, 2.5]),
+            "energies": np.array([1.0e-16, 2.5e-16]),
             "times": np.array([0.0, 86400.0]),
+            "energy_drift_normalization": "characteristic_energy",
+            "energy_drift_scale": 2.0,
         }
         plotting.plot_energy_drift(result)
-        self.assertIn("scaled", plotting.plt.gca().get_ylabel())
+        self.assertIn("K_0", plotting.plt.gca().get_ylabel())
         show.assert_called_once()
 
     @mock.patch.object(plotting.plt, "show")
@@ -741,11 +820,44 @@ class TestBuildDocumentationAndCompatibility(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, help_text)
 
-    def test_main_contains_documented_shipped_numerical_defaults(self):
+    def test_main_executable_configuration_has_documented_defaults(self):
         main_text = (MODULE_DIR / "main.py").read_text(encoding="utf-8")
-        for setting in ("max_steps=60000", "eps1=0.005", "eps2=1.0e-7"):
-            with self.subTest(setting=setting):
-                self.assertIn(setting, main_text)
+        tree = ast.parse(main_text, filename="main.py")
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "SimulationParams"
+        ]
+        self.assertEqual(len(calls), 1)
+        requested = {"max_steps", "eps1", "eps2"}
+        values = {
+            keyword.arg: ast.literal_eval(keyword.value)
+            for keyword in calls[0].keywords
+            if keyword.arg in requested
+        }
+        self.assertEqual(set(values), requested)
+        self.assertEqual(values["max_steps"], 60000)
+        self.assertEqual(values["eps1"], 0.005)
+        self.assertEqual(values["eps2"], 1.0e-7)
+
+    def test_help_defines_current_output_terminology(self):
+        help_text = (MODULE_DIR / HELP_FILE).read_text(encoding="utf-8")
+        self.assertIn(
+            "not an <code>output_type</code> value",
+            help_text,
+        )
+        self.assertIn("two <code>animation_mode</code> choices", help_text)
+        self.assertNotIn("output_type='current positions'", help_text)
+
+    def test_help_documents_build_id_coverage(self):
+        help_text = (MODULE_DIR / HELP_FILE).read_text(encoding="utf-8")
+        self.assertIn(
+            "Build identifier covers the four Python program modules",
+            help_text,
+        )
+        self.assertIn("Help-only or test-only edits do not change it", help_text)
 
     def test_help_has_correct_energy_equation_without_malformed_residue(self):
         help_text = (MODULE_DIR / HELP_FILE).read_text(encoding="utf-8")

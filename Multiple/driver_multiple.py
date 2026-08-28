@@ -8,7 +8,7 @@ so adaptive timestep changes do not distort movie playback speed.
 
 from dataclasses import dataclass
 from numbers import Integral, Real
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 import numpy as np
 
@@ -17,6 +17,7 @@ from physics_multiple import compute_accelerations, conservation_state
 
 
 MAX_ANIMATION_FRAMES = 1_000_000
+ENERGY_CANCELLATION_TOLERANCE = 128.0 * np.finfo(float).eps
 
 
 @dataclass
@@ -168,10 +169,10 @@ def _max_relative_vector_change(old: np.ndarray, new: np.ndarray) -> float:
     if not (np.all(np.isfinite(old)) and np.all(np.isfinite(new))):
         return float("inf")
 
-    changes = np.hypot.reduce(np.abs(new - old), axis=1)
+    changes = np.hypot.reduce(new - old, axis=1)
     scales = np.maximum(
-        np.hypot.reduce(np.abs(old), axis=1),
-        np.hypot.reduce(np.abs(new), axis=1),
+        np.hypot.reduce(old, axis=1),
+        np.hypot.reduce(new, axis=1),
     )
 
     ratios = np.zeros_like(changes)
@@ -219,11 +220,34 @@ def _hermite_state(
     return pos, vel
 
 
-def _fractional_scalar_drift(value: float, reference: float) -> float:
-    scale = abs(reference)
+def _fractional_scalar_drift(
+    value: float,
+    reference: float,
+    scale: Optional[float] = None,
+) -> float:
+    if scale is None:
+        scale = abs(reference)
     if scale == 0.0:
         return abs(value - reference)
     return abs(value - reference) / scale
+
+
+def _energy_drift_scale(
+    kinetic: float,
+    potential: float,
+) -> tuple[float, str]:
+    """Choose a stable, dimensionally consistent energy-error denominator."""
+    characteristic = kinetic + abs(potential)
+    if not np.isfinite(characteristic) or characteristic <= 0.0:
+        raise ValueError(
+            "The characteristic energy scale is outside the floating-point "
+            "range."
+        )
+
+    total = kinetic + potential
+    if abs(total) <= ENERGY_CANCELLATION_TOLERANCE * characteristic:
+        return characteristic, "characteristic_energy"
+    return abs(total), "initial_energy"
 
 
 def _vector_drift(value: np.ndarray, reference: np.ndarray) -> float:
@@ -258,6 +282,10 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
     max_retries_per_step = 80
 
     initial_cons = conservation_state(positions, velocities, masses)
+    energy_drift_scale, energy_drift_normalization = _energy_drift_scale(
+        initial_cons["kinetic_energy"],
+        initial_cons["potential_energy"],
+    )
     max_energy_drift = 0.0
     max_momentum_drift = 0.0
     max_angular_momentum_drift = 0.0
@@ -336,6 +364,10 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
                 vel_guess = vel_corr
 
                 if velocity_change < params.eps2:
+                    # acc_end belongs to the position estimate used to form
+                    # pos_corr, not to the newly accepted pos_corr itself. It
+                    # therefore cannot safely be cached as the next step's
+                    # starting acceleration without another force evaluation.
                     converged = True
                     break
 
@@ -395,7 +427,9 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
         max_energy_drift = max(
             max_energy_drift,
             _fractional_scalar_drift(
-                current_cons["energy"], initial_cons["energy"]
+                current_cons["energy"],
+                initial_cons["energy"],
+                energy_drift_scale,
             ),
         )
         max_momentum_drift = max(
@@ -454,6 +488,8 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
         "final_time": time,
         "initial_conservation": initial_cons,
         "final_conservation": current_cons,
+        "energy_drift_scale": energy_drift_scale,
+        "energy_drift_normalization": energy_drift_normalization,
         "max_fractional_energy_drift": max_energy_drift,
         "max_fractional_momentum_drift": max_momentum_drift,
         "max_fractional_angular_momentum_drift": max_angular_momentum_drift,
