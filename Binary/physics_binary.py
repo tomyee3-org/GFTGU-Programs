@@ -3,9 +3,10 @@ Newtonian two-body physics for Binary.
 """
 
 from dataclasses import dataclass
-from math import hypot
+from math import hypot, isfinite
+from numbers import Real
 
-MODEL_VERSION = "1.0.0"
+MODEL_VERSION = "1.0.1"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -71,10 +72,32 @@ class BinaryState:
     uB: float
 
 
+def _finite_real(name: str, value: float) -> None:
+    """Reject values that cannot represent a finite physical input."""
+    if not isinstance(value, Real) or isinstance(value, bool) or not isfinite(value):
+        raise ValueError(f"{name} must be a finite real number.")
+
+
+def _positive_mass(name: str, value: float) -> None:
+    """Validate a point mass used by a public physics calculation."""
+    _finite_real(name, value)
+    if value <= 0.0:
+        raise ValueError(f"{name} must be positive.")
+
+
 def relative_displacement(xA: float, yA: float, xB: float, yB: float):
     """Return A-minus-B displacement, separation, and separation cubed."""
+    for name, value in (("xA", xA), ("yA", yA), ("xB", xB), ("yB", yB)):
+        _finite_real(name, value)
+
     xAB = xA - xB
     yAB = yA - yB
+    if not (isfinite(xAB) and isfinite(yAB)):
+        raise ValueError(
+            "The relative displacement is outside the numerical range of "
+            "double-precision arithmetic."
+        )
+
     rAB = hypot(xAB, yAB)
 
     if rAB == 0.0:
@@ -83,7 +106,14 @@ def relative_displacement(xA: float, yA: float, xB: float, yB: float):
             "Newtonian point-mass gravity is singular at r = 0."
         )
 
-    return xAB, yAB, rAB, rAB ** 3
+    rAB3 = rAB * rAB * rAB
+    if rAB3 == 0.0 or not isfinite(rAB3):
+        raise ValueError(
+            "The separation is outside the numerical range in which this "
+            "model can evaluate inverse-square gravity reliably."
+        )
+
+    return xAB, yAB, rAB, rAB3
 
 
 def accelerations(
@@ -92,13 +122,21 @@ def accelerations(
     xB: float, yB: float,
 ):
     """Return the Newtonian acceleration components of bodies A and B."""
+    _positive_mass("MA", MA)
+    _positive_mass("MB", MB)
     xAB, yAB, _, rAB3 = relative_displacement(xA, yA, xB, yB)
 
     axA = -G * MB * xAB / rAB3
     ayA = -G * MB * yAB / rAB3
     axB =  G * MA * xAB / rAB3
     ayB =  G * MA * yAB / rAB3
-    return axA, ayA, axB, ayB
+    values = (axA, ayA, axB, ayB)
+    if not all(isfinite(value) for value in values):
+        raise ValueError(
+            "The calculated acceleration is outside the numerical range of "
+            "double-precision arithmetic."
+        )
+    return values
 
 
 def energies(
@@ -107,10 +145,21 @@ def energies(
     xB: float, yB: float, vB: float, uB: float,
 ):
     """Return gravitational potential, kinetic, and total system energy."""
+    _positive_mass("MA", MA)
+    _positive_mass("MB", MB)
+    for name, value in (("vA", vA), ("uA", uA), ("vB", vB), ("uB", uB)):
+        _finite_real(name, value)
     _, _, rAB, _ = relative_displacement(xA, yA, xB, yB)
 
     U = -G * MA * MB / rAB
     KA = 0.5 * MA * (vA * vA + uA * uA)
     KB = 0.5 * MB * (vB * vB + uB * uB)
     K = KA + KB
-    return U, K, K + U
+    E = K + U
+    values = (U, K, E)
+    if not all(isfinite(value) for value in values):
+        raise ValueError(
+            "The calculated energy is outside the numerical range of "
+            "double-precision arithmetic."
+        )
+    return values

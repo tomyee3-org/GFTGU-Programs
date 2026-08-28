@@ -62,6 +62,11 @@ def _vector_relative_change(old_x, old_y, new_x, new_y) -> float:
     """Dimensionless relative change of a 2D vector."""
     change = hypot(new_x - old_x, new_y - old_y)
     scale = max(hypot(old_x, old_y), hypot(new_x, new_y))
+    if not (isfinite(change) and isfinite(scale)):
+        raise RuntimeError(
+            "The integration produced a non-finite vector; choose less "
+            "extreme initial conditions or a smaller dt."
+        )
     if scale == 0.0:
         return 0.0
     return change / scale
@@ -253,9 +258,9 @@ def integrate_binary(
             )
 
         new_time = state.t + dt_work
-        if new_time == state.t:
+        if not isfinite(new_time) or new_time == state.t:
             raise RuntimeError(
-                "The timestep is too small to advance time numerically; "
+                "The timestep cannot advance time within the numerical range; "
                 "the calculation cannot continue reliably."
             )
 
