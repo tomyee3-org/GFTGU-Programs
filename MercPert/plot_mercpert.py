@@ -138,8 +138,8 @@ def plot_orbits(
             zorder=5,
         )
 
-    ax.set_xlabel(f"x ({unit_label})")
-    ax.set_ylabel(f"y ({unit_label})")
+    ax.set_xlabel(f"barycentric x ({unit_label})")
+    ax.set_ylabel(f"barycentric y ({unit_label})")
     ax.set_title(title)
     ax.legend(loc=_OPPOSITE_CORNER[corner])
     ax.set_aspect("equal", adjustable="datalim")

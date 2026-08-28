@@ -174,17 +174,30 @@ class MetadataAndCompatibilityTests(unittest.TestCase):
         self.assertEqual(match.group(1), physics.MODEL_VERSION)
         self.assertEqual(match.group(2), physics.BUILD_ID)
 
-    def test_help_describes_coordinate_and_collision_conventions(self) -> None:
+    def test_help_contains_required_scientific_sections(self) -> None:
         help_text = (MODULE_DIR / HELP_FILENAME).read_text(encoding="utf-8")
-        normalized = " ".join(help_text.split())
-        for phrase in (
-            "relative to the Sun",
-            "barycentric inertial frame",
-            "numerical termination surfaces",
-            "is exactly",
-            "maximum fractional Jacobi drift",
+        inspector = _HelpInspector()
+        inspector.feed(help_text)
+        for section_id in (
+            "three-body", "energy", "convergence", "output", "suggestions"
         ):
-            self.assertIn(phrase, normalized)
+            self.assertIn(section_id, inspector.ids)
+
+        def section(section_id: str) -> str:
+            match = re.search(
+                rf'<section id="{section_id}">(.*?)</section>',
+                help_text,
+                flags=re.DOTALL | re.IGNORECASE,
+            )
+            self.assertIsNotNone(match)
+            assert match is not None
+            return " ".join(match.group(1).lower().split())
+
+        self.assertIn("barycentric", section("three-body"))
+        energy = section("energy")
+        for concept in ("collision", "jacobi", "linear interpolation"):
+            self.assertIn(concept, energy)
+        self.assertIn("barycentric", section("output"))
 
     def test_student_help_has_no_development_history(self) -> None:
         help_text = (MODULE_DIR / HELP_FILENAME).read_text(
@@ -223,23 +236,23 @@ class MetadataAndCompatibilityTests(unittest.TestCase):
             self.assertTrue(decoded.startswith(b"\x89PNG\r\n\x1a\n"))
 
     def test_exercises_are_ranked_in_approximate_difficulty_order(self) -> None:
-        help_text = " ".join(
-            (MODULE_DIR / HELP_FILENAME).read_text(encoding="utf-8").split()
+        help_text = (MODULE_DIR / HELP_FILENAME).read_text(encoding="utf-8")
+        suggestions = re.search(
+            r'<section id="suggestions">(.*?)</section>',
+            help_text,
+            flags=re.DOTALL | re.IGNORECASE,
         )
-        ordered_titles = (
-            "1 · A Quieter Baseline Orbit",
-            "2 · Companion-Mass Sequence",
-            "3 · Retrograde Orbits",
-            "4 · Extend the Default Run Toward a Close Encounter",
-            "5 · Numerical Convergence",
-            "6 · Map a Finite-Time Stability Boundary",
-            "7 · Equal-Mass Binary and Circumbinary Orbits",
-            "8 · Roche-Lobe / L1 Test-Particle Experiment",
+        self.assertIsNotNone(suggestions)
+        assert suggestions is not None
+        headings = re.findall(
+            r"<h3>\s*([1-8])\s*·.*?<small>\((.*?)\)</small>\s*</h3>",
+            suggestions.group(1),
+            flags=re.DOTALL,
         )
-        positions = [help_text.index(title) for title in ordered_titles]
-        self.assertEqual(positions, sorted(positions))
+        self.assertEqual([number for number, _ in headings], list("12345678"))
+        levels = " ".join(level for _, level in headings)
         for label in ("Introductory", "Intermediate", "Advanced", "Capstone"):
-            self.assertIn(label, help_text)
+            self.assertIn(label, levels)
 
     def test_help_omits_obsolete_java_listing(self) -> None:
         help_text = (MODULE_DIR / HELP_FILENAME).read_text(
@@ -666,8 +679,8 @@ class PlotTests(unittest.TestCase):
         self.assertEqual(labelled["Sun's orbit"].get_linestyle(), "--")
         self.assertEqual(labelled["Companion's orbit"].get_linestyle(), "--")
         self.assertEqual(labelled["Mercury"].get_linestyle(), "-")
-        self.assertEqual(axis.get_xlabel(), "x (AU)")
-        self.assertEqual(axis.get_ylabel(), "y (AU)")
+        self.assertEqual(axis.get_xlabel(), "barycentric x (AU)")
+        self.assertEqual(axis.get_ylabel(), "barycentric y (AU)")
         self.assertTrue(any("relative to Sun" in text.get_text()
                             for text in axis.texts))
         self.assertEqual(axis.get_aspect(), 1.0)

@@ -5,7 +5,7 @@ Physics for MercPert, a planar circular restricted three-body simulation.
 from dataclasses import dataclass
 import math
 
-MODEL_VERSION = "1.0.1"
+MODEL_VERSION = "1.0.2"
 
 
 #: The exact source files this build identifier covers: a documentation-only
