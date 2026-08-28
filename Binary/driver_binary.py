@@ -73,8 +73,25 @@ def _vector_relative_change(old_x, old_y, new_x, new_y) -> float:
 
 
 def _signed_angle_increment(x0, y0, x1, y1) -> float:
-    """Signed angle from vector (x0,y0) to (x1,y1), in [-pi, pi]."""
-    return atan2(x0 * y1 - y0 * x1, x0 * x1 + y0 * y1)
+    """Signed angle from one finite nonzero vector to another, in [-pi, pi]."""
+    for name, value in (("x0", x0), ("y0", y0), ("x1", x1), ("y1", y1)):
+        _finite_real(name, value)
+
+    scale0 = max(abs(x0), abs(y0))
+    scale1 = max(abs(x1), abs(y1))
+    if scale0 == 0.0 or scale1 == 0.0:
+        raise ValueError("Orbit-angle vectors must be nonzero.")
+
+    x0_scaled, y0_scaled = x0 / scale0, y0 / scale0
+    x1_scaled, y1_scaled = x1 / scale1, y1 / scale1
+    cross = x0_scaled * y1_scaled - y0_scaled * x1_scaled
+    dot = x0_scaled * x1_scaled + y0_scaled * y1_scaled
+    angle = atan2(cross, dot)
+    if not isfinite(angle):
+        raise RuntimeError(
+            "The orbit-angle diagnostic produced a non-finite increment."
+        )
+    return angle
 
 
 def _advance_time(current_time: float, timestep: float) -> float:
@@ -280,9 +297,18 @@ def integrate_binary(
 
         rel_x_new = state.xA - state.xB
         rel_y_new = state.yA - state.yB
-        accumulated_angle += _signed_angle_increment(
+        angle_increment = _signed_angle_increment(
             rel_x_old, rel_y_old, rel_x_new, rel_y_new
         )
+        if not isfinite(angle_increment):
+            raise RuntimeError(
+                "The orbit-angle diagnostic produced a non-finite increment."
+            )
+        accumulated_angle += angle_increment
+        if not isfinite(accumulated_angle):
+            raise RuntimeError(
+                "The accumulated orbit angle is outside the numerical range."
+            )
         rel_x_old, rel_y_old = rel_x_new, rel_y_new
 
         if stop_after_one_orbit and abs(accumulated_angle) >= 2.0 * pi:

@@ -625,10 +625,48 @@ class TestAdaptiveControllerBranches(unittest.TestCase):
         angle = math.radians(170.0)
         x0, y0 = math.cos(angle), math.sin(angle)
         x1, y1 = math.cos(-angle), math.sin(-angle)
-        forward = driver._signed_angle_increment(x0, y0, x1, y1)
-        reverse = driver._signed_angle_increment(x1, y1, x0, y0)
-        self.assertAlmostEqual(forward, math.radians(20.0), places=14)
-        self.assertAlmostEqual(reverse, -math.radians(20.0), places=14)
+        scale_pairs = (
+            (1.0, 1.0),
+            (1e200, 1e200),
+            (1e-300, 1e-300),
+            (1e300, 1e-300),
+        )
+        for scale0, scale1 in scale_pairs:
+            with self.subTest(scale0=scale0, scale1=scale1):
+                forward = driver._signed_angle_increment(
+                    scale0 * x0, scale0 * y0,
+                    scale1 * x1, scale1 * y1,
+                )
+                reverse = driver._signed_angle_increment(
+                    scale1 * x1, scale1 * y1,
+                    scale0 * x0, scale0 * y0,
+                )
+                self.assertAlmostEqual(
+                    forward, math.radians(20.0), places=14
+                )
+                self.assertAlmostEqual(
+                    reverse, -math.radians(20.0), places=14
+                )
+
+    def test_signed_angle_increment_rejects_invalid_vectors(self):
+        cases = (
+            (0.0, 0.0, 1.0, 0.0),
+            (1.0, 0.0, 0.0, 0.0),
+            (math.nan, 0.0, 1.0, 0.0),
+            (1.0, 0.0, math.inf, 0.0),
+            (1.0, -math.inf, 1.0, 0.0),
+        )
+        for values in cases:
+            with self.subTest(values=values):
+                with self.assertRaises(ValueError):
+                    driver._signed_angle_increment(*values)
+
+    def test_nonfinite_angle_increment_cannot_poison_integration(self):
+        with mock.patch.object(
+            driver, "_signed_angle_increment", return_value=math.nan
+        ):
+            with self.assertRaisesRegex(RuntimeError, "non-finite increment"):
+                integrate(max_steps=1, stop_after_one_orbit=True)
 
 
 class TestIntegrationRegression(unittest.TestCase):
@@ -1203,6 +1241,8 @@ class TestHelpFile(unittest.TestCase):
         for phrase in (
             "relative vector",
             "relative revolution",
+            "scaled independently",
+            "non-finite orbit-angle diagnostic",
             "does not by itself prove",
             "kinetic energy of the centre of mass",
             "subtract its translational kinetic energy",

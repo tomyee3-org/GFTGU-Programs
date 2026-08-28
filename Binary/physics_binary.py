@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from math import frexp, hypot, isfinite, ldexp
 from numbers import Real
 
-MODEL_VERSION = "1.1.2"
+MODEL_VERSION = "1.1.3"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -90,7 +90,9 @@ def _scaled_positive_product_quotient(factors, divisors, quantity: str) -> float
 
     All factors and divisors are represented as mantissa/exponent pairs before
     they are combined. This prevents an intermediate operation from overflowing
-    or underflowing when the final result is representable as a float.
+    or underflowing when the final result is representable as a float. Callers
+    must supply only finite, strictly positive factors and divisors; public
+    functions validate those preconditions before reaching this private helper.
     """
     mantissa = 1.0
     exponent = 0
@@ -177,9 +179,9 @@ def accelerations(
     _positive_mass("MB", MB)
     xAB, yAB, rAB = relative_displacement(xA, yA, xB, yB)
 
-    # Normalize first and divide sequentially by r. This is algebraically
-    # equivalent to displacement/r^3, but avoids constructing r^3 and thereby
-    # supports the full useful floating-point separation range.
+    # Normalize the displacement for direction, then evaluate each inverse-square
+    # magnitude with scaled mantissa/exponent arithmetic. This avoids both r^3
+    # overflow and fixed-order intermediate overflow or underflow.
     direction_x = xAB / rAB
     direction_y = yAB / rAB
     acceleration_a = _scaled_positive_product_quotient(
