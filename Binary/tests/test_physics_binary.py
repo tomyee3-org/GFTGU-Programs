@@ -243,8 +243,14 @@ class TestPhysicsFunctions(unittest.TestCase):
                         physics.relative_displacement(*values)
 
     def test_unrepresentable_relative_displacement(self):
-        with self.assertRaisesRegex(ValueError, "relative displacement"):
-            physics.relative_displacement(1e308, 0.0, -1e308, 0.0)
+        cases = (
+            (1e308, 0.0, -1e308, 0.0),
+            (1.7e308, 1.7e308, 0.0, 0.0),
+        )
+        for coordinates in cases:
+            with self.subTest(coordinates=coordinates):
+                with self.assertRaisesRegex(ValueError, "relative displacement"):
+                    physics.relative_displacement(*coordinates)
 
     def test_scaled_acceleration_avoids_r_cubed_overflow(self):
         values = physics.accelerations(
@@ -262,6 +268,58 @@ class TestPhysicsFunctions(unittest.TestCase):
             physics.accelerations(
                 2e30, 3e30, 5e-324, 0.0, 0.0, 0.0
             )
+
+    def test_acceleration_avoids_intermediate_underflow(self):
+        tiny_mass = 1e-320
+        separation = 1e-100
+        expected_tiny = (physics.G / separation) * (tiny_mass / separation)
+        first = physics.accelerations(
+            1.0, tiny_mass, separation, 0.0, 0.0, 0.0
+        )
+        swapped = physics.accelerations(
+            tiny_mass, 1.0, separation, 0.0, 0.0, 0.0
+        )
+        self.assertTrue(math.isclose(first[0], -expected_tiny, rel_tol=2e-15))
+        self.assertNotEqual(math.hypot(first[0], first[1]), 0.0)
+        self.assertTrue(math.isclose(swapped[2], expected_tiny, rel_tol=2e-15))
+        self.assertNotEqual(math.hypot(swapped[2], swapped[3]), 0.0)
+
+    def test_scaled_acceleration_preserves_non_axis_direction(self):
+        tiny_mass = 1e-320
+        displacement_x = 3e-101
+        displacement_y = 4e-101
+        ax_a, ay_a, _, _ = physics.accelerations(
+            1.0, tiny_mass, displacement_x, displacement_y, 0.0, 0.0
+        )
+        separation = math.hypot(displacement_x, displacement_y)
+        expected_magnitude = (
+            (physics.G / separation) * (tiny_mass / separation)
+        )
+        self.assertTrue(
+            math.isclose(ax_a, -0.6 * expected_magnitude, rel_tol=2e-15)
+        )
+        self.assertTrue(
+            math.isclose(ay_a, -0.8 * expected_magnitude, rel_tol=2e-15)
+        )
+        self.assertTrue(
+            math.isclose(
+                math.hypot(ax_a, ay_a), expected_magnitude, rel_tol=2e-15
+            )
+        )
+
+    def test_acceleration_rejects_true_float_range_failures(self):
+        cases = (
+            (1e308, 1e308, 1e-308),
+            (1e-308, 1e-308, 1e308),
+        )
+        for mass_a, mass_b, separation in cases:
+            with self.subTest(
+                mass_a=mass_a, mass_b=mass_b, separation=separation
+            ):
+                with self.assertRaisesRegex(ValueError, "calculated acceleration"):
+                    physics.accelerations(
+                        mass_a, mass_b, separation, 0.0, 0.0, 0.0
+                    )
 
     def test_accelerations_and_signs(self):
         mass_a, mass_b, separation = 2.0e30, 3.0e30, 4.0e10
@@ -352,6 +410,50 @@ class TestPhysicsFunctions(unittest.TestCase):
                     physics.energies(
                         mass_a, mass_b,
                         separation, 0.0, 0.0, 0.0,
+                        0.0, 0.0, 0.0, 0.0,
+                    )
+
+    def test_kinetic_energy_avoids_intermediate_overflow(self):
+        cases = (
+            (1e200, 0.0, 5e99),
+            (0.0, 1e200, 5e99),
+            (1e200, 1e200, 1e100),
+        )
+        for velocity_x, velocity_y, expected in cases:
+            with self.subTest(velocity_x=velocity_x, velocity_y=velocity_y):
+                _, kinetic, _ = physics.energies(
+                    1e-300, 1.0,
+                    1.0, 0.0, velocity_x, velocity_y,
+                    0.0, 0.0, 0.0, 0.0,
+                )
+                self.assertTrue(math.isclose(kinetic, expected, rel_tol=2e-15))
+
+    def test_extreme_kinetic_energy_preserves_body_swap_symmetry(self):
+        first = physics.energies(
+            1e-300, 1.0,
+            1.0, 0.0, 1e200, -1e200,
+            0.0, 0.0, 0.0, 0.0,
+        )
+        swapped = physics.energies(
+            1.0, 1e-300,
+            0.0, 0.0, 0.0, 0.0,
+            1.0, 0.0, 1e200, -1e200,
+        )
+        self.assertEqual(first, swapped)
+
+    def test_kinetic_energy_rejects_true_float_range_failures(self):
+        cases = (
+            (1e308, 1e-308, 1e308),
+            (1e-300, 1e300, 1e-100),
+        )
+        for mass, other_mass, velocity in cases:
+            with self.subTest(
+                mass=mass, other_mass=other_mass, velocity=velocity
+            ):
+                with self.assertRaisesRegex(ValueError, "calculated energy"):
+                    physics.energies(
+                        mass, other_mass,
+                        1.0, 0.0, velocity, 0.0,
                         0.0, 0.0, 0.0, 0.0,
                     )
 
@@ -1081,6 +1183,9 @@ class TestHelpFile(unittest.TestCase):
             "0 and 1 are not allowed",
             "double-precision arithmetic",
             "nonzero initial separation",
+            "both bodies' accelerations",
+            "potential, kinetic, and total energy",
+            "round to zero",
         ):
             self.assertIn(phrase, self.prose)
 

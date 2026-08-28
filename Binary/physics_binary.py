@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from math import frexp, hypot, isfinite, ldexp
 from numbers import Real
 
-MODEL_VERSION = "1.1.1"
+MODEL_VERSION = "1.1.2"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -85,13 +85,12 @@ def _positive_mass(name: str, value: float) -> None:
         raise ValueError(f"{name} must be positive.")
 
 
-def _scaled_positive_product_quotient(factors, divisor: float) -> float:
-    """Evaluate a positive product divided by ``divisor`` without false range loss.
+def _scaled_positive_product_quotient(factors, divisors, quantity: str) -> float:
+    """Evaluate a positive product and quotient without false range loss.
 
-    The factors are represented as mantissa/exponent pairs before they are
-    combined.  This prevents an intermediate product from overflowing, or an
-    intermediate quotient from underflowing to zero, when the final result is
-    representable as a float.
+    All factors and divisors are represented as mantissa/exponent pairs before
+    they are combined. This prevents an intermediate operation from overflowing
+    or underflowing when the final result is representable as a float.
     """
     mantissa = 1.0
     exponent = 0
@@ -100,9 +99,10 @@ def _scaled_positive_product_quotient(factors, divisor: float) -> float:
         mantissa *= factor_mantissa
         exponent += factor_exponent
 
-    divisor_mantissa, divisor_exponent = frexp(divisor)
-    mantissa /= divisor_mantissa
-    exponent -= divisor_exponent
+    for divisor in divisors:
+        divisor_mantissa, divisor_exponent = frexp(divisor)
+        mantissa /= divisor_mantissa
+        exponent -= divisor_exponent
     mantissa, adjustment = frexp(mantissa)
     exponent += adjustment
 
@@ -110,15 +110,32 @@ def _scaled_positive_product_quotient(factors, divisor: float) -> float:
         result = ldexp(mantissa, exponent)
     except OverflowError as error:
         raise ValueError(
-            "The calculated energy is outside the numerical range of "
+            f"The calculated {quantity} is outside the numerical range of "
             "double-precision arithmetic."
         ) from error
     if result == 0.0:
         raise ValueError(
-            "The calculated energy is outside the numerical range of "
+            f"The calculated {quantity} is outside the numerical range of "
             "double-precision arithmetic."
         )
     return result
+
+
+def _scaled_kinetic_energy(mass: float, velocity_x: float,
+                           velocity_y: float) -> float:
+    """Return one body's kinetic energy without squaring a huge velocity."""
+    velocity_scale = max(abs(velocity_x), abs(velocity_y))
+    if velocity_scale == 0.0:
+        return 0.0
+
+    scaled_x = velocity_x / velocity_scale
+    scaled_y = velocity_y / velocity_scale
+    scaled_speed_squared = scaled_x * scaled_x + scaled_y * scaled_y
+    return _scaled_positive_product_quotient(
+        (0.5, mass, velocity_scale, velocity_scale, scaled_speed_squared),
+        (),
+        "energy",
+    )
 
 
 def relative_displacement(xA: float, yA: float, xB: float, yB: float):
@@ -141,6 +158,11 @@ def relative_displacement(xA: float, yA: float, xB: float, yB: float):
             "The two point masses have zero separation. "
             "Newtonian point-mass gravity is singular at r = 0."
         )
+    if not isfinite(rAB):
+        raise ValueError(
+            "The relative displacement is outside the numerical range of "
+            "double-precision arithmetic."
+        )
 
     return xAB, yAB, rAB
 
@@ -160,14 +182,23 @@ def accelerations(
     # supports the full useful floating-point separation range.
     direction_x = xAB / rAB
     direction_y = yAB / rAB
-    acceleration_a = G * MB / rAB / rAB
-    acceleration_b = G * MA / rAB / rAB
+    acceleration_a = _scaled_positive_product_quotient(
+        (G, MB), (rAB, rAB), "acceleration"
+    )
+    acceleration_b = _scaled_positive_product_quotient(
+        (G, MA), (rAB, rAB), "acceleration"
+    )
     axA = -acceleration_a * direction_x
     ayA = -acceleration_a * direction_y
     axB = acceleration_b * direction_x
     ayB = acceleration_b * direction_y
     values = (axA, ayA, axB, ayB)
     if not all(isfinite(value) for value in values):
+        raise ValueError(
+            "The calculated acceleration is outside the numerical range of "
+            "double-precision arithmetic."
+        )
+    if (axA == 0.0 and ayA == 0.0) or (axB == 0.0 and ayB == 0.0):
         raise ValueError(
             "The calculated acceleration is outside the numerical range of "
             "double-precision arithmetic."
@@ -189,9 +220,11 @@ def energies(
 
     # Combine mantissas and binary exponents separately so neither overflow nor
     # underflow in an intermediate operation destroys a representable result.
-    U = -_scaled_positive_product_quotient((G, MA, MB), rAB)
-    KA = 0.5 * MA * (vA * vA + uA * uA)
-    KB = 0.5 * MB * (vB * vB + uB * uB)
+    U = -_scaled_positive_product_quotient(
+        (G, MA, MB), (rAB,), "energy"
+    )
+    KA = _scaled_kinetic_energy(MA, vA, uA)
+    KB = _scaled_kinetic_energy(MB, vB, uB)
     K = KA + KB
     E = K + U
     values = (U, K, E)
