@@ -16,7 +16,7 @@ import math
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.0.0"
+MODEL_VERSION = "1.1.0"
 BUILD_ID_COVERS = (
     "physics_neutron.py",
     "driver_neutron.py",
@@ -59,13 +59,45 @@ C2 = C * C
 M_SUN = 1.98847e30            # kg, convenient solar-mass conversion
 
 
+def _require_finite_number(value: float, name: str) -> None:
+    """Raise ValueError unless value is a finite real number (not bool)."""
+    try:
+        finite = math.isfinite(value)
+    except TypeError as exc:
+        raise ValueError(f"{name} must be a finite real number.") from exc
+    if isinstance(value, bool) or not finite:
+        raise ValueError(f"{name} must be a finite real number.")
+
+
 def eos_density(p: float, K: float, gamma: float) -> float:
     """Return mass density rho from the polytropic EOS p = K rho**gamma."""
+    _require_finite_number(p, "Pressure")
+    _require_finite_number(K, "K")
+    _require_finite_number(gamma, "gamma")
     if p < 0.0:
         raise ValueError("Pressure must be non-negative when evaluating the EOS.")
+    if K <= 0.0:
+        raise ValueError("K must be positive when evaluating the EOS.")
+    if gamma <= 1.0:
+        raise ValueError("gamma must be greater than 1 when evaluating the EOS.")
     if p == 0.0:
         return 0.0
-    return (p / K) ** (1.0 / gamma)
+
+    # The logarithmic form avoids an avoidable overflow in p / K when both
+    # inputs are individually finite but have very different magnitudes.
+    try:
+        rho = math.exp((math.log(p) - math.log(K)) / gamma)
+    except OverflowError as exc:
+        raise ValueError(
+            "The EOS parameters produce a density outside the finite "
+            "floating-point range."
+        ) from exc
+    if not math.isfinite(rho) or rho <= 0.0:
+        raise ValueError(
+            "The EOS parameters produce a density outside the positive "
+            "finite floating-point range."
+        )
+    return rho
 
 
 def structure_derivatives(
@@ -85,10 +117,15 @@ def structure_derivatives(
 
       dm/dr = 4*pi*r^2*rho
     """
+    _require_finite_number(r, "r")
+    _require_finite_number(p, "Pressure")
+    _require_finite_number(m, "Enclosed mass")
     if r <= 0.0:
         raise ValueError("TOV derivatives require r > 0.")
     if p < 0.0:
         raise ValueError("TOV derivatives require non-negative pressure.")
+    if m < 0.0:
+        raise ValueError("TOV derivatives require non-negative enclosed mass.")
 
     rho = eos_density(p, K, gamma)
     compactness_denominator = r - 2.0 * G * m / C2
@@ -127,6 +164,13 @@ def central_state(
              - 2*pi*G*(rho_c+p_c/c^2)*(rho_c/3+p_c/c^2)*r^2
              + O(r^4).
     """
+    _require_finite_number(r0, "r0")
+    _require_finite_number(p_c, "p_c")
+    if r0 <= 0.0:
+        raise ValueError("The central expansion requires r0 > 0.")
+    if p_c <= 0.0:
+        raise ValueError("The central expansion requires p_c > 0.")
+
     rho_c = eos_density(p_c, K, gamma)
     m0 = 4.0 * math.pi * rho_c * r0**3 / 3.0
     coeff = (
@@ -137,6 +181,10 @@ def central_state(
         * (rho_c / 3.0 + p_c / C2)
     )
     p0 = p_c - coeff * r0 * r0
+    if not all(math.isfinite(value) for value in (m0, coeff, p0)):
+        raise ValueError(
+            "The central expansion overflowed for the requested parameters."
+        )
     if p0 <= 0.0:
         raise ValueError(
             "The initial radial step is too large: the central expansion "
@@ -155,6 +203,10 @@ def rk4_step(
     gamma: float,
 ) -> tuple[float, float]:
     """Advance pressure and enclosed mass by one classical RK4 radial step."""
+
+    _require_finite_number(h, "RK4 step h")
+    if h <= 0.0:
+        raise ValueError("RK4 step h must be positive.")
 
     def f(rr: float, pp: float, mm: float) -> tuple[float, float]:
         # A negative intermediate pressure means the proposed step crosses the

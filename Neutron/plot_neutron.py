@@ -24,6 +24,8 @@ def plot_neutron(data: dict, output_type: str, *, log_y: bool = False) -> None:
         raise ValueError(
             'output_type must be exactly "Pressure", "Density", or "Mass".'
         )
+    if not isinstance(log_y, bool):
+        raise ValueError("log_y must be True or False.")
 
     r_km = np.asarray(data["radius"], dtype=float) / 1000.0
 
@@ -64,7 +66,15 @@ def print_model_summary(data: dict) -> None:
     print(f"  surface radius : {data['surface_radius_km']:.3f} km")
     print(f"  total mass     : {data['total_mass_solar']:.6f} M_sun")
     print(f"  central density: {data['rhoC']:.6e} kg/m^3")
+    print(
+        "  central sound  : "
+        f"v_s/c = {data['central_sound_speed_over_c']:.6f}"
+    )
     print(f"  compactness    : 2GM/(Rc^2) = {data['compactness']:.6f}")
+    print(
+        "  causality check: "
+        + ("satisfied" if data["causality_satisfied"] else "NOT satisfied")
+    )
     print(
         "  Buchdahl check : "
         + ("satisfied" if data["buchdahl_satisfied"] else "NOT satisfied")

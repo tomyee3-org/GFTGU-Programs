@@ -5,8 +5,8 @@ The solver integrates the coupled TOV pressure equation and mass equation with
 classical fourth-order Runge-Kutta (RK4). The radial grid grows dynamically;
 there is no 2000-point array limit and no resolution-degrading step doubling.
 
-The stellar surface is located by shortening the final step and interpolating
-to p=0.
+The stellar surface is located by extrapolating the regular surface variable
+p**((gamma-1)/gamma) to zero on the final interval.
 """
 
 from __future__ import annotations
@@ -32,11 +32,17 @@ def _validate_inputs(
     steps_per_scale: int,
     max_steps: int,
 ) -> None:
-    if not math.isfinite(gamma) or gamma <= 1.0:
+    def is_finite_number(value: float) -> bool:
+        try:
+            return not isinstance(value, bool) and math.isfinite(value)
+        except TypeError:
+            return False
+
+    if not is_finite_number(gamma) or gamma <= 1.0:
         raise ValueError("gamma must be finite and greater than 1.")
-    if not math.isfinite(pC) or pC <= 0.0:
+    if not is_finite_number(pC) or pC <= 0.0:
         raise ValueError("pC must be a positive finite pressure.")
-    if not math.isfinite(K) or K <= 0.0:
+    if not is_finite_number(K) or K <= 0.0:
         raise ValueError("K must be positive and finite.")
     if (
         not isinstance(steps_per_scale, int)
@@ -69,7 +75,14 @@ def compute_neutron_star(
     _validate_inputs(gamma, pC, K, steps_per_scale, max_steps)
 
     rhoC = eos_density(pC, K, gamma)
-    scale = math.sqrt(pC / G) / rhoC
+    # Writing sqrt(pC/G) as sqrt(pC)/sqrt(G) avoids an intermediate overflow
+    # for otherwise finite inputs.
+    scale = math.sqrt(pC) / (math.sqrt(G) * rhoC)
+    if not math.isfinite(scale) or scale <= 0.0:
+        raise ValueError(
+            "The requested parameters produce a radial scale outside the "
+            "positive finite floating-point range."
+        )
     dr_nominal = scale / float(steps_per_scale)
 
     # Start slightly away from the coordinate singularity at r=0 using the
@@ -85,9 +98,9 @@ def compute_neutron_star(
     min_step = dr_nominal / (2.0 ** 24)
 
     for _ in range(max_steps):
-        # If a first-order estimate reaches the surface within this nominal
-        # step, locate p=0 directly using the local TOV slope. This avoids
-        # evaluating the polytropic EOS at negative pressure.
+        # Near a polytropic surface, q = p**((gamma-1)/gamma) is linear in
+        # radius to leading order. Extrapolating q, rather than p itself,
+        # removes the systematic early-surface bias of a pressure tangent.
         dpdr, dmdr = structure_derivatives(r, p, m, K, gamma)
         if dpdr >= 0.0:
             raise RuntimeError(
@@ -95,10 +108,16 @@ def compute_neutron_star(
                 "model is outside the regime expected by this solver."
             )
 
-        h_surface = -p / dpdr
-        if 0.0 < h_surface <= dr_nominal:
-            r_surface = r + h_surface
-            m_surface = m + dmdr * h_surface
+        pressure_scale_distance = -p / dpdr
+        surface_distance = (
+            gamma / (gamma - 1.0) * pressure_scale_distance
+        )
+        if 0.0 < surface_distance <= dr_nominal:
+            r_surface = r + surface_distance
+
+            # Integrating the leading polytropic density falloff over the
+            # remaining interval gives dmdr * (-p/dpdr).
+            m_surface = m + dmdr * pressure_scale_distance
 
             radius.append(r_surface)
             pressure.append(0.0)
@@ -160,6 +179,7 @@ def compute_neutron_star(
     M = mass[-1]
     compactness = 2.0 * G * M / (R * C2)
     buchdahl_ratio = compactness  # Buchdahl requires 2GM/(Rc^2) <= 8/9.
+    central_sound_speed_squared_over_c2 = gamma * pC / (rhoC * C2)
 
     return {
         "model_version": phys.MODEL_VERSION,
@@ -181,4 +201,11 @@ def compute_neutron_star(
         "total_mass_solar": M / M_SUN,
         "compactness": compactness,
         "buchdahl_satisfied": buchdahl_ratio <= (8.0 / 9.0),
+        "central_sound_speed_squared_over_c2": (
+            central_sound_speed_squared_over_c2
+        ),
+        "central_sound_speed_over_c": math.sqrt(
+            central_sound_speed_squared_over_c2
+        ),
+        "causality_satisfied": central_sound_speed_squared_over_c2 <= 1.0,
     }
