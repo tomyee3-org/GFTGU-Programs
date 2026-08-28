@@ -3,10 +3,10 @@ Newtonian two-body physics for Binary.
 """
 
 from dataclasses import dataclass
-from math import hypot, isfinite
+from math import frexp, hypot, isfinite, ldexp
 from numbers import Real
 
-MODEL_VERSION = "1.1.0"
+MODEL_VERSION = "1.1.1"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -85,6 +85,42 @@ def _positive_mass(name: str, value: float) -> None:
         raise ValueError(f"{name} must be positive.")
 
 
+def _scaled_positive_product_quotient(factors, divisor: float) -> float:
+    """Evaluate a positive product divided by ``divisor`` without false range loss.
+
+    The factors are represented as mantissa/exponent pairs before they are
+    combined.  This prevents an intermediate product from overflowing, or an
+    intermediate quotient from underflowing to zero, when the final result is
+    representable as a float.
+    """
+    mantissa = 1.0
+    exponent = 0
+    for factor in factors:
+        factor_mantissa, factor_exponent = frexp(factor)
+        mantissa *= factor_mantissa
+        exponent += factor_exponent
+
+    divisor_mantissa, divisor_exponent = frexp(divisor)
+    mantissa /= divisor_mantissa
+    exponent -= divisor_exponent
+    mantissa, adjustment = frexp(mantissa)
+    exponent += adjustment
+
+    try:
+        result = ldexp(mantissa, exponent)
+    except OverflowError as error:
+        raise ValueError(
+            "The calculated energy is outside the numerical range of "
+            "double-precision arithmetic."
+        ) from error
+    if result == 0.0:
+        raise ValueError(
+            "The calculated energy is outside the numerical range of "
+            "double-precision arithmetic."
+        )
+    return result
+
+
 def relative_displacement(xA: float, yA: float, xB: float, yB: float):
     """Return A-minus-B displacement components and scalar separation."""
     for name, value in (("xA", xA), ("yA", yA), ("xB", xB), ("yB", yB)):
@@ -151,9 +187,9 @@ def energies(
         _finite_real(name, value)
     _, _, rAB = relative_displacement(xA, yA, xB, yB)
 
-    # Divide before the final mass multiplication to avoid an avoidable
-    # intermediate overflow when the representable final value is finite.
-    U = -(G * MA / rAB) * MB
+    # Combine mantissas and binary exponents separately so neither overflow nor
+    # underflow in an intermediate operation destroys a representable result.
+    U = -_scaled_positive_product_quotient((G, MA, MB), rAB)
     KA = 0.5 * MA * (vA * vA + uA * uA)
     KB = 0.5 * MB * (vB * vB + uB * uB)
     K = KA + KB

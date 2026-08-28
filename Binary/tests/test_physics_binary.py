@@ -250,9 +250,12 @@ class TestPhysicsFunctions(unittest.TestCase):
         values = physics.accelerations(
             2e30, 3e30, 1e150, 0.0, 0.0, 0.0
         )
+        expected_a = -physics.G * 3e30 / 1e300
+        expected_b = physics.G * 2e30 / 1e300
         self.assertTrue(all(math.isfinite(value) for value in values))
-        self.assertLess(values[0], 0.0)
-        self.assertGreater(values[2], 0.0)
+        self.assertTrue(math.isclose(values[0], expected_a, rel_tol=2e-15))
+        self.assertTrue(math.isclose(values[2], expected_b, rel_tol=2e-15))
+        self.assertEqual((values[1], values[3]), (0.0, 0.0))
 
     def test_scaled_acceleration_rejects_unrepresentable_near_collision(self):
         with self.assertRaisesRegex(ValueError, "calculated acceleration"):
@@ -321,6 +324,36 @@ class TestPhysicsFunctions(unittest.TestCase):
         )
         self.assertEqual(first, swapped)
         self.assertEqual(first, translated)
+
+    def test_potential_energy_avoids_intermediate_underflow(self):
+        expected = -physics.G * 1e-100
+        for mass_a, mass_b in ((1e-300, 1e300), (1e300, 1e-300)):
+            with self.subTest(mass_a=mass_a, mass_b=mass_b):
+                potential, kinetic, total = physics.energies(
+                    mass_a, mass_b,
+                    1e100, 0.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0, 0.0,
+                )
+                self.assertNotEqual(potential, 0.0)
+                self.assertTrue(math.isclose(potential, expected, rel_tol=2e-15))
+                self.assertEqual(kinetic, 0.0)
+                self.assertEqual(total, potential)
+
+    def test_potential_energy_rejects_true_float_range_failures(self):
+        cases = (
+            (1e308, 1e308, 1.0),
+            (1e-300, 1e-300, 1e300),
+        )
+        for mass_a, mass_b, separation in cases:
+            with self.subTest(
+                mass_a=mass_a, mass_b=mass_b, separation=separation
+            ):
+                with self.assertRaisesRegex(ValueError, "calculated energy"):
+                    physics.energies(
+                        mass_a, mass_b,
+                        separation, 0.0, 0.0, 0.0,
+                        0.0, 0.0, 0.0, 0.0,
+                    )
 
     def test_velocity_boost_changes_only_kinetic_terms(self):
         first = physics.energies(
@@ -1054,6 +1087,12 @@ class TestHelpFile(unittest.TestCase):
     def test_minimum_runtime_and_matplotlib_versions_are_documented(self):
         self.assertIn("Python 3.10 or later", self.prose)
         self.assertIn("matplotlib</code> 3.5 or later", self.prose)
+
+    def test_plot_count_distinguishes_designs_from_selector_alias(self):
+        self.assertIn(
+            "seven distinct plots through eight accepted selector strings",
+            self.prose,
+        )
 
     def test_termination_and_energy_qualifications(self):
         for phrase in (
