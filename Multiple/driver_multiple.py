@@ -7,12 +7,16 @@ so adaptive timestep changes do not distort movie playback speed.
 """
 
 from dataclasses import dataclass
+from numbers import Integral, Real
 from typing import List, Dict, Any
 
 import numpy as np
 
 import physics_multiple as phys
 from physics_multiple import compute_accelerations, conservation_state
+
+
+MAX_ANIMATION_FRAMES = 1_000_000
 
 
 @dataclass
@@ -37,7 +41,7 @@ class SimulationParams:
 
 
 def _validate_params(params: SimulationParams) -> None:
-    if not isinstance(params.n_bodies, int) or isinstance(params.n_bodies, bool):
+    if not isinstance(params.n_bodies, Integral) or isinstance(params.n_bodies, bool):
         raise ValueError("n_bodies must be an integer.")
     if params.n_bodies < 2:
         raise ValueError("n_bodies must be at least 2.")
@@ -69,45 +73,89 @@ def _validate_params(params: SimulationParams) -> None:
     if not np.all(np.isfinite(velocities)):
         raise ValueError("All initial velocities must be finite.")
 
-    if not np.isfinite(params.dt) or params.dt <= 0.0:
+    if (
+        not isinstance(params.dt, Real)
+        or isinstance(params.dt, bool)
+        or not np.isfinite(params.dt)
+        or params.dt <= 0.0
+    ):
         raise ValueError("dt must be a positive finite number.")
     if (
-        not isinstance(params.max_steps, int)
+        not isinstance(params.max_steps, Integral)
         or isinstance(params.max_steps, bool)
         or params.max_steps <= 0
     ):
         raise ValueError("max_steps must be a positive integer.")
 
-    if not np.isfinite(params.eps1) or not (0.0 < params.eps1 < 1.0):
+    if (
+        not isinstance(params.eps1, Real)
+        or isinstance(params.eps1, bool)
+        or not np.isfinite(params.eps1)
+        or not (0.0 < params.eps1 < 1.0)
+    ):
         raise ValueError("eps1 must satisfy 0 < eps1 < 1.")
-    if not np.isfinite(params.eps2) or not (0.0 < params.eps2 < params.eps1):
+    if (
+        not isinstance(params.eps2, Real)
+        or isinstance(params.eps2, bool)
+        or not np.isfinite(params.eps2)
+        or not (0.0 < params.eps2 < params.eps1)
+    ):
         raise ValueError("eps2 must satisfy 0 < eps2 < eps1.")
 
+    if not isinstance(params.output_type, str):
+        raise ValueError('output_type must be "trajectories" or "animation".')
     if params.output_type.lower() not in ("trajectories", "animation"):
         raise ValueError('output_type must be "trajectories" or "animation".')
 
     # Projection applies to both output modes.
+    if not isinstance(params.projection, str):
+        raise ValueError('projection must be "xy", "xz", or "yz".')
     if params.projection.lower() not in ("xy", "xz", "yz"):
         raise ValueError('projection must be "xy", "xz", or "yz".')
 
     # The remaining display controls matter only for animation.
     if params.output_type.lower() == "animation":
+        if not isinstance(params.animation_mode, str):
+            raise ValueError(
+                'animation_mode must be "current positions" or "trails".'
+            )
         if params.animation_mode.lower() not in ("current positions", "trails"):
             raise ValueError(
                 'animation_mode must be "current positions" or "trails".'
             )
-        if not np.isfinite(params.frame_time) or params.frame_time <= 0.0:
+        if (
+            not isinstance(params.frame_time, Real)
+            or isinstance(params.frame_time, bool)
+            or not np.isfinite(params.frame_time)
+            or params.frame_time <= 0.0
+        ):
             raise ValueError("frame_time must be a positive finite number.")
         if (
-            not isinstance(params.frame_interval_ms, int)
+            not isinstance(params.frame_interval_ms, Integral)
             or isinstance(params.frame_interval_ms, bool)
             or params.frame_interval_ms <= 0
         ):
             raise ValueError("frame_interval_ms must be a positive integer.")
-        if not np.isfinite(params.trail_time) or params.trail_time < 0.0:
+        if (
+            not isinstance(params.trail_time, Real)
+            or isinstance(params.trail_time, bool)
+            or not np.isfinite(params.trail_time)
+            or params.trail_time < 0.0
+        ):
             raise ValueError("trail_time must be finite and non-negative.")
+        if not isinstance(params.axis_mode, str):
+            raise ValueError('axis_mode must be "fixed" or "auto".')
         if params.axis_mode.lower() not in ("fixed", "auto"):
             raise ValueError('axis_mode must be "fixed" or "auto".')
+
+        maximum_duration = float(params.dt) * int(params.max_steps)
+        maximum_frames = maximum_duration / float(params.frame_time) + 1.0
+        if not np.isfinite(maximum_frames) or maximum_frames > MAX_ANIMATION_FRAMES:
+            raise ValueError(
+                "The requested animation could require more than "
+                f"{MAX_ANIMATION_FRAMES:,} stored frames. Increase frame_time "
+                "or reduce dt or max_steps."
+            )
 
 
 def _max_relative_vector_change(old: np.ndarray, new: np.ndarray) -> float:
@@ -120,10 +168,10 @@ def _max_relative_vector_change(old: np.ndarray, new: np.ndarray) -> float:
     if not (np.all(np.isfinite(old)) and np.all(np.isfinite(new))):
         return float("inf")
 
-    changes = np.linalg.norm(new - old, axis=1)
+    changes = np.hypot.reduce(np.abs(new - old), axis=1)
     scales = np.maximum(
-        np.linalg.norm(old, axis=1),
-        np.linalg.norm(new, axis=1),
+        np.hypot.reduce(np.abs(old), axis=1),
+        np.hypot.reduce(np.abs(new), axis=1),
     )
 
     ratios = np.zeros_like(changes)
@@ -276,8 +324,12 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
                 ):
                     break
 
+                # Compare velocity *increments*, not absolute coordinate
+                # velocities. This makes the convergence decision invariant
+                # under a uniform Galilean boost of the entire system.
                 velocity_change = _max_relative_vector_change(
-                    vel_guess, vel_corr
+                    vel_guess - velocities,
+                    vel_corr - velocities,
                 )
 
                 pos_guess = pos_corr
@@ -309,10 +361,25 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
         previous_positions = positions.copy()
         previous_velocities = velocities.copy()
 
-        time += dt_work
+        new_time = time + dt_work
+        if new_time <= time:
+            raise RuntimeError(
+                "The adaptive timestep became too small to advance simulation "
+                "time in floating-point arithmetic."
+            )
+        time = new_time
         positions = pos_guess
         velocities = vel_guess
         accepted_steps += 1
+
+        if not (
+            np.all(np.isfinite(positions))
+            and np.all(np.isfinite(velocities))
+        ):
+            raise RuntimeError(
+                "Multiple produced a non-finite position or velocity. "
+                "Try a smaller dt or less extreme initial conditions."
+            )
 
         current_cons = conservation_state(positions, velocities, masses)
         if not (
@@ -370,6 +437,11 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
                 frame_positions.append(p_frame)
                 frame_velocities.append(v_frame)
                 frame_times.append(next_frame_time)
+                if len(frame_times) > MAX_ANIMATION_FRAMES:
+                    raise RuntimeError(
+                        "The animation exceeded the stored-frame safety limit. "
+                        "Increase frame_time or reduce the simulated duration."
+                    )
                 next_frame_time += params.frame_time
 
         # Gradually recover after close encounters, never exceeding user dt.

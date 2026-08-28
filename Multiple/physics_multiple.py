@@ -7,7 +7,7 @@ import numpy as np
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.0.0"
+MODEL_VERSION = "1.1.0"
 BUILD_ID_COVERS = (
     "physics_multiple.py",
     "driver_multiple.py",
@@ -47,6 +47,50 @@ BUILD_ID = _compute_build_id()
 GM_SUN = 1.3271244e20  # m^3 s^-2
 
 
+def _as_finite_float_array(values, name: str) -> np.ndarray:
+    """Convert array-like input to a finite floating-point NumPy array."""
+    try:
+        array = np.asarray(values, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must contain numeric values.") from exc
+
+    if not np.all(np.isfinite(array)):
+        raise ValueError(f"{name} must contain only finite values.")
+    return array
+
+
+def _validated_positions_masses(
+    positions,
+    masses_solar,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return validated position and mass arrays for the public physics API."""
+    masses = _as_finite_float_array(masses_solar, "masses_solar")
+    pos = _as_finite_float_array(positions, "positions")
+
+    if masses.ndim != 1 or masses.size == 0:
+        raise ValueError("masses_solar must be a non-empty one-dimensional array.")
+    if np.any(masses <= 0.0):
+        raise ValueError("All masses must be positive.")
+    if pos.shape != (masses.size, 3):
+        raise ValueError(
+            "positions must have shape (number of masses, 3)."
+        )
+    return pos, masses
+
+
+def _validated_state(
+    positions,
+    velocities,
+    masses_solar,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return validated position, velocity, and mass arrays."""
+    pos, masses = _validated_positions_masses(positions, masses_solar)
+    vel = _as_finite_float_array(velocities, "velocities")
+    if vel.shape != pos.shape:
+        raise ValueError("velocities must have the same shape as positions.")
+    return pos, vel, masses
+
+
 def compute_accelerations(
     positions: np.ndarray,
     masses_solar: np.ndarray,
@@ -62,24 +106,62 @@ def compute_accelerations(
     Bodies are mathematical point masses. Exact coincidence makes the
     Newtonian force singular and therefore raises ValueError.
     """
+    positions, masses_solar = _validated_positions_masses(
+        positions, masses_solar
+    )
     n_bodies = positions.shape[0]
     acc = np.zeros_like(positions, dtype=float)
 
     for a in range(n_bodies):
         for b in range(a + 1, n_bodies):
-            r_vec = positions[b] - positions[a]
-            r = float(np.linalg.norm(r_vec))
+            with np.errstate(over="ignore", invalid="ignore"):
+                r_vec = positions[b] - positions[a]
+            if not np.all(np.isfinite(r_vec)):
+                raise ValueError(
+                    f"The separation of bodies {a + 1} and {b + 1} is "
+                    "outside the floating-point range."
+                )
+
+            # Repeated hypot avoids the avoidable overflow that can occur in
+            # sqrt(x*x + y*y + z*z) for large but finite coordinates.
+            r = float(np.hypot.reduce(np.abs(r_vec)))
             if r == 0.0:
                 raise ValueError(
                     f"Bodies {a + 1} and {b + 1} occupy exactly the same "
                     "position; the Newtonian point-mass force is singular."
                 )
 
-            inv_r3 = 1.0 / (r * r * r)
+            if not np.isfinite(r):
+                raise ValueError(
+                    f"The separation of bodies {a + 1} and {b + 1} is "
+                    "outside the floating-point range."
+                )
 
-            # r_vec points from a to b.
-            acc[a] += GM_SUN * masses_solar[b] * inv_r3 * r_vec
-            acc[b] -= GM_SUN * masses_solar[a] * inv_r3 * r_vec
+            # r_vec points from a to b. Dividing before multiplying avoids an
+            # unnecessary r**3 overflow for very large separations.
+            with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+                direction = r_vec / r
+                scale_a = (GM_SUN / r) * (masses_solar[b] / r)
+                scale_b = (GM_SUN / r) * (masses_solar[a] / r)
+                contribution_a = scale_a * direction
+                contribution_b = scale_b * direction
+
+            if not (
+                np.all(np.isfinite(contribution_a))
+                and np.all(np.isfinite(contribution_b))
+            ):
+                raise ValueError(
+                    f"The acceleration of bodies {a + 1} and {b + 1} is "
+                    "outside the floating-point range."
+                )
+
+            acc[a] += contribution_a
+            acc[b] -= contribution_b
+
+    if not np.all(np.isfinite(acc)):
+        raise ValueError(
+            "The combined acceleration is outside the floating-point range."
+        )
 
     return acc
 
@@ -95,25 +177,45 @@ def scaled_total_energy(
     The result has units m^2/s^2. The overall solar-mass factor is omitted
     because conservation tests depend on fractional changes, not on joules.
     """
-    kinetic = 0.5 * np.sum(
-        masses_solar[:, None] * velocities * velocities
+    positions, velocities, masses_solar = _validated_state(
+        positions, velocities, masses_solar
     )
+    with np.errstate(over="ignore", invalid="ignore"):
+        kinetic = 0.5 * np.sum(
+            masses_solar[:, None] * velocities * velocities
+        )
 
     potential = 0.0
     n_bodies = len(masses_solar)
     for a in range(n_bodies):
         for b in range(a + 1, n_bodies):
-            r = float(np.linalg.norm(positions[b] - positions[a]))
+            with np.errstate(over="ignore", invalid="ignore"):
+                r_vec = positions[b] - positions[a]
+            if not np.all(np.isfinite(r_vec)):
+                raise ValueError(
+                    f"The separation of bodies {a + 1} and {b + 1} is "
+                    "outside the floating-point range."
+                )
+            r = float(np.hypot.reduce(np.abs(r_vec)))
             if r == 0.0:
                 raise ValueError(
                     f"Bodies {a + 1} and {b + 1} occupy exactly the same "
                     "position; gravitational potential energy is singular."
                 )
-            potential -= (
-                GM_SUN * masses_solar[a] * masses_solar[b] / r
-            )
+            if not np.isfinite(r):
+                raise ValueError(
+                    f"The separation of bodies {a + 1} and {b + 1} is "
+                    "outside the floating-point range."
+                )
+            with np.errstate(over="ignore", invalid="ignore"):
+                potential -= (
+                    (GM_SUN / r) * masses_solar[a] * masses_solar[b]
+                )
 
-    return float(kinetic + potential)
+    energy = float(kinetic + potential)
+    if not np.isfinite(energy):
+        raise ValueError("Total energy is outside the floating-point range.")
+    return energy
 
 
 def scaled_total_momentum(
@@ -125,7 +227,20 @@ def scaled_total_momentum(
 
     Units are m/s. Fractional or absolute drift provides a numerical diagnostic.
     """
-    return np.sum(masses_solar[:, None] * velocities, axis=0)
+    velocities = _as_finite_float_array(velocities, "velocities")
+    masses_solar = _as_finite_float_array(masses_solar, "masses_solar")
+    if masses_solar.ndim != 1 or masses_solar.size == 0:
+        raise ValueError("masses_solar must be a non-empty one-dimensional array.")
+    if np.any(masses_solar <= 0.0):
+        raise ValueError("All masses must be positive.")
+    if velocities.shape != (masses_solar.size, 3):
+        raise ValueError("velocities must have shape (number of masses, 3).")
+
+    with np.errstate(over="ignore", invalid="ignore"):
+        momentum = np.sum(masses_solar[:, None] * velocities, axis=0)
+    if not np.all(np.isfinite(momentum)):
+        raise ValueError("Total momentum is outside the floating-point range.")
+    return momentum
 
 
 def scaled_total_angular_momentum(
@@ -138,10 +253,19 @@ def scaled_total_angular_momentum(
 
     Units are m^2/s. Fractional or absolute drift provides a numerical diagnostic.
     """
-    return np.sum(
-        masses_solar[:, None] * np.cross(positions, velocities),
-        axis=0,
+    positions, velocities, masses_solar = _validated_state(
+        positions, velocities, masses_solar
     )
+    with np.errstate(over="ignore", invalid="ignore"):
+        angular_momentum = np.sum(
+            masses_solar[:, None] * np.cross(positions, velocities),
+            axis=0,
+        )
+    if not np.all(np.isfinite(angular_momentum)):
+        raise ValueError(
+            "Total angular momentum is outside the floating-point range."
+        )
+    return angular_momentum
 
 
 def conservation_state(

@@ -53,9 +53,9 @@ def main():
         velocities_init=velocities_init,
 
         dt=2000.0,
-        max_steps=40000,
-        eps1=0.05,
-        eps2=0.0001,
+        max_steps=60000,
+        eps1=0.005,
+        eps2=1.0e-7,
 
         # Output: "trajectories" or "animation"
         output_type="animation",

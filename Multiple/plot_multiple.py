@@ -76,13 +76,19 @@ def plot_energy_drift(result: Dict[str, Any]) -> None:
     energies = np.asarray(result["energies"], dtype=float)
     times_days = np.asarray(result["times"], dtype=float) / 86400.0
     e0 = energies[0]
-    scale = abs(e0) if e0 != 0.0 else 1.0
-    drift = (energies - e0) / scale
+    if e0 != 0.0:
+        drift = (energies - e0) / abs(e0)
+        ylabel = r"$(E-E_0)/|E_0|$"
+    else:
+        # A fractional error relative to zero is undefined. The physics module
+        # reports energy per solar-mass unit, hence the scaled units here.
+        drift = energies - e0
+        ylabel = r"$E-E_0$ (scaled m$^2$/s$^2$)"
 
     fig, ax = plt.subplots()
     ax.plot(times_days, drift)
     ax.set_xlabel("time (days)")
-    ax.set_ylabel(r"$(E-E_0)/|E_0|$")
+    ax.set_ylabel(ylabel)
     ax.set_title("Multiple total-energy drift")
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
