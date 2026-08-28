@@ -18,11 +18,15 @@ from physics_neutron import (
     C2,
     G,
     M_SUN,
+    SurfaceCrossingError,
     central_state,
     eos_density,
     rk4_step,
     structure_derivatives,
 )
+
+
+MAX_NUMERICAL_CONTROL = 10_000_000
 
 
 def _validate_inputs(
@@ -35,7 +39,7 @@ def _validate_inputs(
     def is_finite_number(value: float) -> bool:
         try:
             return not isinstance(value, bool) and math.isfinite(value)
-        except TypeError:
+        except (TypeError, OverflowError):
             return False
 
     if not is_finite_number(gamma) or gamma <= 1.0:
@@ -47,15 +51,35 @@ def _validate_inputs(
     if (
         not isinstance(steps_per_scale, int)
         or isinstance(steps_per_scale, bool)
-        or steps_per_scale < 50
+        or not 50 <= steps_per_scale <= MAX_NUMERICAL_CONTROL
     ):
-        raise ValueError("steps_per_scale must be an integer of at least 50.")
+        raise ValueError(
+            "steps_per_scale must be an integer from 50 through 10000000."
+        )
     if (
         not isinstance(max_steps, int)
         or isinstance(max_steps, bool)
-        or max_steps < 100
+        or not 100 <= max_steps <= MAX_NUMERICAL_CONTROL
     ):
-        raise ValueError("max_steps must be an integer of at least 100.")
+        raise ValueError(
+            "max_steps must be an integer from 100 through 10000000."
+        )
+
+
+def _compactness(mass: float, radius: float) -> float:
+    """Return 2Gm/(rc^2), failing cleanly outside floating-point range."""
+    try:
+        value = (2.0 * G / C2) * (mass / radius)
+    except (OverflowError, ZeroDivisionError) as exc:
+        raise ValueError(
+            "Compactness is outside the finite floating-point range."
+        ) from exc
+    if not math.isfinite(value) or value < 0.0:
+        raise ValueError(
+            "Compactness is outside the non-negative finite floating-point "
+            "range."
+        )
+    return value
 
 
 def compute_neutron_star(
@@ -75,15 +99,27 @@ def compute_neutron_star(
     _validate_inputs(gamma, pC, K, steps_per_scale, max_steps)
 
     rhoC = eos_density(pC, K, gamma)
-    # Writing sqrt(pC/G) as sqrt(pC)/sqrt(G) avoids an intermediate overflow
-    # for otherwise finite inputs.
-    scale = math.sqrt(pC) / (math.sqrt(G) * rhoC)
+    # The logarithmic form avoids intermediate overflow or underflow when the
+    # individually finite EOS parameters span a very large dynamic range.
+    try:
+        log_scale = 0.5 * (math.log(pC) - math.log(G)) - math.log(rhoC)
+        scale = math.exp(log_scale)
+    except (OverflowError, ValueError, ZeroDivisionError) as exc:
+        raise ValueError(
+            "The requested parameters produce a radial scale outside the "
+            "positive finite floating-point range."
+        ) from exc
     if not math.isfinite(scale) or scale <= 0.0:
         raise ValueError(
             "The requested parameters produce a radial scale outside the "
             "positive finite floating-point range."
         )
     dr_nominal = scale / float(steps_per_scale)
+    if not math.isfinite(dr_nominal) or dr_nominal <= 0.0:
+        raise ValueError(
+            "The requested resolution produces a radial step outside the "
+            "positive finite floating-point range."
+        )
 
     # Start slightly away from the coordinate singularity at r=0 using the
     # regular central series.
@@ -96,6 +132,11 @@ def compute_neutron_star(
     mass = [0.0, m]
 
     min_step = dr_nominal / (2.0 ** 24)
+    if min_step <= 0.0 or not math.isfinite(min_step):
+        raise ValueError(
+            "The requested radial step is too small for controlled step "
+            "halving in floating-point arithmetic."
+        )
 
     for _ in range(max_steps):
         # Near a polytropic surface, q = p**((gamma-1)/gamma) is linear in
@@ -108,16 +149,42 @@ def compute_neutron_star(
                 "model is outside the regime expected by this solver."
             )
 
-        pressure_scale_distance = -p / dpdr
-        surface_distance = (
-            gamma / (gamma - 1.0) * pressure_scale_distance
-        )
+        try:
+            pressure_scale_distance = -p / dpdr
+            surface_distance = (
+                gamma / (gamma - 1.0) * pressure_scale_distance
+            )
+        except (OverflowError, ZeroDivisionError) as exc:
+            raise ValueError(
+                "The surface-distance estimate is outside the finite "
+                "floating-point range."
+            ) from exc
+        if (
+            not math.isfinite(pressure_scale_distance)
+            or pressure_scale_distance <= 0.0
+            or not math.isfinite(surface_distance)
+            or surface_distance <= 0.0
+        ):
+            raise ValueError(
+                "The surface-distance estimate is outside the positive "
+                "finite floating-point range."
+            )
         if 0.0 < surface_distance <= dr_nominal:
             r_surface = r + surface_distance
 
             # Integrating the leading polytropic density falloff over the
             # remaining interval gives dmdr * (-p/dpdr).
             m_surface = m + dmdr * pressure_scale_distance
+            if (
+                not math.isfinite(r_surface)
+                or not math.isfinite(m_surface)
+                or r_surface <= r
+                or m_surface < m
+            ):
+                raise ValueError(
+                    "The extrapolated surface state is outside the finite "
+                    "floating-point range."
+                )
 
             radius.append(r_surface)
             pressure.append(0.0)
@@ -129,14 +196,14 @@ def compute_neutron_star(
         # trial step until all stages remain within the fluid.
         h = dr_nominal
         while True:
-            if h < min_step:
+            if h <= min_step:
                 raise RuntimeError(
                     "Could not resolve the stellar surface with a positive "
                     "pressure RK4 step."
                 )
             try:
                 p_new, m_new = rk4_step(r, p, m, h, K, gamma)
-            except ValueError:
+            except SurfaceCrossingError:
                 h *= 0.5
                 continue
             break
@@ -147,6 +214,18 @@ def compute_neutron_star(
             fraction = p / (p - p_new)
             r_surface = r + fraction * h
             m_surface = m + fraction * (m_new - m)
+            if (
+                not math.isfinite(fraction)
+                or not 0.0 < fraction <= 1.0
+                or not math.isfinite(r_surface)
+                or not math.isfinite(m_surface)
+                or r_surface <= r
+                or m_surface < m
+            ):
+                raise ValueError(
+                    "The interpolated surface state is outside the finite "
+                    "floating-point range."
+                )
             radius.append(r_surface)
             pressure.append(0.0)
             density.append(0.0)
@@ -158,12 +237,18 @@ def compute_neutron_star(
         m = m_new
         rho = eos_density(p, K, gamma)
 
+        if not all(math.isfinite(value) for value in (r, p, m, rho)):
+            raise ValueError(
+                "The integrated stellar state is outside the finite "
+                "floating-point range."
+            )
+
         radius.append(r)
         pressure.append(p)
         density.append(rho)
         mass.append(m)
 
-        compactness = 2.0 * G * m / (r * C2)
+        compactness = _compactness(m, r)
         if compactness >= 1.0:
             raise RuntimeError(
                 "The integration reached 2Gm/(rc^2) >= 1 before p=0. "
@@ -177,9 +262,20 @@ def compute_neutron_star(
 
     R = radius[-1]
     M = mass[-1]
-    compactness = 2.0 * G * M / (R * C2)
+    compactness = _compactness(M, R)
     buchdahl_ratio = compactness  # Buchdahl requires 2GM/(Rc^2) <= 8/9.
-    central_sound_speed_squared_over_c2 = gamma * pC / (rhoC * C2)
+    try:
+        log_sound_speed_squared = (
+            math.log(gamma)
+            + math.log(pC)
+            - math.log(rhoC)
+            - math.log(C2)
+        )
+        central_sound_speed_squared_over_c2 = math.exp(
+            log_sound_speed_squared
+        )
+    except OverflowError:
+        central_sound_speed_squared_over_c2 = math.inf
 
     return {
         "model_version": phys.MODEL_VERSION,

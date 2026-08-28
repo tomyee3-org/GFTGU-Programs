@@ -4,6 +4,8 @@ Plotting for Neutron star structure.
 
 from __future__ import annotations
 
+import warnings
+
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -11,6 +13,7 @@ from physics_neutron import M_SUN
 
 
 _VALID_OUTPUTS = {"Pressure", "Density", "Mass"}
+_OUTPUT_ALIASES = {name.casefold(): name for name in _VALID_OUTPUTS}
 
 
 def plot_neutron(data: dict, output_type: str, *, log_y: bool = False) -> None:
@@ -20,19 +23,32 @@ def plot_neutron(data: dict, output_type: str, *, log_y: bool = False) -> None:
     Radius is shown in km. Mass is shown in solar masses. Pressure and density
     may optionally use a logarithmic y-axis.
     """
-    if output_type not in _VALID_OUTPUTS:
+    if not isinstance(output_type, str):
         raise ValueError(
-            'output_type must be exactly "Pressure", "Density", or "Mass".'
+            'output_type must be "Pressure", "Density", or "Mass".'
+        )
+    canonical_output = _OUTPUT_ALIASES.get(output_type.strip().casefold())
+    if canonical_output is None:
+        raise ValueError(
+            'output_type must be "Pressure", "Density", or "Mass" '
+            "(capitalization is ignored)."
         )
     if not isinstance(log_y, bool):
         raise ValueError("log_y must be True or False.")
+    if canonical_output == "Mass" and log_y:
+        warnings.warn(
+            "log_y=True applies only to Pressure and Density; the Mass "
+            "profile will use a linear y-axis.",
+            UserWarning,
+            stacklevel=2,
+        )
 
     r_km = np.asarray(data["radius"], dtype=float) / 1000.0
 
-    if output_type == "Pressure":
+    if canonical_output == "Pressure":
         y = np.asarray(data["pressure"], dtype=float)
         ylabel = "Pressure (Pa)"
-    elif output_type == "Density":
+    elif canonical_output == "Density":
         y = np.asarray(data["density"], dtype=float)
         ylabel = r"Density (kg/m$^3$)"
     else:
@@ -41,7 +57,7 @@ def plot_neutron(data: dict, output_type: str, *, log_y: bool = False) -> None:
 
     fig, ax = plt.subplots(figsize=(8, 6))
 
-    if log_y and output_type in {"Pressure", "Density"}:
+    if log_y and canonical_output in {"Pressure", "Density"}:
         # A logarithmic axis cannot display the exact zero-valued surface point.
         # Mask nonpositive values explicitly rather than relying on Matplotlib to
         # discard them.
@@ -53,7 +69,7 @@ def plot_neutron(data: dict, output_type: str, *, log_y: bool = False) -> None:
 
     ax.set_xlabel("Radius (km)")
     ax.set_ylabel(ylabel)
-    ax.set_title(f"Neutron Star: {output_type}")
+    ax.set_title(f"Neutron Star: {canonical_output}")
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()

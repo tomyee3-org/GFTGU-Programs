@@ -16,7 +16,7 @@ import math
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.1.0"
+MODEL_VERSION = "1.2.0"
 BUILD_ID_COVERS = (
     "physics_neutron.py",
     "driver_neutron.py",
@@ -59,11 +59,15 @@ C2 = C * C
 M_SUN = 1.98847e30            # kg, convenient solar-mass conversion
 
 
+class SurfaceCrossingError(ValueError):
+    """Signal that an RK4 trial stage crossed the zero-pressure surface."""
+
+
 def _require_finite_number(value: float, name: str) -> None:
     """Raise ValueError unless value is a finite real number (not bool)."""
     try:
         finite = math.isfinite(value)
-    except TypeError as exc:
+    except (TypeError, OverflowError) as exc:
         raise ValueError(f"{name} must be a finite real number.") from exc
     if isinstance(value, bool) or not finite:
         raise ValueError(f"{name} must be a finite real number.")
@@ -128,7 +132,17 @@ def structure_derivatives(
         raise ValueError("TOV derivatives require non-negative enclosed mass.")
 
     rho = eos_density(p, K, gamma)
-    compactness_denominator = r - 2.0 * G * m / C2
+    try:
+        compactness_denominator = r - 2.0 * G * m / C2
+    except (OverflowError, ZeroDivisionError) as exc:
+        raise ValueError(
+            "The TOV compactness calculation is outside the finite "
+            "floating-point range."
+        ) from exc
+    if not math.isfinite(compactness_denominator):
+        raise ValueError(
+            "The TOV compactness denominator is not finite."
+        )
     if compactness_denominator <= 0.0:
         raise RuntimeError(
             "The attempted static model reached r <= 2Gm/c^2; "
@@ -136,14 +150,45 @@ def structure_derivatives(
             "can be continued by this integration."
         )
 
-    pressure_source = m + 4.0 * math.pi * r**3 * p / C2
-    dpdr = (
-        -G
-        * (rho + p / C2)
-        * pressure_source
-        / (r * compactness_denominator)
-    )
-    dmdr = 4.0 * math.pi * r * r * rho
+    try:
+        full_denominator = r * compactness_denominator
+        pressure_term = 4.0 * math.pi * r * r * r * (p / C2)
+        pressure_source = m + pressure_term
+        inertial_density = rho + p / C2
+        pressure_numerator = G * inertial_density * pressure_source
+        dmdr = 4.0 * math.pi * r * r * rho
+    except (OverflowError, ZeroDivisionError) as exc:
+        raise ValueError(
+            "The TOV derivative calculation is outside the finite "
+            "floating-point range."
+        ) from exc
+
+    if full_denominator <= 0.0 or not math.isfinite(full_denominator):
+        raise ValueError(
+            "The full TOV denominator is outside the positive finite "
+            "floating-point range."
+        )
+    if not all(
+        math.isfinite(value)
+        for value in (
+            pressure_term,
+            pressure_source,
+            inertial_density,
+            pressure_numerator,
+            dmdr,
+        )
+    ):
+        raise ValueError(
+            "The TOV derivative calculation is outside the finite "
+            "floating-point range."
+        )
+
+    dpdr = -pressure_numerator / full_denominator
+    if not math.isfinite(dpdr):
+        raise ValueError(
+            "The TOV pressure derivative is outside the finite "
+            "floating-point range."
+        )
     return dpdr, dmdr
 
 
@@ -172,18 +217,40 @@ def central_state(
         raise ValueError("The central expansion requires p_c > 0.")
 
     rho_c = eos_density(p_c, K, gamma)
-    m0 = 4.0 * math.pi * rho_c * r0**3 / 3.0
-    coeff = (
-        2.0
-        * math.pi
-        * G
-        * (rho_c + p_c / C2)
-        * (rho_c / 3.0 + p_c / C2)
-    )
-    p0 = p_c - coeff * r0 * r0
-    if not all(math.isfinite(value) for value in (m0, coeff, p0)):
+    try:
+        r0_squared = r0 * r0
+        r0_cubed = r0_squared * r0
+        m0 = 4.0 * math.pi * rho_c * r0_cubed / 3.0
+        coeff = (
+            2.0
+            * math.pi
+            * G
+            * (rho_c + p_c / C2)
+            * (rho_c / 3.0 + p_c / C2)
+        )
+        pressure_correction = coeff * r0_squared
+        p0 = p_c - pressure_correction
+    except (OverflowError, ZeroDivisionError) as exc:
         raise ValueError(
             "The central expansion overflowed for the requested parameters."
+        ) from exc
+    if (
+        m0 <= 0.0
+        or not all(
+            math.isfinite(value)
+            for value in (
+                r0_squared,
+                r0_cubed,
+                m0,
+                coeff,
+                pressure_correction,
+                p0,
+            )
+        )
+    ):
+        raise ValueError(
+            "The central expansion is outside the positive finite "
+            "floating-point range for the requested parameters."
         )
     if p0 <= 0.0:
         raise ValueError(
@@ -212,7 +279,9 @@ def rk4_step(
         # A negative intermediate pressure means the proposed step crosses the
         # stellar surface. The driver will retry with a shorter step.
         if pp <= 0.0:
-            raise ValueError("RK4 trial stage crossed the stellar surface.")
+            raise SurfaceCrossingError(
+                "RK4 trial stage crossed the stellar surface."
+            )
         return structure_derivatives(rr, pp, mm, K, gamma)
 
     k1p, k1m = f(r, p, m)
@@ -234,4 +303,8 @@ def rk4_step(
 
     p_new = p + h * (k1p + 2.0 * k2p + 2.0 * k3p + k4p) / 6.0
     m_new = m + h * (k1m + 2.0 * k2m + 2.0 * k3m + k4m) / 6.0
+    if not math.isfinite(p_new) or not math.isfinite(m_new):
+        raise ValueError(
+            "The RK4 result is outside the finite floating-point range."
+        )
     return p_new, m_new

@@ -64,6 +64,100 @@ REFERENCE_RADIUS_M = 7802.758706219183
 REFERENCE_MASS_KG = 1.9140826174028036e30
 
 
+def _q_reference_model(
+    gamma: float,
+    p_c: float,
+    K: float,
+    *,
+    steps_per_scale: int = 8000,
+    max_steps: int = 500_000,
+) -> tuple[float, float]:
+    """Independent fine-grid reference using q=p**((gamma-1)/gamma).
+
+    This test integrator evolves q directly, unlike the production solver,
+    which evolves pressure and uses q only for its final surface estimate.
+    """
+    rho_c = math.exp((math.log(p_c) - math.log(K)) / gamma)
+    scale = math.exp(0.5 * (math.log(p_c) - math.log(phys.G)) - math.log(rho_c))
+    h_nominal = scale / steps_per_scale
+    r = h_nominal
+    coefficient = (
+        2.0
+        * math.pi
+        * phys.G
+        * (rho_c + p_c / phys.C2)
+        * (rho_c / 3.0 + p_c / phys.C2)
+    )
+    p = p_c - coefficient * r * r
+    mass = 4.0 * math.pi * rho_c * r**3 / 3.0
+
+    exponent = (gamma - 1.0) / gamma
+    q = p**exponent
+    inverse_K_power = K ** (-1.0 / gamma)
+    pressure_power = gamma / (gamma - 1.0)
+    density_power = 1.0 / (gamma - 1.0)
+
+    def derivatives(rr: float, qq: float, mm: float) -> tuple[float, float]:
+        if qq < 0.0:
+            raise ArithmeticError("q crossed the reference surface")
+        pressure = qq**pressure_power
+        density = inverse_K_power * qq**density_power
+        denominator = rr - 2.0 * phys.G * mm / phys.C2
+        dqdr = (
+            -exponent
+            * phys.G
+            * (inverse_K_power + qq / phys.C2)
+            * (mm + 4.0 * math.pi * rr**3 * pressure / phys.C2)
+            / (rr * denominator)
+        )
+        dmdr = 4.0 * math.pi * rr * rr * density
+        return dqdr, dmdr
+
+    for _ in range(max_steps):
+        dqdr, dmdr = derivatives(r, q, mass)
+        surface_distance = -q / dqdr
+        if surface_distance <= h_nominal:
+            # rho is proportional to q**(1/(gamma-1)); integrating that
+            # leading falloff multiplies the rectangular tail by exponent.
+            return (
+                r + surface_distance,
+                mass + dmdr * exponent * surface_distance,
+            )
+
+        h = h_nominal
+        while True:
+            try:
+                k1q, k1m = derivatives(r, q, mass)
+                k2q, k2m = derivatives(
+                    r + 0.5 * h,
+                    q + 0.5 * h * k1q,
+                    mass + 0.5 * h * k1m,
+                )
+                k3q, k3m = derivatives(
+                    r + 0.5 * h,
+                    q + 0.5 * h * k2q,
+                    mass + 0.5 * h * k2m,
+                )
+                k4q, k4m = derivatives(
+                    r + h, q + h * k3q, mass + h * k3m
+                )
+                q_new = q + h * (k1q + 2.0 * k2q + 2.0 * k3q + k4q) / 6.0
+                mass_new = mass + h * (
+                    k1m + 2.0 * k2m + 2.0 * k3m + k4m
+                ) / 6.0
+                if q_new < 0.0:
+                    raise ArithmeticError("q crossed the reference surface")
+                break
+            except ArithmeticError:
+                h *= 0.5
+
+        r += h
+        q = q_new
+        mass = mass_new
+
+    raise AssertionError("Independent q-reference integration did not finish")
+
+
 @pytest.fixture(scope="module")
 def default_model() -> dict:
     return driver.compute_neutron_star(DEFAULT_GAMMA, DEFAULT_PC, DEFAULT_K)
@@ -267,6 +361,16 @@ def test_structure_derivatives_reject_horizon_denominator() -> None:
         phys.structure_derivatives(r, 1.0e20, horizon_mass, 1.0, 2.0)
 
 
+def test_structure_derivatives_reject_underflowed_full_denominator() -> None:
+    with pytest.raises(ValueError, match="full TOV denominator"):
+        phys.structure_derivatives(1.0e-200, 1.0e-300, 0.0, 1.0e-300, 2.0)
+
+
+def test_structure_derivatives_reject_overflowed_compound_terms() -> None:
+    with pytest.raises(ValueError, match="floating-point range"):
+        phys.structure_derivatives(1.0e200, 1.0, 0.0, 1.0, 2.0)
+
+
 def test_central_state_matches_regular_series() -> None:
     p_c = DEFAULT_PC
     r0 = 10.0
@@ -298,6 +402,11 @@ def test_central_state_rejects_invalid_radius(r0: float) -> None:
 def test_central_state_rejects_step_that_crosses_surface() -> None:
     with pytest.raises(ValueError, match="initial radial step is too large"):
         phys.central_state(DEFAULT_PC, DEFAULT_K, DEFAULT_GAMMA, 1.0e9)
+
+
+def test_central_state_rejects_cubic_radius_overflow_cleanly() -> None:
+    with pytest.raises(ValueError, match="central expansion"):
+        phys.central_state(1.0, 1.0, 2.0, 1.0e200)
 
 
 def test_rk4_step_advances_pressure_down_and_mass_up() -> None:
@@ -336,6 +445,17 @@ def test_rk4_rejects_invalid_step(h: float) -> None:
         phys.rk4_step(1.0, 1.0, 0.0, h, 1.0, 2.0)
 
 
+def test_rk4_rejects_nonfinite_combined_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def enormous_derivatives(*_args: object) -> tuple[float, float]:
+        return sys.float_info.max, sys.float_info.max
+
+    monkeypatch.setattr(phys, "structure_derivatives", enormous_derivatives)
+    with pytest.raises(ValueError, match="finite floating-point range"):
+        phys.rk4_step(1.0, 1.0, 1.0, 2.0, 1.0, 2.0)
+
+
 # ---------------------------------------------------------------------------
 # Integrated model, surface, convergence, diagnostics, and validation
 # ---------------------------------------------------------------------------
@@ -351,9 +471,11 @@ def test_rk4_rejects_invalid_step(h: float) -> None:
         (DEFAULT_GAMMA, DEFAULT_PC, 0.0, 400, 200_000),
         (DEFAULT_GAMMA, DEFAULT_PC, math.nan, 400, 200_000),
         (DEFAULT_GAMMA, DEFAULT_PC, DEFAULT_K, 49, 200_000),
+        (DEFAULT_GAMMA, DEFAULT_PC, DEFAULT_K, 10_000_001, 200_000),
         (DEFAULT_GAMMA, DEFAULT_PC, DEFAULT_K, 50.0, 200_000),
         (DEFAULT_GAMMA, DEFAULT_PC, DEFAULT_K, True, 200_000),
         (DEFAULT_GAMMA, DEFAULT_PC, DEFAULT_K, 400, 99),
+        (DEFAULT_GAMMA, DEFAULT_PC, DEFAULT_K, 400, 10_000_001),
         (DEFAULT_GAMMA, DEFAULT_PC, DEFAULT_K, 400, 100.0),
         (DEFAULT_GAMMA, DEFAULT_PC, DEFAULT_K, 400, False),
     ],
@@ -376,6 +498,75 @@ def test_compute_reports_step_limit_failure() -> None:
         driver.compute_neutron_star(
             DEFAULT_GAMMA, DEFAULT_PC, DEFAULT_K, max_steps=100
         )
+
+
+@pytest.mark.parametrize(
+    ("gamma", "p_c", "K"),
+    [
+        (
+            1.0001513808512184,
+            4.2308654942826733e-48,
+            1.3627252898262582e96,
+        ),
+        (
+            1.0047723049491972,
+            3.022685144472793e-169,
+            2.261623147e-315,
+        ),
+    ],
+)
+def test_copilot_extreme_finite_reproducers_fail_cleanly(
+    gamma: float, p_c: float, K: float
+) -> None:
+    with pytest.raises(ValueError, match="floating-point range"):
+        driver.compute_neutron_star(
+            gamma,
+            p_c,
+            K,
+            steps_per_scale=50,
+            max_steps=10_000,
+        )
+
+
+def test_driver_does_not_relabel_unrelated_value_error_as_surface_crossing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unrelated_failure(*_args: object, **_kwargs: object) -> tuple[float, float]:
+        raise ValueError("sentinel arithmetic failure")
+
+    monkeypatch.setattr(driver, "rk4_step", unrelated_failure)
+    with pytest.raises(ValueError, match="sentinel arithmetic failure"):
+        driver.compute_neutron_star(DEFAULT_GAMMA, DEFAULT_PC, DEFAULT_K)
+
+
+def test_deterministic_extreme_range_sweep_has_only_controlled_outcomes() -> None:
+    """Seed and ranges are retained so the advertised sweep is reproducible."""
+    import random
+
+    generator = random.Random(20260828)
+    outcomes = {"success": 0, "controlled": 0}
+    for _ in range(80):
+        gamma = 1.0 + 10.0 ** generator.uniform(-15.0, 0.3)
+        p_c = 10.0 ** generator.uniform(-300.0, 300.0)
+        K = 10.0 ** generator.uniform(-300.0, 300.0)
+        try:
+            data = driver.compute_neutron_star(
+                gamma,
+                p_c,
+                K,
+                steps_per_scale=50,
+                max_steps=100,
+            )
+            assert all(
+                math.isfinite(value)
+                for key in ("radius", "pressure", "density", "mass")
+                for value in data[key]
+            )
+            outcomes["success"] += 1
+        except (ValueError, RuntimeError):
+            outcomes["controlled"] += 1
+
+    assert sum(outcomes.values()) == 80
 
 
 def test_default_model_regression(default_model: dict) -> None:
@@ -474,6 +665,33 @@ def test_refinement_improves_surface_reference_agreement() -> None:
     assert abs(fine["total_mass_kg"] / REFERENCE_MASS_KG - 1.0) < 1e-9
 
 
+@pytest.mark.parametrize(
+    ("gamma", "p_c", "rho_c", "radius_tolerance", "mass_tolerance"),
+    [
+        (1.21, 1.0e20, 1.0e15, 1.0e-5, 1.0e-7),
+        (1.25, 1.0e25, 1.0e17, 4.0e-5, 5.0e-7),
+        (1.4, 1.0e32, 1.0e18, 6.0e-5, 5.0e-7),
+        (2.0, 1.0e34, 1.0e18, 2.0e-4, 2.0e-6),
+    ],
+)
+def test_surface_against_independent_q_reference_across_models(
+    gamma: float,
+    p_c: float,
+    rho_c: float,
+    radius_tolerance: float,
+    mass_tolerance: float,
+) -> None:
+    K = p_c / rho_c**gamma
+    production = driver.compute_neutron_star(gamma, p_c, K)
+    reference_radius, reference_mass = _q_reference_model(gamma, p_c, K)
+    assert abs(production["surface_radius_m"] / reference_radius - 1.0) < (
+        radius_tolerance
+    )
+    assert abs(production["total_mass_kg"] / reference_mass - 1.0) < (
+        mass_tolerance
+    )
+
+
 def test_central_sound_speed_and_causality_diagnostic(default_model: dict) -> None:
     expected_squared = (
         DEFAULT_GAMMA
@@ -554,12 +772,42 @@ def test_log_plot_omits_zero_surface_point(
     plt.close("all")
 
 
-@pytest.mark.parametrize("output_type", ["pressure", "", "Energy", None])
+@pytest.mark.parametrize("output_type", ["", "Energy", None])
 def test_plot_rejects_invalid_output_type(
     default_model: dict, output_type: str
 ) -> None:
     with pytest.raises(ValueError, match="output_type"):
         plotter.plot_neutron(default_model, output_type)
+
+
+@pytest.mark.parametrize(
+    ("alias", "canonical"),
+    [("pressure", "Pressure"), (" DENSITY ", "Density"), ("mAsS", "Mass")],
+)
+def test_plot_accepts_case_insensitive_student_input(
+    default_model: dict,
+    alias: str,
+    canonical: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    monkeypatch.setattr(plt, "show", lambda: None)
+    plotter.plot_neutron(default_model, alias)
+    assert plt.gcf().axes[0].get_title() == f"Neutron Star: {canonical}"
+    plt.close("all")
+
+
+def test_mass_log_request_warns_and_remains_linear(
+    default_model: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import matplotlib.pyplot as plt
+
+    monkeypatch.setattr(plt, "show", lambda: None)
+    with pytest.warns(UserWarning, match="Mass profile will use a linear"):
+        plotter.plot_neutron(default_model, "Mass", log_y=True)
+    assert plt.gcf().axes[0].get_yscale() == "linear"
+    plt.close("all")
 
 
 @pytest.mark.parametrize("log_y", [0, 1, "yes", None])
@@ -623,6 +871,14 @@ def test_help_documents_surface_variable_and_causality_diagnostic() -> None:
     assert r"p^{(\gamma-1)/\gamma}" in html
     assert "central sound speed" in html.lower()
     assert "causality" in html.lower()
+
+
+def test_help_explains_gamma_one_restriction_and_plot_normalization() -> None:
+    html = _help_text()
+    assert "Why \\(\\gamma=1\\) is not accepted" in html
+    assert "approach zero only" in html
+    assert "Capitalization and surrounding spaces are ignored" in html
+    assert "prints a warning" in html
 
 
 def test_help_contains_no_development_history_commentary() -> None:
