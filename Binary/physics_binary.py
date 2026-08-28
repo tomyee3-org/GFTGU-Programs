@@ -3,10 +3,10 @@ Newtonian two-body physics for Binary.
 """
 
 from dataclasses import dataclass
-from math import frexp, hypot, isfinite, ldexp
+from math import frexp, fsum, hypot, isfinite, ldexp
 from numbers import Real
 
-MODEL_VERSION = "1.1.3"
+MODEL_VERSION = "1.1.4"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -140,6 +140,23 @@ def _scaled_kinetic_energy(mass: float, velocity_x: float,
     )
 
 
+def _finite_energy_sum(terms) -> float:
+    """Accurately sum finite energy terms and reject a final overflow."""
+    try:
+        result = fsum(terms)
+    except OverflowError as error:
+        raise ValueError(
+            "The calculated energy is outside the numerical range of "
+            "double-precision arithmetic."
+        ) from error
+    if not isfinite(result):
+        raise ValueError(
+            "The calculated energy is outside the numerical range of "
+            "double-precision arithmetic."
+        )
+    return result
+
+
 def relative_displacement(xA: float, yA: float, xB: float, yB: float):
     """Return A-minus-B displacement components and scalar separation."""
     for name, value in (("xA", xA), ("yA", yA), ("xB", xB), ("yB", yB)):
@@ -227,8 +244,10 @@ def energies(
     )
     KA = _scaled_kinetic_energy(MA, vA, uA)
     KB = _scaled_kinetic_energy(MB, vB, uB)
-    K = KA + KB
-    E = K + U
+    K = _finite_energy_sum((KA, KB))
+    # Sum all three independently computed terms together. Forming K + U could
+    # discard a tiny KB while forming K, before a large KA cancels with U.
+    E = _finite_energy_sum((KA, KB, U))
     values = (U, K, E)
     if not all(isfinite(value) for value in values):
         raise ValueError(

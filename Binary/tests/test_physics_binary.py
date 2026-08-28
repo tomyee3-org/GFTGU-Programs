@@ -383,6 +383,61 @@ class TestPhysicsFunctions(unittest.TestCase):
         self.assertEqual(first, swapped)
         self.assertEqual(first, translated)
 
+    def test_total_energy_preserves_three_term_cancellation_residual(self):
+        minimum_subnormal = math.ulp(0.0)
+        separation = 2.0 * physics.G
+        tiny_velocity = math.sqrt(2.0 * minimum_subnormal)
+        potential, kinetic, total = physics.energies(
+            2.0, 1.0,
+            separation, 0.0, 1.0, 0.0,
+            0.0, 0.0, tiny_velocity, 0.0,
+        )
+        kinetic_a = physics._scaled_kinetic_energy(2.0, 1.0, 0.0)
+        kinetic_b = physics._scaled_kinetic_energy(
+            1.0, tiny_velocity, 0.0
+        )
+        self.assertEqual(
+            (potential, kinetic_a, kinetic_b),
+            (-1.0, 1.0, minimum_subnormal),
+        )
+        self.assertEqual((kinetic_a + kinetic_b) + potential, 0.0)
+        self.assertEqual(kinetic, 1.0)
+        self.assertEqual(total, minimum_subnormal)
+
+    def test_exact_zero_total_energy_remains_valid(self):
+        separation = 2.0 * physics.G
+        potential, kinetic, total = physics.energies(
+            2.0, 1.0,
+            separation, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 0.0,
+        )
+        self.assertEqual((potential, kinetic, total), (-1.0, 1.0, 0.0))
+
+    def test_cancellation_residual_is_body_swap_invariant(self):
+        minimum_subnormal = math.ulp(0.0)
+        separation = 2.0 * physics.G
+        tiny_velocity = math.sqrt(2.0 * minimum_subnormal)
+        first = physics.energies(
+            2.0, 1.0,
+            separation, 0.0, 1.0, 0.0,
+            0.0, 0.0, tiny_velocity, 0.0,
+        )
+        swapped = physics.energies(
+            1.0, 2.0,
+            0.0, 0.0, tiny_velocity, 0.0,
+            separation, 0.0, 1.0, 0.0,
+        )
+        self.assertEqual(first, swapped)
+        self.assertEqual(first[2], minimum_subnormal)
+
+    def test_total_kinetic_energy_overflow_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "calculated energy"):
+            physics.energies(
+                1.0, 1.0,
+                1.0, 0.0, 1.4e154, 0.0,
+                0.0, 0.0, 1.4e154, 0.0,
+            )
+
     def test_potential_energy_avoids_intermediate_underflow(self):
         expected = -physics.G * 1e-100
         for mass_a, mass_b in ((1e-300, 1e300), (1e300, 1e-300)):
@@ -1246,6 +1301,8 @@ class TestHelpFile(unittest.TestCase):
             "does not by itself prove",
             "kinetic energy of the centre of mass",
             "subtract its translational kinetic energy",
+            "small representable residual",
+            "Exact zero remains valid",
             "problem-dependent",
             "There is no universal factor",
         ):
