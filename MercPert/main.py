@@ -74,7 +74,10 @@ def main():
     annotation_corner = "upper left"
     show_jacobi_diagnostic = False
 
-    output = run_mercpert(binary_params, merc_ic, run_params)
+    try:
+        output = run_mercpert(binary_params, merc_ic, run_params)
+    except (ValueError, RuntimeError) as exc:
+        raise SystemExit(f"MercPert error: {exc}") from exc
 
     print(
         f"MercPert {output.model_version} (build {output.build_id}) — "

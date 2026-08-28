@@ -5,7 +5,7 @@ Physics for MercPert, a planar circular restricted three-body simulation.
 from dataclasses import dataclass
 import math
 
-MODEL_VERSION = "1.0.0"
+MODEL_VERSION = "1.0.1"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -62,6 +62,17 @@ R_SUN = 6.957e8             # m
 AU = 1.495978707e11         # m
 
 
+def _require_finite(name: str, *values: float) -> None:
+    """Reject booleans and non-finite numeric inputs with a clear message."""
+    for value in values:
+        try:
+            valid = not isinstance(value, bool) and math.isfinite(value)
+        except TypeError:
+            valid = False
+        if not valid:
+            raise ValueError(f"{name} must be finite real number(s).")
+
+
 @dataclass(frozen=True)
 class BinarySystemParams:
     m_sun_solar: float
@@ -90,21 +101,25 @@ def validate_binary_params(params: BinarySystemParams) -> None:
         params.m_planet_solar,
         params.binary_separation,
     )
-    if not all(math.isfinite(v) for v in values):
-        raise ValueError("Binary-system parameters must be finite.")
+    _require_finite("Binary-system parameters", *values)
     if params.m_sun_solar <= 0.0:
         raise ValueError("m_sun_solar must be positive.")
     if params.m_planet_solar <= 0.0:
         raise ValueError("m_planet_solar must be positive.")
     if params.binary_separation <= 0.0:
         raise ValueError("binary_separation must be positive.")
+    if not math.isfinite(params.m_sun_solar + params.m_planet_solar):
+        raise ValueError("The total binary mass is too large to represent.")
 
 
 def validate_mercury_ic(ic: MercuryInitialConditions) -> None:
-    if not all(math.isfinite(v) for v in (
-        ic.x_init, ic.y_init, ic.vx_init, ic.vy_init
-    )):
-        raise ValueError("Mercury initial position and velocity must be finite.")
+    _require_finite(
+        "Mercury initial position and velocity",
+        ic.x_init,
+        ic.y_init,
+        ic.vx_init,
+        ic.vy_init,
+    )
 
 
 def compute_binary_radii(params: BinarySystemParams) -> tuple[float, float]:
@@ -119,11 +134,17 @@ def compute_binary_radii(params: BinarySystemParams) -> tuple[float, float]:
 def compute_binary_angular_velocity(params: BinarySystemParams) -> float:
     """Angular velocity of the prescribed circular binary orbit."""
     validate_binary_params(params)
-    return math.sqrt(
-        GM_SUN
-        * (params.m_sun_solar + params.m_planet_solar)
-        / params.binary_separation ** 3
-    )
+    total_mu = GM_SUN * (params.m_sun_solar + params.m_planet_solar)
+    # sqrt(mu / d) / d is algebraically identical to sqrt(mu / d**3),
+    # but avoids overflowing d**3 for large (yet finite) separations.
+    omega = math.sqrt(total_mu / params.binary_separation) \
+        / params.binary_separation
+    if not math.isfinite(omega) or omega <= 0.0:
+        raise ValueError(
+            "The masses and separation produce an angular velocity that "
+            "cannot be represented by a finite positive float."
+        )
+    return omega
 
 
 def binary_positions(
@@ -136,10 +157,14 @@ def binary_positions(
     At t=0 the Sun is on the negative x-axis and the companion is on the
     positive x-axis. The orbit is counter-clockwise.
     """
+    _require_finite("t", t)
     r_sun, r_planet = compute_binary_radii(params)
     omega = compute_binary_angular_velocity(params)
-    c = math.cos(omega * t)
-    s = math.sin(omega * t)
+    phase = omega * t
+    if not math.isfinite(phase):
+        raise ValueError("omega * t is too large to represent.")
+    c = math.cos(phase)
+    s = math.sin(phase)
 
     sun = (-r_sun * c, -r_sun * s)
     planet = (r_planet * c, r_planet * s)
@@ -151,10 +176,14 @@ def binary_velocities(
     params: BinarySystemParams,
 ) -> tuple[tuple[float, float], tuple[float, float]]:
     """Return barycentric inertial velocities of the Sun and companion."""
+    _require_finite("t", t)
     r_sun, r_planet = compute_binary_radii(params)
     omega = compute_binary_angular_velocity(params)
-    c = math.cos(omega * t)
-    s = math.sin(omega * t)
+    phase = omega * t
+    if not math.isfinite(phase):
+        raise ValueError("omega * t is too large to represent.")
+    c = math.cos(phase)
+    s = math.sin(phase)
 
     sun = (r_sun * omega * s, -r_sun * omega * c)
     planet = (-r_planet * omega * s, r_planet * omega * c)
@@ -190,6 +219,7 @@ def _primary_displacements(
     y_merc: float,
     params: BinarySystemParams,
 ):
+    _require_finite("t, x_merc, and y_merc", t, x_merc, y_merc)
     (x_sun, y_sun), (x_planet, y_planet) = binary_positions(t, params)
 
     dx_sun = x_merc - x_sun
@@ -199,6 +229,14 @@ def _primary_displacements(
 
     r_sun = math.hypot(dx_sun, dy_sun)
     r_planet = math.hypot(dx_planet, dy_planet)
+
+    if not all(math.isfinite(value) for value in (
+        dx_sun, dy_sun, dx_planet, dy_planet, r_sun, r_planet
+    )):
+        raise ValueError(
+            "The requested coordinates are too large to form finite "
+            "displacements from the primaries."
+        )
 
     if r_sun == 0.0:
         raise ValueError(
@@ -239,14 +277,20 @@ def mercury_acceleration(
         dx_planet, dy_planet, r_planet,
     ) = _primary_displacements(t, x_merc, y_merc, params)
 
-    ax = -GM_SUN * (
-        params.m_sun_solar * dx_sun / r_sun ** 3
-        + params.m_planet_solar * dx_planet / r_planet ** 3
-    )
-    ay = -GM_SUN * (
-        params.m_sun_solar * dy_sun / r_sun ** 3
-        + params.m_planet_solar * dy_planet / r_planet ** 3
-    )
+    # Compute each inverse-cube vector as (component / r) / r / r.
+    # This is algebraically equivalent to component / r**3 but does not
+    # overflow merely because a perfectly valid distance has a large cube.
+    sun_factor = GM_SUN * params.m_sun_solar / r_sun / r_sun
+    planet_factor = GM_SUN * params.m_planet_solar / r_planet / r_planet
+    ax = -(sun_factor * (dx_sun / r_sun)
+           + planet_factor * (dx_planet / r_planet))
+    ay = -(sun_factor * (dy_sun / r_sun)
+           + planet_factor * (dy_planet / r_planet))
+    if not math.isfinite(ax) or not math.isfinite(ay):
+        raise ValueError(
+            "The requested state produces an acceleration that cannot be "
+            "represented by finite floats."
+        )
     return ax, ay
 
 
@@ -265,6 +309,7 @@ def jacobi_constant(
     transformed to the frame rotating with the circular binary before applying
     the usual CR3BP Jacobi integral.
     """
+    _require_finite("t, position, and velocity", t, x, y, vx, vy)
     omega = compute_binary_angular_velocity(params)
     r_sun, r_planet = distances_to_primaries(t, x, y, params)
 
@@ -279,4 +324,10 @@ def jacobi_constant(
     centrifugal_term = omega * omega * (x * x + y * y)
     speed2_rot = vx_rot * vx_rot + vy_rot * vy_rot
 
-    return centrifugal_term + potential_term - speed2_rot
+    result = centrifugal_term + potential_term - speed2_rot
+    if not math.isfinite(result):
+        raise ValueError(
+            "The requested state produces a Jacobi constant that cannot be "
+            "represented by a finite float."
+        )
+    return result

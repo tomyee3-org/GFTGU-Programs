@@ -8,7 +8,12 @@ import math
 import matplotlib.pyplot as plt
 
 from driver_mercpert import MercPertOutput
-from physics_mercpert import AU, MercuryInitialConditions, compute_binary_angular_velocity, BinarySystemParams
+from physics_mercpert import (
+    AU,
+    BinarySystemParams,
+    MercuryInitialConditions,
+    compute_binary_angular_velocity,
+)
 
 Corner = Literal["upper right", "upper left", "lower right", "lower left"]
 PositionUnit = Literal["m", "AU"]

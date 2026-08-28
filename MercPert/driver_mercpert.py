@@ -116,14 +116,32 @@ def _moving_circle_crossing_fraction(
     return min(valid) if valid else None
 
 
+def _is_finite_real(value: float) -> bool:
+    """Return whether value is a finite real number, excluding booleans."""
+    try:
+        return not isinstance(value, bool) and isfinite(value)
+    except TypeError:
+        return False
+
+
 def _validate_run_params(run: MercPertRunParams) -> None:
-    if not isfinite(run.dt) or run.dt <= 0.0:
+    if not _is_finite_real(run.dt) or run.dt <= 0.0:
         raise ValueError("dt must be a positive finite number.")
-    if not isinstance(run.max_steps, int) or isinstance(run.max_steps, bool) or run.max_steps <= 0:
+    if (
+        not isinstance(run.max_steps, int)
+        or isinstance(run.max_steps, bool)
+        or run.max_steps <= 0
+    ):
         raise ValueError("max_steps must be a positive integer.")
-    if not isfinite(run.eps1) or not (0.0 < run.eps1 < 1.0):
+    if (
+        not _is_finite_real(run.eps1)
+        or not (0.0 < run.eps1 < 1.0)
+    ):
         raise ValueError("eps1 must satisfy 0 < eps1 < 1.")
-    if not isfinite(run.eps2) or not (0.0 < run.eps2 < 1.0):
+    if (
+        not _is_finite_real(run.eps2)
+        or not (0.0 < run.eps2 < 1.0)
+    ):
         raise ValueError("eps2 must satisfy 0 < eps2 < 1.")
     if run.eps2 >= run.eps1:
         raise ValueError("eps2 should be smaller than eps1.")
@@ -131,8 +149,13 @@ def _validate_run_params(run: MercPertRunParams) -> None:
         ("sun_collision_radius", run.sun_collision_radius),
         ("companion_collision_radius", run.companion_collision_radius),
     ):
-        if not isfinite(value) or value < 0.0:
+        if not _is_finite_real(value) or value < 0.0:
             raise ValueError(f"{name} must be finite and non-negative.")
+
+
+def _all_finite(*values: float) -> bool:
+    """Return whether all integration-state values are finite floats."""
+    return all(_is_finite_real(value) for value in values)
 
 
 def run_mercpert(
@@ -152,6 +175,15 @@ def run_mercpert(
     validate_binary_params(binary_params)
     validate_mercury_ic(merc_ic)
     _validate_run_params(run_params)
+    if (
+        run_params.sun_collision_radius
+        + run_params.companion_collision_radius
+        >= binary_params.binary_separation
+    ):
+        raise ValueError(
+            "The two collision radii must sum to less than the binary "
+            "separation."
+        )
 
     t = 0.0
     x_merc, y_merc, vx_merc, vy_merc = mercury_initial_barycentric_state(
@@ -194,7 +226,10 @@ def run_mercpert(
         r_sun, r_planet = distances_to_primaries(
             t, x_merc, y_merc, binary_params
         )
-        if run_params.sun_collision_radius > 0.0 and r_sun <= run_params.sun_collision_radius:
+        if (
+            run_params.sun_collision_radius > 0.0
+            and r_sun <= run_params.sun_collision_radius
+        ):
             return "Sun"
         if (
             run_params.companion_collision_radius > 0.0
@@ -225,17 +260,37 @@ def run_mercpert(
         )
 
         accepted = False
+        last_retry_error: Optional[str] = None
 
         for _retry in range(max_retries_per_step):
+            if dt_work <= 0.0 or t + dt_work == t:
+                raise RuntimeError(
+                    "The working timestep became too small to advance time "
+                    "in floating-point arithmetic."
+                )
+
             # Euler predictor, used as the inexpensive eps1 accuracy gate.
             x_pred = x_merc + vx_merc * dt_work
             y_pred = y_merc + vy_merc * dt_work
             vx_pred = vx_merc + ax0 * dt_work
             vy_pred = vy_merc + ay0 * dt_work
 
-            ax_pred, ay_pred = mercury_acceleration(
-                t + dt_work, x_pred, y_pred, binary_params
-            )
+            if not _all_finite(x_pred, y_pred, vx_pred, vy_pred):
+                last_retry_error = "the predicted state was non-finite"
+                dt_work *= 0.5
+                continue
+
+            try:
+                ax_pred, ay_pred = mercury_acceleration(
+                    t + dt_work, x_pred, y_pred, binary_params
+                )
+            except ValueError as exc:
+                # A smaller attempt can avoid a singular or unrepresentable
+                # trial endpoint; the accepted-segment collision detector will
+                # still stop at a configured finite-radius boundary.
+                last_retry_error = str(exc)
+                dt_work *= 0.5
+                continue
 
             acc_change = _vector_relative_change(
                 ax0, ay0, ax_pred, ay_pred
@@ -263,13 +318,21 @@ def run_mercpert(
                 x_new, y_new = x_corr, y_corr
                 vx_new, vy_new = vx_corr, vy_corr
 
+                if not _all_finite(x_new, y_new, vx_new, vy_new):
+                    last_retry_error = "the corrected state was non-finite"
+                    break
+
                 if velocity_change < run_params.eps2:
                     converged = True
                     break
 
-                ax1, ay1 = mercury_acceleration(
-                    t + dt_work, x_new, y_new, binary_params
-                )
+                try:
+                    ax1, ay1 = mercury_acceleration(
+                        t + dt_work, x_new, y_new, binary_params
+                    )
+                except ValueError as exc:
+                    last_retry_error = str(exc)
+                    break
 
             if not converged:
                 dt_work *= 0.5
@@ -283,6 +346,8 @@ def run_mercpert(
                 "MercPert could not find a converged timestep after "
                 f"{max_retries_per_step} retries. Try a smaller dt or less "
                 "extreme initial conditions."
+                + (f" Last trial error: {last_retry_error}."
+                   if last_retry_error else "")
             )
 
         # Before committing the accepted endpoint, test the entire accepted
