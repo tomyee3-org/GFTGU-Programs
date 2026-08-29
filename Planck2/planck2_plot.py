@@ -54,9 +54,21 @@ def plot_planck2(
         threshold = y_frac_window * result.y_peak
         visible = [i for i, y in enumerate(ys) if y >= threshold]
         if visible:
-            lo, hi = coords[min(visible)], coords[max(visible)]
+            first = min(visible)
+            last = max(visible)
+
+            # At a threshold of 1, only the sampled peak may be visible.  Add
+            # its nearest neighbors so Matplotlib receives a genuine interval
+            # rather than identical left and right limits.
+            if first == last:
+                first = max(0, first - 1)
+                last = min(len(coords) - 1, last + 1)
+
+            lo, hi = coords[first], coords[last]
             margin = 0.05 * (hi - lo)
             xlim = (max(coords[0], lo - margin), min(coords[-1], hi + margin))
+            if xlim[0] == xlim[1]:
+                xlim = None
         else:
             xlim = None
     else:

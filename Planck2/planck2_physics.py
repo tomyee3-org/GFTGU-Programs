@@ -25,7 +25,7 @@ import math
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.0.0"
+MODEL_VERSION = "1.0.1"
 BUILD_ID_COVERS = (
     "planck2_physics.py",
     "planck2_driver.py",
@@ -65,6 +65,8 @@ BUILD_ID = _compute_build_id()
 H_PLANCK = 6.62607015e-34
 C_LIGHT = 2.99792458e8
 K_BOLTZMANN = 1.380649e-23
+WIEN_SCALE = H_PLANCK * C_LIGHT / K_BOLTZMANN
+FREQUENCY_SCALE = K_BOLTZMANN / H_PLANCK
 SIGMA_SB = (
     2.0 * math.pi**5 * K_BOLTZMANN**4
     / (15.0 * H_PLANCK**3 * C_LIGHT**2)
@@ -105,7 +107,7 @@ class PlanckDomain:
 
 
 def validate_quantity(quantity: str) -> None:
-    if quantity not in SHAPE_EXPONENT:
+    if not isinstance(quantity, str) or quantity not in SHAPE_EXPONENT:
         raise ValueError(
             'quantity must be "wavelength", "frequency", or "energy_density".'
         )
@@ -162,9 +164,10 @@ def coordinate_jacobian(quantity: PlanckQuantity, x: float, T: float) -> float:
 
     if quantity == "wavelength":
         # lambda = hc/(x k T)
-        return H_PLANCK * C_LIGHT / (K_BOLTZMANN * T * x * x)
+        # This ordering avoids premature underflow in k*T at very low T.
+        return WIEN_SCALE / x / x / T
     # nu = x k T / h
-    return K_BOLTZMANN * T / H_PLANCK
+    return FREQUENCY_SCALE * T
 
 
 def exact_physical_integral(quantity: PlanckQuantity, T: float) -> float:
@@ -193,7 +196,8 @@ def x_to_wavelength(x: float, T: float) -> float:
         or T <= 0.0
     ):
         raise ValueError("x and T must be finite positive numbers.")
-    return H_PLANCK * C_LIGHT / (x * K_BOLTZMANN * T)
+    # This ordering avoids premature underflow in x*k*T at very low T.
+    return WIEN_SCALE / x / T
 
 
 def x_to_frequency(x: float, T: float) -> float:
@@ -209,7 +213,7 @@ def x_to_frequency(x: float, T: float) -> float:
         or T <= 0.0
     ):
         raise ValueError("x and T must be finite positive numbers.")
-    return x * K_BOLTZMANN * T / H_PLANCK
+    return FREQUENCY_SCALE * x * T
 
 
 def units_label(quantity: PlanckQuantity) -> tuple[str, str]:

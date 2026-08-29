@@ -21,6 +21,12 @@ from planck2_physics import (
 )
 
 
+# Each sample is retained in three Python lists for plotting.  This generous
+# ceiling prevents an accidental edit from exhausting memory while remaining
+# far above the resolutions used in the suggested experiments.
+MAX_STEPS = 1_000_000
+
+
 @dataclass
 class Planck2Result:
     model_version: str
@@ -60,10 +66,20 @@ def run_planck2(
     domain.validate()
     if not isinstance(T, (int, float)) or isinstance(T, bool) or not math.isfinite(T) or T <= 0.0:
         raise ValueError("Temperature must be a finite positive number.")
-    if not isinstance(n_steps, int) or isinstance(n_steps, bool) or n_steps < 1:
-        raise ValueError("n_steps must be a positive integer.")
+    if (
+        not isinstance(n_steps, int)
+        or isinstance(n_steps, bool)
+        or not 1 <= n_steps <= MAX_STEPS
+    ):
+        raise ValueError(
+            f"n_steps must be an integer from 1 through {MAX_STEPS}."
+        )
 
     dx = (domain.x_max - domain.x_min) / n_steps
+    if not math.isfinite(dx) or dx <= 0.0:
+        raise ValueError(
+            "The domain and n_steps must produce a finite positive step size."
+        )
     pref = prefactor(quantity, T)
     p = SHAPE_EXPONENT[quantity]
 
@@ -95,7 +111,9 @@ def run_planck2(
     physical_integral = 0.0
 
     for i in range(1, n_steps + 1):
-        x = domain.x_min + i * dx
+        # Preserve the requested right endpoint exactly.  The general formula
+        # can round the final value slightly below or above x_max.
+        x = domain.x_max if i == n_steps else domain.x_min + i * dx
         f = math.exp(ln_shape_function(x, p, domain))
         y = pref * f
         jac = coordinate_jacobian(quantity, x, T)
