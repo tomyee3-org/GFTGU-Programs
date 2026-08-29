@@ -8,7 +8,7 @@ adaptive integrator.
 """
 
 from dataclasses import dataclass
-from typing import List, Literal
+from typing import get_args, List, Literal
 from math import isfinite, pi
 from numbers import Real
 
@@ -24,6 +24,7 @@ from physics_star import (
 )
 
 OutputType = Literal["pressure", "density", "temperature", "mass"]
+OUTPUT_TYPES = get_args(OutputType)
 
 
 @dataclass
@@ -73,9 +74,10 @@ def _validate_inputs(p_c, T_c, mu, gamma, max_points, steps_per_scale, output_ty
     if (not isinstance(steps_per_scale, int) or isinstance(steps_per_scale, bool)
             or steps_per_scale <= 0):
         raise ValueError("steps_per_scale must be a positive integer.")
-    if output_type not in ("pressure", "density", "temperature", "mass"):
+    if output_type not in OUTPUT_TYPES:
+        choices = ", ".join(f'"{name}"' for name in OUTPUT_TYPES)
         raise ValueError(
-            'output_type must be "pressure", "density", "temperature", or "mass".'
+            f"output_type must be one of {choices}."
         )
 
 
@@ -95,6 +97,11 @@ def integrate_star(
     D = polytropic_D(rho_c, p_c, gamma)
     scale = radial_scale(p_c, rho_c)
     dr = scale / steps_per_scale
+    if not isfinite(dr) or dr <= 0.0:
+        raise OverflowError(
+            "The requested radial step is outside the positive finite "
+            "floating-point range."
+        )
     restart_count = 0
     max_restarts = 64
 
@@ -142,7 +149,11 @@ def integrate_star(
                 radius[j] = r_prev + dr_surface
                 pressure[j] = 0.0
                 density[j] = 0.0
-                temperature[j] = 0.0
+                temperature[j] = temperature_from_prho(0.0, 0.0, mu)
+                # Retain the left-endpoint density for the fractional shell,
+                # consistently with forward Euler elsewhere.  Because density
+                # falls to zero at the surface, this first-order update slightly
+                # overestimates the final shell's mass.
                 mass[j] = mass_step(m_prev, r_prev, rho_prev, dr_surface)
 
                 surface_index = j

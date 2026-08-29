@@ -5,7 +5,7 @@ from driver_star import StarResult
 
 
 def plot_star_structure(result: StarResult, log_y: bool = False):
-    """Plot the selected stellar quantity versus radius."""
+    """Plot the selected stellar quantity and return its figure and axes."""
     output_type = result.output_type
 
     if output_type == "pressure":
@@ -45,3 +45,4 @@ def plot_star_structure(result: StarResult, log_y: bool = False):
     ax.grid(True, which="both" if log_y else "major")
     plt.tight_layout()
     plt.show()
+    return fig, ax

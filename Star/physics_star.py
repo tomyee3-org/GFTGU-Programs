@@ -13,7 +13,7 @@ from numbers import Real
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.0.0"
+MODEL_VERSION = "1.0.2"
 BUILD_ID_COVERS = (
     "physics_star.py",
     "driver_star.py",
@@ -63,12 +63,23 @@ def _validate_finite_real(name, value):
         raise ValueError(f"{name} must be a finite real number.")
 
 
+def _require_positive_finite_result(name, value):
+    """Reject floating-point overflow or underflow in a positive result."""
+    if not isfinite(value) or value <= 0.0:
+        raise OverflowError(
+            f"{name} is outside the positive finite floating-point range."
+        )
+    return value
+
+
 def q_factor(mu: float) -> float:
     """Return m_p * mu / k_B for the ideal-gas relation."""
     _validate_finite_real("mu", mu)
     if mu <= 0.0:
         raise ValueError("mu must be positive.")
-    return MPROTON * mu / k_BOLTZMANN
+    return _require_positive_finite_result(
+        "q_factor", MPROTON * mu / k_BOLTZMANN
+    )
 
 
 def central_density(p_c: float, T_c: float, mu: float) -> float:
@@ -80,7 +91,11 @@ def central_density(p_c: float, T_c: float, mu: float) -> float:
         raise ValueError("p_c must be positive.")
     if T_c <= 0.0:
         raise ValueError("T_c must be positive.")
-    return p_c * q_factor(mu) / T_c
+    # Divide first to avoid an avoidable overflow in p_c*q when the final
+    # density is nevertheless representable.
+    return _require_positive_finite_result(
+        "central density", (p_c / T_c) * q_factor(mu)
+    )
 
 
 def polytropic_D(rho_c: float, p_c: float, gamma: float) -> float:
@@ -94,7 +109,9 @@ def polytropic_D(rho_c: float, p_c: float, gamma: float) -> float:
         raise ValueError("p_c must be positive.")
     if gamma <= 1.2:
         raise ValueError("gamma must be greater than 1.2 for a finite-radius polytrope.")
-    return rho_c / (p_c ** (1.0 / gamma))
+    return _require_positive_finite_result(
+        "polytropic D", rho_c / (p_c ** (1.0 / gamma))
+    )
 
 
 def radial_scale(p_c: float, rho_c: float) -> float:
@@ -112,7 +129,11 @@ def radial_scale(p_c: float, rho_c: float) -> float:
         raise ValueError("p_c must be positive.")
     if rho_c <= 0.0:
         raise ValueError("rho_c must be positive.")
-    return sqrt(p_c / G_NEWTON) / rho_c
+    # This algebraically equivalent form avoids overflow in p_c/G for very
+    # large, but still finite, pressures.
+    return _require_positive_finite_result(
+        "radial scale", sqrt(p_c) / (sqrt(G_NEWTON) * rho_c)
+    )
 
 
 # Backward-compatible name retained for callers of the earlier Python version.
@@ -136,7 +157,10 @@ def hydrostatic_step(p_prev: float, rho_prev: float,
         raise ValueError("r_prev must be positive in hydrostatic_step().")
     if dr <= 0.0:
         raise ValueError("dr must be positive.")
-    return p_prev - G_NEWTON * rho_prev * mass_prev * dr / (r_prev * r_prev)
+    result = p_prev - G_NEWTON * rho_prev * mass_prev * dr / (r_prev * r_prev)
+    if not isfinite(result):
+        raise OverflowError("hydrostatic pressure step is not finite.")
+    return result
 
 
 def mass_step(mass_prev: float, r_prev: float, rho_prev: float, dr: float) -> float:
@@ -152,7 +176,10 @@ def mass_step(mass_prev: float, r_prev: float, rho_prev: float, dr: float) -> fl
         raise ValueError("rho_prev must not be negative.")
     if dr <= 0.0:
         raise ValueError("dr must be positive.")
-    return mass_prev + 4.0 * pi * r_prev * r_prev * rho_prev * dr
+    result = mass_prev + 4.0 * pi * r_prev * r_prev * rho_prev * dr
+    if not isfinite(result):
+        raise OverflowError("enclosed-mass step is not finite.")
+    return result
 
 
 def density_from_pressure(p: float, D: float, gamma: float) -> float:
@@ -166,7 +193,11 @@ def density_from_pressure(p: float, D: float, gamma: float) -> float:
         raise ValueError("D must be positive.")
     if gamma <= 1.2:
         raise ValueError("gamma must be greater than 1.2 for a finite-radius polytrope.")
-    return D * (p ** (1.0 / gamma))
+    if p == 0.0:
+        return 0.0
+    return _require_positive_finite_result(
+        "density", D * (p ** (1.0 / gamma))
+    )
 
 
 def temperature_from_prho(p: float, rho: float, mu: float) -> float:
@@ -176,8 +207,11 @@ def temperature_from_prho(p: float, rho: float, mu: float) -> float:
     _validate_finite_real("mu", mu)
     if p < 0.0:
         raise ValueError("p must not be negative when computing temperature.")
+    q = q_factor(mu)
     if rho <= 0.0:
         if p == 0.0 and rho == 0.0:
             return 0.0
         raise ValueError("rho must be positive when p is positive.")
-    return q_factor(mu) * p / rho
+    if p == 0.0:
+        return 0.0
+    return _require_positive_finite_result("temperature", q * p / rho)
