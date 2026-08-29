@@ -78,13 +78,15 @@ def _require_positive_finite_result(name, value):
 
 
 def _multiply_divide_positive(a, b, c, name):
-    """Return a*b/c without avoidable intermediate overflow or underflow.
+    """Combine three positive finite operands as a*b/c without range loss.
 
+    The operands must already be representable positive finite floats; this
+    helper does not range-protect any upstream calculations that produced them.
     The two ordinary groupings are tried first, preserving their normal
     arithmetic for teaching-scale inputs.  If each loses range prematurely,
     binary mantissas and exponents are combined separately.  A result is
-    rejected only when the final mathematical value lies outside the positive
-    finite floating-point range.
+    rejected only when a*b/c itself lies outside the positive finite
+    floating-point range.
     """
     result = (a / c) * b
     if isfinite(result) and result > 0.0:

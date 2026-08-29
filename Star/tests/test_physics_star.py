@@ -75,13 +75,16 @@ DEFAULT_PARAMETER_NAMES = (
 
 
 def extract_main_defaults(path):
-    """Extract main()'s literal user settings from the Python syntax tree."""
+    """Extract the intentional direct-literal interface in main()."""
     tree = ast.parse(Path(path).read_text(encoding="utf-8"), filename=str(path))
-    main_function = next(
+    main_functions = [
         node
         for node in tree.body
         if isinstance(node, ast.FunctionDef) and node.name == "main"
-    )
+    ]
+    if len(main_functions) != 1:
+        raise AssertionError("main.py must define exactly one main() function.")
+    main_function = main_functions[0]
     defaults = {}
     for statement in main_function.body:
         if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
@@ -93,7 +96,17 @@ def extract_main_defaults(path):
         else:
             continue
         if isinstance(target, ast.Name) and target.id in DEFAULT_PARAMETER_NAMES:
-            defaults[target.id] = ast.literal_eval(value)
+            try:
+                defaults[target.id] = ast.literal_eval(value)
+            except (TypeError, ValueError) as error:
+                raise AssertionError(
+                    f"main() setting {target.id} must be a direct literal assignment."
+                ) from error
+    missing = set(DEFAULT_PARAMETER_NAMES) - set(defaults)
+    if missing:
+        raise AssertionError(
+            "main() is missing direct literal settings: " + ", ".join(sorted(missing))
+        )
     return defaults
 
 
@@ -322,6 +335,20 @@ class TestLocationAndReleaseMetadata(unittest.TestCase):
         for name in CORE_MODULE_FILENAMES:
             source = (MODULE_DIR / name).read_text(encoding="utf-8")
             ast.parse(source, filename=name, feature_version=(3, 10))
+
+    def test_main_default_extractor_reports_missing_main(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "main.py"
+            path.write_text("value = 1\n", encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, "exactly one main"):
+                extract_main_defaults(path)
+
+    def test_main_default_extractor_reports_nonliteral_setting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "main.py"
+            path.write_text("def main():\n    p_c = 1 * 2\n", encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, "p_c must be a direct literal"):
+                extract_main_defaults(path)
 
 
 class TestPhysicsRelations(unittest.TestCase):
@@ -599,6 +626,10 @@ class TestIntegratedStar(unittest.TestCase):
 
     def test_legacy_java_transcription_has_frozen_numeric_anchors(self):
         legacy = legacy_java_default_profiles()
+        # Intentional bit-level regression policy for the supported CPython
+        # environment.  If cross-runtime reproducibility becomes a goal, these
+        # anchors should move to a designated-runtime hex fixture or acquire
+        # explicitly justified tolerances.
         expected = {
             1: (
                 526453.7024821984,

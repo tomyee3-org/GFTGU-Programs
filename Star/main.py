@@ -26,6 +26,9 @@ def parse_args():
 def main():
     parse_args()
 
+    # Student-editable interface: keep these settings as direct literal
+    # assignments.  Their names and values are synchronized with the Help
+    # parameter table by the release regression suite.
     # Default pedagogical model: chosen to give approximately solar total
     # mass and radius.  The parameters should not be interpreted as a
     # high-fidelity model of the Sun's detailed interior or composition.
