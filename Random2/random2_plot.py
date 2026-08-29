@@ -3,6 +3,8 @@ Plotting routines for Random2.
 """
 
 from dataclasses import dataclass
+import math
+from numbers import Real
 from typing import List, Tuple
 import statistics
 
@@ -37,8 +39,15 @@ def plot_scaled_distance(
         raise ValueError(
             "lengths and avg_dist must be non-empty lists of equal length."
         )
-    if any(x <= 0.0 for x in lengths) or any(y <= 0.0 for y in avg_dist):
-        raise ValueError("log-log plot values must all be positive.")
+    values = [*lengths, *avg_dist]
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, Real)
+        or not math.isfinite(float(value))
+        or value <= 0.0
+        for value in values
+    ):
+        raise ValueError("log-log plot values must be positive finite numbers.")
 
     fig, ax = plt.subplots(figsize=(8, 6))
     ax.loglog(lengths, avg_dist, marker="o", linestyle="-")
@@ -117,6 +126,18 @@ def plot_walk2d(
                     linestyle="-",
                     zorder=2,
                 )
+        elif walk.points:
+            # Distinguish a safety-capped path from an escaped path whose
+            # optional outgoing ray has been suppressed.
+            ax.plot(
+                walk.points[-1][0],
+                walk.points[-1][1],
+                marker="x",
+                color=color,
+                markersize=7,
+                markeredgewidth=1.4,
+                zorder=3,
+            )
 
     ax.set_aspect("equal", "box")
     ax.set_xlabel("x (distance units)")
@@ -134,6 +155,8 @@ def plot_walk2d(
         f"reference steps = {result.reference_steps}",
         f"walks = {len(result.walks)}  (escaped: {n_escaped})",
     ]
+    if n_escaped < len(result.walks):
+        text_lines.append("x = step cap reached")
     if escaped_steps:
         text_lines.append(
             f"median escape steps = {statistics.median(escaped_steps):.0f}"

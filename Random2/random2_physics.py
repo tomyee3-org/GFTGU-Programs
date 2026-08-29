@@ -32,7 +32,7 @@ from typing import Literal, Optional, Tuple
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.0.0"
+MODEL_VERSION = "1.0.1"
 BUILD_ID_COVERS = (
     "random2_physics.py",
     "random2_driver.py",
@@ -81,6 +81,27 @@ def _require_positive_finite_number(name: str, value: Real) -> float:
     if not math.isfinite(numeric) or numeric <= 0.0:
         raise ValueError(f"{name} must be a positive finite number.")
     return numeric
+
+
+def _require_finite_point(name: str, value: Point) -> Point:
+    """Validate and return a two-dimensional point with finite coordinates."""
+    try:
+        x, y = value
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must contain exactly two finite numbers.") from None
+
+    if (
+        isinstance(x, bool)
+        or isinstance(y, bool)
+        or not isinstance(x, Real)
+        or not isinstance(y, Real)
+    ):
+        raise ValueError(f"{name} must contain exactly two finite numbers.")
+
+    point = (float(x), float(y))
+    if not all(math.isfinite(coordinate) for coordinate in point):
+        raise ValueError(f"{name} must contain exactly two finite numbers.")
+    return point
 
 
 def generate_component_step(
@@ -173,6 +194,8 @@ def circle_crossing_fraction(
 
     Return None if the segment has no crossing in (0, 1].
     """
+    p0 = _require_finite_point("p0", p0)
+    p1 = _require_finite_point("p1", p1)
     radius = _require_positive_finite_number("radius", radius)
 
     x0, y0 = p0
@@ -206,6 +229,13 @@ def circle_crossing_fraction(
 
 def point_at(p0: Point, p1: Point, t: float) -> Point:
     """Return the linearly interpolated point p0 + t*(p1-p0)."""
+    p0 = _require_finite_point("p0", p0)
+    p1 = _require_finite_point("p1", p1)
+    if isinstance(t, bool) or not isinstance(t, Real):
+        raise ValueError("t must be a finite number.")
+    t = float(t)
+    if not math.isfinite(t):
+        raise ValueError("t must be a finite number.")
     return (
         p0[0] + t * (p1[0] - p0[0]),
         p0[1] + t * (p1[1] - p0[1]),
