@@ -6,6 +6,9 @@ from driver_star import StarResult
 
 def plot_star_structure(result: StarResult, log_y: bool = False):
     """Plot the selected stellar quantity and return its figure and axes."""
+    if type(log_y) is not bool:
+        raise TypeError("log_y must be a bool.")
+
     output_type = result.output_type
 
     if output_type == "pressure":
@@ -23,10 +26,9 @@ def plot_star_structure(result: StarResult, log_y: bool = False):
     else:
         raise ValueError(f"Unknown output_type: {output_type}")
 
-    fig, ax = plt.subplots()
-
     # A logarithmic axis cannot display the exact zero at the interpolated
-    # stellar surface, so omit only that final zero-valued point when needed.
+    # stellar surface.  Validate and prepare log data before creating a figure
+    # so rejected calls cannot leak an unused Matplotlib figure.
     if log_y:
         if output_type == "mass":
             raise ValueError("log_y is not useful for mass because m(0) = 0.")
@@ -34,6 +36,10 @@ def plot_star_structure(result: StarResult, log_y: bool = False):
         if not pairs:
             raise ValueError("No positive values are available for a logarithmic plot.")
         x_plot, y_plot = zip(*pairs)
+
+    fig, ax = plt.subplots()
+
+    if log_y:
         ax.plot(x_plot, y_plot)
         ax.set_yscale("log")
     else:

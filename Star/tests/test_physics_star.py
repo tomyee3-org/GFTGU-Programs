@@ -10,6 +10,7 @@ program modules.
 
 import ast
 import hashlib
+from html.parser import HTMLParser
 import math
 import os
 from pathlib import Path
@@ -61,15 +62,97 @@ import physics_star as phys  # noqa: E402
 import plot_star  # noqa: E402
 
 
-DEFAULTS = dict(
-    p_c=7.158e15,
-    T_c=2.263e7,
-    mu=1.285,
-    gamma=1.36,
-    max_points=2000,
-    steps_per_scale=400,
-    output_type="pressure",
+DEFAULT_PARAMETER_NAMES = (
+    "p_c",
+    "T_c",
+    "mu",
+    "gamma",
+    "max_points",
+    "steps_per_scale",
+    "output_type",
+    "log_y",
 )
+
+
+def extract_main_defaults(path):
+    """Extract main()'s literal user settings from the Python syntax tree."""
+    tree = ast.parse(Path(path).read_text(encoding="utf-8"), filename=str(path))
+    main_function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "main"
+    )
+    defaults = {}
+    for statement in main_function.body:
+        if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
+            target = statement.targets[0]
+            value = statement.value
+        elif isinstance(statement, ast.AnnAssign):
+            target = statement.target
+            value = statement.value
+        else:
+            continue
+        if isinstance(target, ast.Name) and target.id in DEFAULT_PARAMETER_NAMES:
+            defaults[target.id] = ast.literal_eval(value)
+    return defaults
+
+
+class InputParameterTableParser(HTMLParser):
+    """Map each parameter name to its default cell in the Help table."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.in_parameters = False
+        self.section_depth = 0
+        self.in_cell = False
+        self.cell_text = []
+        self.row = []
+        self.defaults = {}
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if tag == "section":
+            if self.in_parameters:
+                self.section_depth += 1
+            elif attributes.get("id") == "parameters":
+                self.in_parameters = True
+                self.section_depth = 1
+        elif self.in_parameters and tag == "tr":
+            self.row = []
+        elif self.in_parameters and tag == "td":
+            self.in_cell = True
+            self.cell_text = []
+
+    def handle_data(self, data):
+        if self.in_cell:
+            self.cell_text.append(data)
+
+    def handle_endtag(self, tag):
+        if self.in_parameters and tag == "td" and self.in_cell:
+            self.row.append("".join(self.cell_text).strip())
+            self.in_cell = False
+        elif self.in_parameters and tag == "tr":
+            if len(self.row) >= 2 and self.row[0] in DEFAULT_PARAMETER_NAMES:
+                self.defaults[self.row[0]] = ast.literal_eval(self.row[1])
+        elif self.in_parameters and tag == "section":
+            self.section_depth -= 1
+            if self.section_depth == 0:
+                self.in_parameters = False
+
+
+def extract_help_defaults(html_text):
+    parser = InputParameterTableParser()
+    parser.feed(html_text)
+    parser.close()
+    return parser.defaults
+
+
+MAIN_DEFAULTS = extract_main_defaults(MODULE_DIR / "main.py")
+DEFAULTS = {
+    name: MAIN_DEFAULTS[name]
+    for name in DEFAULT_PARAMETER_NAMES
+    if name != "log_y"
+}
 
 
 def integrate(**changes):
@@ -81,6 +164,11 @@ def integrate(**changes):
 
 def legacy_java_default_profiles():
     """Reproduce Schutz's supplied Java recurrence independently.
+
+    This transcription follows Star-Java(3).html, sections "Preliminary
+    definitions of parameters and constants" and "Program code," from the
+    declarations through process()'s initialization, while/for integration,
+    negative-pressure stop, and final-array truncation.
 
     The Java output excludes the first negative-pressure point, so the returned
     profiles end at its last positive-pressure grid point.
@@ -220,7 +308,9 @@ class TestLocationAndReleaseMetadata(unittest.TestCase):
         self.assertEqual(phys.BUILD_ID, digest.hexdigest()[:12])
 
     def test_build_id_returns_unknown_when_source_read_fails(self):
-        with mock.patch("builtins.open", side_effect=OSError("induced failure")):
+        with mock.patch.object(
+            phys, "_read_build_source", side_effect=OSError("induced failure")
+        ):
             self.assertEqual(phys._compute_build_id(), "unknown")
 
     def test_output_choices_come_from_literal_type(self):
@@ -250,6 +340,18 @@ class TestPhysicsRelations(unittest.TestCase):
             phys.k_BOLTZMANN * 2.263e7
         )
         self.assertAlmostEqual(rho, expected, delta=1e-10 * expected)
+
+    def test_central_density_avoids_intermediate_underflow(self):
+        p_c, T_c, mu = 1e-300, 1e100, 1e300
+        q = phys.q_factor(mu)
+        self.assertEqual(p_c / T_c, 0.0)
+        expected = (p_c * q) / T_c
+        self.assertGreater(expected, 0.0)
+        self.assertEqual(phys.central_density(p_c, T_c, mu), expected)
+
+    def test_central_density_rejects_genuine_final_underflow(self):
+        with self.assertRaisesRegex(OverflowError, "central density"):
+            phys.central_density(5e-324, 1e308, 1.0)
 
     def test_polytropic_normalization_reconstructs_central_density(self):
         rho_c = 4.9e4
@@ -495,6 +597,56 @@ class TestIntegratedStar(unittest.TestCase):
         self.assertEqual(result.mass[:count], legacy["mass"])
         self.assertEqual(count + 1, len(result.radius))
 
+    def test_legacy_java_transcription_has_frozen_numeric_anchors(self):
+        legacy = legacy_java_default_profiles()
+        expected = {
+            1: (
+                526453.7024821984,
+                7158000000000000.0,
+                49186.69619012853,
+                22630000.0,
+                3.00619269355824e22,
+            ),
+            100: (
+                52645370.24821989,
+                6319103110732623.0,
+                44878.83604809334,
+                21895474.91755406,
+                2.8062254448363805e28,
+            ),
+            500: (
+                263226851.2410976,
+                516280878388977.75,
+                7115.593707497296,
+                11282761.561805945,
+                1.2589278571953611e30,
+            ),
+            1000: (
+                526453702.4822091,
+                1969213236762.1382,
+                118.53148363027883,
+                2583446.893335407,
+                1.9641995917135964e30,
+            ),
+            1323: (
+                696498248.3839673,
+                1597.6458801021145,
+                2.451393151756623e-05,
+                10134.633963135651,
+                1.9824511308692555e30,
+            ),
+        }
+        profiles = (
+            legacy["radius"],
+            legacy["pressure"],
+            legacy["density"],
+            legacy["temperature"],
+            legacy["mass"],
+        )
+        for index, values in expected.items():
+            with self.subTest(index=index):
+                self.assertEqual(tuple(profile[index] for profile in profiles), values)
+
     def test_all_output_modes_compute_identical_profiles(self):
         baseline = self.default
         for mode in ("pressure", "density", "temperature", "mass"):
@@ -516,6 +668,18 @@ class TestIntegratedStar(unittest.TestCase):
             baseline.radial_step * 2 ** restarted.restart_count,
         )
         self.assertLessEqual(len(restarted.radius), 100)
+
+    def test_restart_exhaustion_raises_bounded_runtime_error(self):
+        def pressure_never_falls(p_prev, rho_prev, mass_prev, r_prev, dr):
+            return p_prev
+
+        with mock.patch.object(
+            driver_star, "hydrostatic_step", side_effect=pressure_never_falls
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "Unable to reach the zero-pressure surface"
+            ):
+                integrate(max_points=3, steps_per_scale=400)
 
     def test_driver_rejects_invalid_physical_inputs(self):
         for name in ("p_c", "T_c", "mu", "gamma"):
@@ -641,8 +805,26 @@ class TestPlottingAndEntryPoint(unittest.TestCase):
         self.assertEqual(len(axes.lines[0].get_ydata()), len(self.default.pressure) - 1)
 
     def test_log_mass_is_rejected(self):
+        figures_before = plot_star.plt.get_fignums()
         with self.assertRaises(ValueError):
             plot_star.plot_star_structure(integrate(output_type="mass"), log_y=True)
+        self.assertEqual(plot_star.plt.get_fignums(), figures_before)
+
+    def test_empty_log_data_is_rejected_without_figure_leak(self):
+        result = integrate()
+        result.pressure = [0.0] * len(result.pressure)
+        figures_before = plot_star.plt.get_fignums()
+        with self.assertRaisesRegex(ValueError, "No positive values"):
+            plot_star.plot_star_structure(result, log_y=True)
+        self.assertEqual(plot_star.plt.get_fignums(), figures_before)
+
+    def test_log_y_requires_a_strict_bool_without_figure_leak(self):
+        for bad in ("False", 1, 0, None, [], object()):
+            with self.subTest(log_y=bad):
+                figures_before = plot_star.plt.get_fignums()
+                with self.assertRaisesRegex(TypeError, "log_y must be a bool"):
+                    plot_star.plot_star_structure(self.default, log_y=bad)
+                self.assertEqual(plot_star.plt.get_fignums(), figures_before)
 
     def test_unknown_plot_type_is_rejected(self):
         result = integrate()
@@ -698,10 +880,12 @@ class TestHelpFile(unittest.TestCase):
         self.assertEqual(match.group(1), phys.MODEL_VERSION)
         self.assertEqual(match.group(2), phys.BUILD_ID)
 
-    def test_help_defaults_and_output_modes_match_main(self):
-        for value in ("7.158e15", "2.263e7", "1.285", "1.36", "2000", "400"):
-            self.assertIn(value, self.html)
-        for mode in ("pressure", "density", "temperature", "mass"):
+    def test_help_default_table_matches_main_assignments_structurally(self):
+        self.assertEqual(set(MAIN_DEFAULTS), set(DEFAULT_PARAMETER_NAMES))
+        self.assertEqual(extract_help_defaults(self.html), MAIN_DEFAULTS)
+
+    def test_help_lists_every_runtime_output_mode(self):
+        for mode in driver_star.OUTPUT_TYPES:
             self.assertIn(f'<code>"{mode}"</code>', self.html)
 
     def test_help_states_model_scope_and_finite_radius_condition(self):

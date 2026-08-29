@@ -7,19 +7,25 @@ held to one polytropic law throughout the star, and hydrostatic equilibrium
 and enclosed mass are integrated outward.
 """
 
-from math import isfinite, pi, sqrt
+from math import frexp, isfinite, ldexp, pi, sqrt
 from numbers import Real
 
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.0.2"
+MODEL_VERSION = "1.0.3"
 BUILD_ID_COVERS = (
     "physics_star.py",
     "driver_star.py",
     "main.py",
     "plot_star.py",
 )
+
+
+def _read_build_source(path):
+    """Read one Build-ID source with normalized newlines."""
+    with open(path, "r", encoding="utf-8", newline=None) as source:
+        return source.read().encode("utf-8")
 
 
 def _compute_build_id() -> str:
@@ -37,8 +43,7 @@ def _compute_build_id() -> str:
         digest = hashlib.sha256()
         for name in BUILD_ID_COVERS:
             path = os.path.join(here, name)
-            with open(path, "r", encoding="utf-8", newline=None) as source:
-                content = source.read().encode("utf-8")
+            content = _read_build_source(path)
             digest.update(name.encode("utf-8"))
             digest.update(len(content).to_bytes(8, "big"))
             digest.update(content)
@@ -72,6 +77,35 @@ def _require_positive_finite_result(name, value):
     return value
 
 
+def _multiply_divide_positive(a, b, c, name):
+    """Return a*b/c without avoidable intermediate overflow or underflow.
+
+    The two ordinary groupings are tried first, preserving their normal
+    arithmetic for teaching-scale inputs.  If each loses range prematurely,
+    binary mantissas and exponents are combined separately.  A result is
+    rejected only when the final mathematical value lies outside the positive
+    finite floating-point range.
+    """
+    result = (a / c) * b
+    if isfinite(result) and result > 0.0:
+        return result
+
+    result = (a * b) / c
+    if isfinite(result) and result > 0.0:
+        return result
+
+    a_mantissa, a_exponent = frexp(a)
+    b_mantissa, b_exponent = frexp(b)
+    c_mantissa, c_exponent = frexp(c)
+    mantissa, adjustment = frexp(a_mantissa * b_mantissa / c_mantissa)
+    exponent = a_exponent + b_exponent - c_exponent + adjustment
+    try:
+        result = ldexp(mantissa, exponent)
+    except OverflowError:
+        result = float("inf")
+    return _require_positive_finite_result(name, result)
+
+
 def q_factor(mu: float) -> float:
     """Return m_p * mu / k_B for the ideal-gas relation."""
     _validate_finite_real("mu", mu)
@@ -91,10 +125,10 @@ def central_density(p_c: float, T_c: float, mu: float) -> float:
         raise ValueError("p_c must be positive.")
     if T_c <= 0.0:
         raise ValueError("T_c must be positive.")
-    # Divide first to avoid an avoidable overflow in p_c*q when the final
-    # density is nevertheless representable.
-    return _require_positive_finite_result(
-        "central density", (p_c / T_c) * q_factor(mu)
+    # Range-aware regrouping avoids both p_c*q overflow and p_c/T_c
+    # underflow when the complete density remains representable.
+    return _multiply_divide_positive(
+        p_c, q_factor(mu), T_c, "central density"
     )
 
 
