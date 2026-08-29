@@ -6,6 +6,7 @@ modules during upload.
 """
 
 import ast
+from dataclasses import FrozenInstanceError, replace
 import hashlib
 from html.parser import HTMLParser
 import math
@@ -196,9 +197,10 @@ class TestFileLocationAndReleaseMetadata(unittest.TestCase):
             phys._build_id_from_texts(decomposed),
         )
 
-    def test_build_id_returns_unknown_for_incomplete_tree(self):
+    def test_build_id_fails_fast_for_incomplete_tree(self):
         with tempfile.TemporaryDirectory() as temp_name:
-            self.assertEqual(phys._compute_build_id(temp_name), "unknown")
+            with self.assertRaisesRegex(RuntimeError, "Cannot compute BUILD_ID"):
+                phys._compute_build_id(temp_name)
 
     def test_help_version_and_build_match_program(self):
         text = HELP_FILE.read_text(encoding="utf-8")
@@ -337,12 +339,93 @@ class TestPhysicalConstantsAndConversions(unittest.TestCase):
         temperature = 5900.0
         radiance = phys.SIGMA_SB * temperature**4 / math.pi
         energy_density = 4.0 * phys.SIGMA_SB * temperature**4 / phys.C_LIGHT
-        self.assertEqual(phys.exact_physical_integral("wavelength", temperature), radiance)
-        self.assertEqual(phys.exact_physical_integral("frequency", temperature), radiance)
-        self.assertEqual(
-            phys.exact_physical_integral("energy_density", temperature),
-            energy_density,
+        self.assertLess(
+            relative_error(
+                phys.exact_physical_integral("wavelength", temperature),
+                radiance,
+            ),
+            3e-15,
         )
+        self.assertLess(
+            relative_error(
+                phys.exact_physical_integral("frequency", temperature),
+                radiance,
+            ),
+            3e-15,
+        )
+        self.assertLess(
+            relative_error(
+                phys.exact_physical_integral("energy_density", temperature),
+                energy_density,
+            ),
+            3e-15,
+        )
+
+    def test_avoidable_intermediate_overflow_counterexamples(self):
+        exact = phys.exact_physical_integral("frequency", 1.0e78)
+        self.assertTrue(math.isfinite(exact))
+        self.assertLess(relative_error(exact, 1.8049362359900739e304), 2e-14)
+
+        wavelength_prefactor = phys.prefactor("wavelength", 1.0e62)
+        self.assertTrue(math.isfinite(wavelength_prefactor))
+        self.assertLess(
+            relative_error(wavelength_prefactor, 1.931791196317044e303),
+            2e-14,
+        )
+
+        frequency = phys.x_to_frequency(1.0e300, 1.0e-300)
+        self.assertTrue(math.isfinite(frequency))
+        self.assertLess(relative_error(frequency, phys.FREQUENCY_SCALE), 2e-14)
+
+    def test_scaled_prefactor_true_range_boundaries(self):
+        scale = phys.WAVELENGTH_PREFACTOR_SCALE
+        maximum_T = math.exp(
+            (math.log(sys.float_info.max) - math.log(scale)) / 5.0
+        )
+        self.assertTrue(math.isfinite(phys.prefactor("wavelength", 0.99 * maximum_T)))
+        with self.assertRaisesRegex(ValueError, "representable"):
+            phys.prefactor("wavelength", 1.01 * maximum_T)
+
+        minimum_positive = float.fromhex("0x0.0000000000001p-1022")
+        minimum_T = math.exp(
+            (math.log(minimum_positive) - math.log(scale)) / 5.0
+        )
+        self.assertGreater(phys.prefactor("wavelength", 1.1 * minimum_T), 0.0)
+        with self.assertRaisesRegex(ValueError, "representable"):
+            phys.prefactor("wavelength", 0.8 * minimum_T)
+
+    def test_scaled_integral_and_frequency_true_range_boundaries(self):
+        scale = phys.SIGMA_SB / math.pi
+        maximum_T = math.exp(
+            (math.log(sys.float_info.max) - math.log(scale)) / 4.0
+        )
+        self.assertTrue(
+            math.isfinite(
+                phys.exact_physical_integral("frequency", 0.99 * maximum_T)
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "representable"):
+            phys.exact_physical_integral("frequency", 1.01 * maximum_T)
+
+        minimum_positive = float.fromhex("0x0.0000000000001p-1022")
+        minimum_T = math.exp(
+            (math.log(minimum_positive) - math.log(scale)) / 4.0
+        )
+        self.assertGreater(
+            phys.exact_physical_integral("frequency", 1.1 * minimum_T),
+            0.0,
+        )
+        with self.assertRaisesRegex(ValueError, "representable"):
+            phys.exact_physical_integral("frequency", 0.8 * minimum_T)
+
+        maximum_x = sys.float_info.max / phys.FREQUENCY_SCALE
+        self.assertTrue(math.isfinite(phys.x_to_frequency(0.99 * maximum_x, 1.0)))
+        with self.assertRaisesRegex(ValueError, "representable"):
+            phys.x_to_frequency(1.01 * maximum_x, 1.0)
+
+        self.assertGreater(phys.x_to_frequency(minimum_positive, 1.0e-10), 0.0)
+        with self.assertRaisesRegex(ValueError, "representable"):
+            phys.x_to_frequency(minimum_positive, 1.0e-20)
 
     def test_units_labels(self):
         self.assertIn("Wavelength", phys.units_label("wavelength")[0])
@@ -475,6 +558,14 @@ class TestDomainAndInputValidation(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "representable"):
                 driver.run_planck2(5900.0, "frequency", 10)
 
+    def test_driver_rejects_nonfinite_first_coordinate_and_jacobian(self):
+        with mock.patch.object(driver, "x_to_frequency", return_value=math.inf):
+            with self.assertRaisesRegex(ValueError, "first sampled point"):
+                driver.run_planck2(5900.0, "frequency", 10)
+        with mock.patch.object(driver, "coordinate_jacobian", return_value=math.nan):
+            with self.assertRaisesRegex(ValueError, "first sampled point"):
+                driver.run_planck2(5900.0, "frequency", 10)
+
 
 class TestShapeFunction(unittest.TestCase):
     def setUp(self):
@@ -596,7 +687,7 @@ class TestDriverScientificResults(unittest.TestCase):
     def test_one_step_domain_uses_both_endpoints(self):
         domain = phys.PlanckDomain(x_min=0.1, x_max=1.0, x_low=0.1, x_high=1.0)
         result = driver.run_planck2(5900.0, "frequency", 1, domain)
-        self.assertEqual(result.x_values, [domain.x_min, domain.x_max])
+        self.assertEqual(result.x_values, (domain.x_min, domain.x_max))
         self.assertEqual(result.x_peak, domain.x_max)
 
     def test_equal_sampled_values_keep_first_sample_as_peak(self):
@@ -605,6 +696,16 @@ class TestDriverScientificResults(unittest.TestCase):
             result = driver.run_planck2(5900.0, "frequency", 1, domain)
         self.assertEqual(result.y_values[0], result.y_values[1])
         self.assertEqual(result.x_peak, domain.x_min)
+
+    def test_result_is_fully_immutable(self):
+        result = self.results["frequency"]
+        self.assertIsInstance(result.x_values, tuple)
+        self.assertIsInstance(result.coord_values, tuple)
+        self.assertIsInstance(result.y_values, tuple)
+        with self.assertRaises(FrozenInstanceError):
+            result.x_peak = 1.0
+        with self.assertRaises(TypeError):
+            result.x_values[0] = 1.0
 
     def test_result_carries_release_metadata(self):
         result = self.results["wavelength"]
@@ -656,7 +757,7 @@ class TestDriverScientificResults(unittest.TestCase):
             with self.subTest(quantity=quantity):
                 self.assertLess(
                     relative_error(result.physical_integral, result.exact_physical_integral),
-                    2e-6,
+                    1e-6,
                 )
 
     def test_frequency_radiance_and_energy_density_have_same_shape(self):
@@ -741,6 +842,28 @@ class TestPlotting(unittest.TestCase):
         result = driver.run_planck2(5900.0, "frequency", 20)
         with self.assertRaisesRegex(ValueError, "corner must be"):
             plotter.plot_planck2(result, corner="center")
+
+    def test_malformed_result_arrays_are_rejected(self):
+        result = driver.run_planck2(5900.0, "frequency", 20)
+        malformed = (
+            replace(result, coord_values=result.coord_values[:-1]),
+            replace(result, x_values=(), coord_values=(), y_values=()),
+            replace(
+                result,
+                coord_values=(math.inf,) + result.coord_values[1:],
+            ),
+            replace(result, y_values=(math.nan,) + result.y_values[1:]),
+            replace(result, y_peak=math.inf),
+            replace(result, coord_peak=math.nan),
+        )
+        for bad_result in malformed:
+            with self.subTest(bad_result=bad_result):
+                with self.assertRaises(ValueError):
+                    plotter.plot_planck2(bad_result)
+
+    def test_non_result_object_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "Planck2Result"):
+            plotter.plot_planck2(object())
 
     def test_window_fraction_validation(self):
         result = driver.run_planck2(5900.0, "frequency", 20)
@@ -842,6 +965,11 @@ class TestHelpFile(unittest.TestCase):
         self.assertIn("representable positive step", self.text)
         self.assertIn("finite range 0–1", self.text)
         self.assertIn("representable floating-point range", self.text)
+        self.assertIn(
+            "relative error of the physical integral is less than ",
+            self.text,
+        )
+        self.assertIn(r"\(10^{-6}\)", self.text)
 
     def test_exercise_identifiers_are_unique_and_sequential(self):
         numbers = re.findall(r'<div class="ec-num">EXP-(\d+)</div>', self.text)

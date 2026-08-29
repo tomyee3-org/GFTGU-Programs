@@ -25,7 +25,7 @@ import math
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.0.2"
+MODEL_VERSION = "1.0.3"
 BUILD_ID_COVERS = (
     "planck2_physics.py",
     "planck2_driver.py",
@@ -74,8 +74,11 @@ def _compute_build_id(module_dir=None) -> str:
             with open(path, "r", encoding="utf-8", newline=None) as source:
                 source_texts[name] = source.read()
         return _build_id_from_texts(source_texts)
-    except (KeyError, OSError, UnicodeDecodeError, UnicodeEncodeError):
-        return "unknown"
+    except (KeyError, OSError, UnicodeDecodeError, UnicodeEncodeError) as exc:
+        raise RuntimeError(
+            "Cannot compute BUILD_ID because a core source file is missing, "
+            "unreadable, or not valid UTF-8."
+        ) from exc
 
 
 BUILD_ID = _compute_build_id()
@@ -86,6 +89,15 @@ C_LIGHT = 2.99792458e8
 K_BOLTZMANN = 1.380649e-23
 WIEN_SCALE = H_PLANCK * C_LIGHT / K_BOLTZMANN
 FREQUENCY_SCALE = K_BOLTZMANN / H_PLANCK
+WAVELENGTH_PREFACTOR_SCALE = (
+    2.0 * K_BOLTZMANN**5 / (H_PLANCK**4 * C_LIGHT**3)
+)
+FREQUENCY_PREFACTOR_SCALE = (
+    2.0 * K_BOLTZMANN**3 / (H_PLANCK**2 * C_LIGHT**2)
+)
+ENERGY_DENSITY_PREFACTOR_SCALE = (
+    8.0 * math.pi * K_BOLTZMANN**3 / (H_PLANCK**2 * C_LIGHT**3)
+)
 SIGMA_SB = (
     2.0 * math.pi**5 * K_BOLTZMANN**4
     / (15.0 * H_PLANCK**3 * C_LIGHT**2)
@@ -161,6 +173,32 @@ def _require_positive_finite_result(value: float, label: str) -> float:
     return value
 
 
+def _scaled_product(factors, label: str) -> float:
+    """Evaluate a positive product of (value, integer power) pairs safely.
+
+    ``frexp`` separates every factor into a bounded mantissa and a binary
+    exponent. Combining those parts prevents an intermediate ``T**n`` or
+    multiplication from overflowing when the complete result is representable.
+    """
+    mantissa = 1.0
+    exponent = 0
+    for value, power in factors:
+        factor_mantissa, factor_exponent = math.frexp(value)
+        mantissa *= factor_mantissa**power
+        exponent += factor_exponent * power
+        mantissa, adjustment = math.frexp(mantissa)
+        exponent += adjustment
+
+    try:
+        result = math.ldexp(mantissa, exponent)
+    except OverflowError as exc:
+        raise ValueError(
+            f"{label} is outside the representable floating-point range "
+            "for the supplied values."
+        ) from exc
+    return _require_positive_finite_result(result, label)
+
+
 def _ln_shape_function_unchecked(x: float, p: int, domain: PlanckDomain) -> float:
     """Internal branch evaluator after x, p, and domain have been validated."""
     if x > domain.x_high:
@@ -198,24 +236,16 @@ def prefactor(quantity: PlanckQuantity, T: float) -> float:
     validate_quantity(quantity)
     _validate_temperature(T)
 
-    try:
-        if quantity == "wavelength":
-            # B_lambda = [2 k^5 T^5/(h^4 c^3)] x^5/(exp(x)-1)
-            value = 2.0 * K_BOLTZMANN**5 * T**5 / (H_PLANCK**4 * C_LIGHT**3)
-        elif quantity == "frequency":
-            # B_nu = [2 k^3 T^3/(h^2 c^2)] x^3/(exp(x)-1)
-            value = 2.0 * K_BOLTZMANN**3 * T**3 / (H_PLANCK**2 * C_LIGHT**2)
-        else:
-            # u_nu = (4 pi/c) B_nu
-            value = (
-                8.0 * math.pi * K_BOLTZMANN**3 * T**3
-                / (H_PLANCK**2 * C_LIGHT**3)
-            )
-    except OverflowError as exc:
-        raise ValueError(
-            "Temperature is outside the representable range for the spectral prefactor."
-        ) from exc
-    return _require_positive_finite_result(value, "The spectral prefactor")
+    scale = {
+        "wavelength": WAVELENGTH_PREFACTOR_SCALE,
+        "frequency": FREQUENCY_PREFACTOR_SCALE,
+        "energy_density": ENERGY_DENSITY_PREFACTOR_SCALE,
+    }[quantity]
+    power = 5 if quantity == "wavelength" else 3
+    return _scaled_product(
+        ((scale, 1), (T, power)),
+        "The spectral prefactor",
+    )
 
 
 def coordinate_jacobian(quantity: PlanckQuantity, x: float, T: float) -> float:
@@ -224,18 +254,13 @@ def coordinate_jacobian(quantity: PlanckQuantity, x: float, T: float) -> float:
     _validate_temperature(T)
     _validate_x(x)
 
-    try:
-        if quantity == "wavelength":
-            # lambda = hc/(x k T)
-            value = WIEN_SCALE / x / x / T
-        else:
-            # nu = x k T / h
-            value = FREQUENCY_SCALE * T
-    except (OverflowError, ZeroDivisionError) as exc:
-        raise ValueError(
-            "The coordinate Jacobian is outside the representable range."
-        ) from exc
-    return _require_positive_finite_result(value, "The coordinate Jacobian")
+    if quantity == "wavelength":
+        # |d(lambda)/dx| = (hc/k) x^-2 T^-1
+        factors = ((WIEN_SCALE, 1), (x, -2), (T, -1))
+    else:
+        # d(nu)/dx = (k/h) T
+        factors = ((FREQUENCY_SCALE, 1), (T, 1))
+    return _scaled_product(factors, "The coordinate Jacobian")
 
 
 def exact_physical_integral(quantity: PlanckQuantity, T: float) -> float:
@@ -243,37 +268,35 @@ def exact_physical_integral(quantity: PlanckQuantity, T: float) -> float:
     validate_quantity(quantity)
     _validate_temperature(T)
 
-    try:
-        if quantity in ("wavelength", "frequency"):
-            # Integral of spectral radiance over wavelength or frequency.
-            value = SIGMA_SB * T**4 / math.pi
-        else:
-            # Total black-body energy density.
-            value = 4.0 * SIGMA_SB * T**4 / C_LIGHT
-    except OverflowError as exc:
-        raise ValueError(
-            "Temperature is outside the representable range for the bolometric integral."
-        ) from exc
-    return _require_positive_finite_result(value, "The bolometric integral")
+    scale = (
+        SIGMA_SB / math.pi
+        if quantity in ("wavelength", "frequency")
+        else 4.0 * SIGMA_SB / C_LIGHT
+    )
+    return _scaled_product(
+        ((scale, 1), (T, 4)),
+        "The bolometric integral",
+    )
 
 
 def x_to_wavelength(x: float, T: float) -> float:
     """lambda = hc/(x k T), in metres."""
     _validate_x(x)
     _validate_temperature(T)
-    try:
-        value = WIEN_SCALE / x / T
-    except (OverflowError, ZeroDivisionError) as exc:
-        raise ValueError("Wavelength is outside the representable range.") from exc
-    return _require_positive_finite_result(value, "Wavelength")
+    return _scaled_product(
+        ((WIEN_SCALE, 1), (x, -1), (T, -1)),
+        "Wavelength",
+    )
 
 
 def x_to_frequency(x: float, T: float) -> float:
     """nu = x k T/h, in hertz."""
     _validate_x(x)
     _validate_temperature(T)
-    value = FREQUENCY_SCALE * x * T
-    return _require_positive_finite_result(value, "Frequency")
+    return _scaled_product(
+        ((FREQUENCY_SCALE, 1), (x, 1), (T, 1)),
+        "Frequency",
+    )
 
 
 def units_label(quantity: PlanckQuantity) -> tuple[str, str]:

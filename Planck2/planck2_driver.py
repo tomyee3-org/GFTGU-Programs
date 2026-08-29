@@ -1,7 +1,7 @@
 """Driver for Planck2."""
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import math
 
 import planck2_physics as phys
@@ -27,15 +27,23 @@ from planck2_physics import (
 MAX_STEPS = 1_000_000
 
 
-@dataclass
+def _require_positive_finite_values(label: str, *values: float) -> None:
+    if not all(math.isfinite(value) and value > 0.0 for value in values):
+        raise ValueError(
+            f"{label} contains a value outside the representable "
+            "floating-point range."
+        )
+
+
+@dataclass(frozen=True)
 class Planck2Result:
     model_version: str
     build_id: str
     quantity: PlanckQuantity
     T: float
-    x_values: List[float]
-    coord_values: List[float]
-    y_values: List[float]
+    x_values: Tuple[float, ...]
+    coord_values: Tuple[float, ...]
+    y_values: Tuple[float, ...]
     x_peak: float
     coord_peak: float
     y_peak: float
@@ -84,6 +92,11 @@ def run_planck2(
         )
     pref = prefactor(quantity, T)
     exact_integral = exact_physical_integral(quantity, T)
+    _require_positive_finite_values(
+        "The prefactor or exact integral",
+        pref,
+        exact_integral,
+    )
     p = SHAPE_EXPONENT[quantity]
 
     x_values: List[float] = []
@@ -100,6 +113,13 @@ def run_planck2(
         x_to_wavelength(x, T)
         if quantity == "wavelength"
         else x_to_frequency(x, T)
+    )
+    _require_positive_finite_values(
+        "The first sampled point",
+        f_last,
+        y_last,
+        jac_last,
+        coord_last,
     )
 
     x_values.append(x)
@@ -125,6 +145,13 @@ def run_planck2(
             if quantity == "wavelength"
             else x_to_frequency(x, T)
         )
+        _require_positive_finite_values(
+            "A sampled point",
+            f,
+            y,
+            jac,
+            coord,
+        )
 
         x_values.append(x)
         coord_values.append(coord)
@@ -145,11 +172,10 @@ def run_planck2(
 
     y_peak = pref * f_peak
     computed = (f_peak, y_peak, dimensionless_area, physical_integral)
-    if not all(math.isfinite(value) and value > 0.0 for value in computed):
-        raise ValueError(
-            "The selected temperature and domain produce results outside "
-            "the representable floating-point range."
-        )
+    _require_positive_finite_values("The completed result", *computed)
+    _require_positive_finite_values("x_values", *x_values)
+    _require_positive_finite_values("coord_values", *coord_values)
+    _require_positive_finite_values("y_values", *y_values)
 
     x_label, y_label = units_label(quantity)
 
@@ -158,9 +184,9 @@ def run_planck2(
         build_id=phys.BUILD_ID,
         quantity=quantity,
         T=T,
-        x_values=x_values,
-        coord_values=coord_values,
-        y_values=y_values,
+        x_values=tuple(x_values),
+        coord_values=tuple(coord_values),
+        y_values=tuple(y_values),
         x_peak=x_peak,
         coord_peak=coord_peak,
         y_peak=y_peak,

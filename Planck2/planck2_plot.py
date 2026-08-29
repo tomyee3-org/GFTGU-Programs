@@ -27,12 +27,44 @@ _CORNER_TO_ANCHOR = {
 }
 
 
+def _validate_result(result: Planck2Result) -> None:
+    """Reject malformed or modified result data before plotting."""
+    if not isinstance(result, Planck2Result):
+        raise ValueError("result must be a Planck2Result instance.")
+
+    lengths = (
+        len(result.x_values),
+        len(result.coord_values),
+        len(result.y_values),
+    )
+    if lengths[0] == 0 or len(set(lengths)) != 1:
+        raise ValueError("Planck2Result sample arrays must be nonempty and equal in length.")
+    if not all(math.isfinite(value) and value > 0.0 for value in result.x_values):
+        raise ValueError("Planck2Result x values must be finite and positive.")
+    if not all(
+        math.isfinite(value) and value > 0.0
+        for value in result.coord_values
+    ):
+        raise ValueError("Planck2Result coordinates must be finite and positive.")
+    if not all(math.isfinite(value) and value >= 0.0 for value in result.y_values):
+        raise ValueError("Planck2Result y values must be finite and nonnegative.")
+    if not math.isfinite(result.y_peak) or result.y_peak <= 0.0:
+        raise ValueError("Planck2Result y_peak must be finite and positive.")
+    if not math.isfinite(result.coord_peak) or result.coord_peak <= 0.0:
+        raise ValueError("Planck2Result coord_peak must be finite and positive.")
+    if result.y_peak != max(result.y_values):
+        raise ValueError("Planck2Result y_peak must equal a sampled maximum.")
+    if result.coord_peak not in result.coord_values:
+        raise ValueError("Planck2Result coord_peak must be a sampled coordinate.")
+
+
 def plot_planck2(
     result: Planck2Result,
     corner: Corner = "upper right",
     y_frac_window: float = 0.003,
 ) -> None:
     """Plot the selected physical spectrum and annotate numerical results."""
+    _validate_result(result)
     if corner not in _CORNER_TO_ANCHOR:
         allowed = ", ".join(repr(x) for x in _CORNER_TO_ANCHOR)
         raise ValueError(f"corner must be one of: {allowed}.")
