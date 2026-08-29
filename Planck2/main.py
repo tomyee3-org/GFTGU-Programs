@@ -87,7 +87,7 @@ def main():
         f"{result.physical_integral_units}"
     )
     print(
-        f"Exact bolometric value = {result.exact_physical_integral:.6e} "
+        f"Exact 0..infinity bolometric value = {result.exact_physical_integral:.6e} "
         f"{result.physical_integral_units}"
     )
 

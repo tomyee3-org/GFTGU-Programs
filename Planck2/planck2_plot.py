@@ -7,6 +7,11 @@ import matplotlib.pyplot as plt
 import math
 
 from planck2_driver import Planck2Result
+from planck2_physics import (
+    physical_integral_units,
+    units_label,
+    validate_quantity,
+)
 
 Corner = Literal["upper right", "upper left", "lower right", "lower left"]
 
@@ -32,6 +37,15 @@ def _validate_result(result: Planck2Result) -> None:
     if not isinstance(result, Planck2Result):
         raise ValueError("result must be a Planck2Result instance.")
 
+    validate_quantity(result.quantity)
+    if (
+        not isinstance(result.T, (int, float))
+        or isinstance(result.T, bool)
+        or not math.isfinite(result.T)
+        or result.T <= 0.0
+    ):
+        raise ValueError("Planck2Result T must be finite and positive.")
+
     lengths = (
         len(result.x_values),
         len(result.coord_values),
@@ -39,23 +53,67 @@ def _validate_result(result: Planck2Result) -> None:
     )
     if lengths[0] == 0 or len(set(lengths)) != 1:
         raise ValueError("Planck2Result sample arrays must be nonempty and equal in length.")
-    if not all(math.isfinite(value) and value > 0.0 for value in result.x_values):
+    if not all(
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value > 0.0
+        for value in result.x_values
+    ):
         raise ValueError("Planck2Result x values must be finite and positive.")
     if not all(
-        math.isfinite(value) and value > 0.0
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value > 0.0
         for value in result.coord_values
     ):
         raise ValueError("Planck2Result coordinates must be finite and positive.")
-    if not all(math.isfinite(value) and value >= 0.0 for value in result.y_values):
+    if not all(
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value >= 0.0
+        for value in result.y_values
+    ):
         raise ValueError("Planck2Result y values must be finite and nonnegative.")
-    if not math.isfinite(result.y_peak) or result.y_peak <= 0.0:
-        raise ValueError("Planck2Result y_peak must be finite and positive.")
-    if not math.isfinite(result.coord_peak) or result.coord_peak <= 0.0:
-        raise ValueError("Planck2Result coord_peak must be finite and positive.")
+
+    positive_scalars = {
+        "x_peak": result.x_peak,
+        "coord_peak": result.coord_peak,
+        "y_peak": result.y_peak,
+        "dimensionless_area": result.dimensionless_area,
+        "physical_integral": result.physical_integral,
+        "exact_physical_integral": result.exact_physical_integral,
+    }
+    for name, value in positive_scalars.items():
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(value)
+            or value <= 0.0
+        ):
+            raise ValueError(f"Planck2Result {name} must be finite and positive.")
+
     if result.y_peak != max(result.y_values):
         raise ValueError("Planck2Result y_peak must equal a sampled maximum.")
-    if result.coord_peak not in result.coord_values:
-        raise ValueError("Planck2Result coord_peak must be a sampled coordinate.")
+    peak_index = result.y_values.index(result.y_peak)
+    if (
+        result.x_peak != result.x_values[peak_index]
+        or result.coord_peak != result.coord_values[peak_index]
+    ):
+        raise ValueError(
+            "Planck2Result peak fields must identify the first sampled maximum."
+        )
+
+    expected_x_label, expected_y_label = units_label(result.quantity)
+    expected_integral_units = physical_integral_units(result.quantity)
+    if result.x_label != expected_x_label or result.y_label != expected_y_label:
+        raise ValueError("Planck2Result axis labels do not match its quantity.")
+    if result.physical_integral_units != expected_integral_units:
+        raise ValueError(
+            "Planck2Result physical-integral units do not match its quantity."
+        )
 
 
 def plot_planck2(
@@ -132,7 +190,7 @@ def plot_planck2(
         f"Peak value = {result.y_peak:.4e}\n"
         f"∫ f(x) dx = {result.dimensionless_area:.6g}\n"
         f"Physical integral = {result.physical_integral:.4e}\n"
-        f"Exact physical = {result.exact_physical_integral:.4e}"
+        f"Exact 0..∞ physical = {result.exact_physical_integral:.4e}"
     )
     ax.annotate(
         text,

@@ -25,7 +25,7 @@ import math
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.0.3"
+MODEL_VERSION = "1.0.4"
 BUILD_ID_COVERS = (
     "planck2_physics.py",
     "planck2_driver.py",
@@ -176,18 +176,87 @@ def _require_positive_finite_result(value: float, label: str) -> float:
 def _scaled_product(factors, label: str) -> float:
     """Evaluate a positive product of (value, integer power) pairs safely.
 
+    ``factors`` must be a nonempty iterable of pairs.  Every value must be a
+    finite positive number and every power must be an integer (zero and
+    negative powers are allowed).  ``label`` must be a nonempty string.
+
     ``frexp`` separates every factor into a bounded mantissa and a binary
     exponent. Combining those parts prevents an intermediate ``T**n`` or
     multiplication from overflowing when the complete result is representable.
     """
-    mantissa = 1.0
-    exponent = 0
-    for value, power in factors:
-        factor_mantissa, factor_exponent = math.frexp(value)
-        mantissa *= factor_mantissa**power
-        exponent += factor_exponent * power
-        mantissa, adjustment = math.frexp(mantissa)
-        exponent += adjustment
+    if not isinstance(label, str) or not label.strip():
+        raise ValueError("label must be a nonempty string.")
+
+    try:
+        factor_iterator = iter(factors)
+    except TypeError as exc:
+        raise ValueError("factors must be a nonempty iterable of pairs.") from exc
+
+    def multiply_scaled(left, right):
+        left_mantissa, left_exponent = left
+        right_mantissa, right_exponent = right
+        product_mantissa, adjustment = math.frexp(
+            left_mantissa * right_mantissa
+        )
+        return (
+            product_mantissa,
+            left_exponent + right_exponent + adjustment,
+        )
+
+    def integer_power_scaled(value, power):
+        base_mantissa, base_exponent = math.frexp(value)
+        if power < 0:
+            base_mantissa, adjustment = math.frexp(1.0 / base_mantissa)
+            base_exponent = adjustment - base_exponent
+            power = -power
+
+        product = (0.5, 1)  # frexp representation of 1.0
+        base = (base_mantissa, base_exponent)
+        while power:
+            if power & 1:
+                product = multiply_scaled(product, base)
+            power //= 2
+            if power:
+                base = multiply_scaled(base, base)
+        return product
+
+    scaled_product = (0.5, 1)
+    factor_count = 0
+    for pair in factor_iterator:
+        try:
+            value, power = pair
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Every factor must be a (value, power) pair.") from exc
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not isinstance(power, int)
+            or isinstance(power, bool)
+        ):
+            raise ValueError(
+                "Factor values must be finite positive numbers and powers "
+                "must be integers."
+            )
+        try:
+            value_is_valid = math.isfinite(value) and value > 0.0
+        except OverflowError:
+            value_is_valid = False
+        if not value_is_valid:
+            raise ValueError(
+                "Factor values must be finite positive numbers and powers "
+                "must be integers."
+            )
+
+        factor_count += 1
+        scaled_product = multiply_scaled(
+            scaled_product,
+            integer_power_scaled(value, power),
+        )
+
+    if factor_count == 0:
+        raise ValueError("factors must be a nonempty iterable of pairs.")
+
+    mantissa, exponent = scaled_product
 
     try:
         result = math.ldexp(mantissa, exponent)

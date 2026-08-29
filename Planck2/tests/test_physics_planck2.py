@@ -377,6 +377,81 @@ class TestPhysicalConstantsAndConversions(unittest.TestCase):
         self.assertTrue(math.isfinite(frequency))
         self.assertLess(relative_error(frequency, phys.FREQUENCY_SCALE), 2e-14)
 
+    def test_scaled_product_supports_mixed_integer_powers(self):
+        result = phys._scaled_product(
+            ((8.0, 2), (4.0, -1), (2.0, 3)),
+            "mixed-power result",
+        )
+        self.assertEqual(result, 128.0)
+        self.assertAlmostEqual(
+            phys._scaled_product(
+                ((1.0e300, 1), (1.0e-300, 1)),
+                "cancelled result",
+            ),
+            1.0,
+            places=14,
+        )
+
+    def test_scaled_product_validates_its_private_contract(self):
+        invalid_factors = (
+            None,
+            (),
+            ((1.0,),),
+            ((1.0, 1, 2),),
+            ((0.0, 1),),
+            ((-1.0, 1),),
+            ((math.nan, 1),),
+            ((math.inf, 1),),
+            ((True, 1),),
+            (("2", 1),),
+            ((2.0, 1.5),),
+            ((2.0, True),),
+            ((2.0, "1"),),
+        )
+        for factors in invalid_factors:
+            with self.subTest(factors=factors):
+                with self.assertRaises(ValueError):
+                    phys._scaled_product(factors, "invalid result")
+        for label in ("", "   ", None, 3):
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(ValueError, "label"):
+                    phys._scaled_product(((2.0, 1),), label)
+
+    def test_scaled_product_nextafter_range_boundaries(self):
+        # 2**1023 times the float immediately below 2 is exactly the
+        # largest finite binary64 value; the adjacent input 2 overflows.
+        upper_inside = math.nextafter(2.0, 0.0)
+        upper_factors = ((2.0, 1),) * 1023
+        upper_result = phys._scaled_product(
+            upper_factors + ((upper_inside, 1),),
+            "upper-boundary result",
+        )
+        self.assertTrue(math.isfinite(upper_result))
+        self.assertLess(relative_error(upper_result, sys.float_info.max), 3e-15)
+        self.assertEqual(math.nextafter(upper_inside, math.inf), 2.0)
+        with self.assertRaisesRegex(ValueError, "representable"):
+            phys._scaled_product(
+                upper_factors + ((2.0, 1),),
+                "upper-boundary result",
+            )
+
+        # Half the smallest subnormal rounds to zero.  Moving the final
+        # factor one float above 0.5 makes the result round up instead.
+        lower_factors = ((0.5, 1),) * 1074
+        lower_inside = math.nextafter(0.5, math.inf)
+        lower_result = phys._scaled_product(
+            lower_factors + ((lower_inside, 1),),
+            "lower-boundary result",
+        )
+        self.assertTrue(math.isfinite(lower_result))
+        self.assertGreater(lower_result, 0.0)
+        self.assertEqual(math.nextafter(lower_inside, 0.0), 0.5)
+        with self.assertRaisesRegex(ValueError, "representable"):
+            phys._scaled_product(
+                lower_factors + ((0.5, 1),),
+                "lower-boundary result",
+            )
+
     def test_scaled_prefactor_true_range_boundaries(self):
         scale = phys.WAVELENGTH_PREFACTOR_SCALE
         maximum_T = math.exp(
@@ -697,6 +772,20 @@ class TestDriverScientificResults(unittest.TestCase):
         self.assertEqual(result.y_values[0], result.y_values[1])
         self.assertEqual(result.x_peak, domain.x_min)
 
+    def test_driver_does_not_rescan_completed_sample_arrays(self):
+        original_validator = driver._require_positive_finite_values
+        with mock.patch.object(
+            driver,
+            "_require_positive_finite_values",
+            wraps=original_validator,
+        ) as validator:
+            driver.run_planck2(5900.0, "frequency", 20)
+        self.assertEqual(validator.call_count, 23)
+        self.assertLessEqual(
+            max(len(call.args) - 1 for call in validator.call_args_list),
+            5,
+        )
+
     def test_result_is_fully_immutable(self):
         result = self.results["frequency"]
         self.assertIsInstance(result.x_values, tuple)
@@ -860,6 +949,67 @@ class TestPlotting(unittest.TestCase):
             with self.subTest(bad_result=bad_result):
                 with self.assertRaises(ValueError):
                     plotter.plot_planck2(bad_result)
+
+    def test_peak_fields_must_identify_the_same_sample(self):
+        result = driver.run_planck2(5900.0, "frequency", 20)
+        peak_index = result.y_values.index(result.y_peak)
+        other_index = 0 if peak_index != 0 else 1
+        malformed = (
+            replace(result, x_peak=result.x_values[other_index]),
+            replace(result, coord_peak=result.coord_values[other_index]),
+            replace(
+                result,
+                x_peak=result.x_values[other_index],
+                coord_peak=result.coord_values[other_index],
+            ),
+            replace(result, x_peak=math.nan),
+            replace(result, x_peak=math.inf),
+        )
+        for bad_result in malformed:
+            with self.subTest(bad_result=bad_result):
+                with self.assertRaises(ValueError):
+                    plotter.plot_planck2(bad_result)
+
+    def test_equal_maxima_require_first_sample_as_peak(self):
+        domain = phys.PlanckDomain(x_min=1.0, x_max=2.0, x_low=1.0, x_high=2.0)
+        with mock.patch.object(driver, "_ln_shape_function_unchecked", return_value=0.0):
+            result = driver.run_planck2(5900.0, "frequency", 1, domain)
+        second_peak = replace(
+            result,
+            x_peak=result.x_values[1],
+            coord_peak=result.coord_values[1],
+        )
+        with self.assertRaisesRegex(ValueError, "first sampled maximum"):
+            plotter.plot_planck2(second_peak)
+
+    def test_displayed_scalars_and_metadata_are_validated(self):
+        result = driver.run_planck2(5900.0, "frequency", 20)
+        malformed = (
+            replace(result, quantity="invalid"),
+            replace(result, T=0.0),
+            replace(result, T=math.nan),
+            replace(result, T=math.inf),
+            replace(result, dimensionless_area=0.0),
+            replace(result, dimensionless_area=math.nan),
+            replace(result, physical_integral=0.0),
+            replace(result, physical_integral=math.inf),
+            replace(result, exact_physical_integral=-1.0),
+            replace(result, exact_physical_integral=math.nan),
+            replace(result, x_label=""),
+            replace(result, y_label="incorrect"),
+            replace(result, physical_integral_units=""),
+        )
+        for bad_result in malformed:
+            with self.subTest(bad_result=bad_result):
+                with self.assertRaises(ValueError):
+                    plotter.plot_planck2(bad_result)
+
+    def test_annotation_distinguishes_exact_infinite_domain_value(self):
+        result = driver.run_planck2(5900.0, "frequency", 20)
+        with mock.patch.object(plt, "show"):
+            plotter.plot_planck2(result)
+        annotation_text = "\n".join(text.get_text() for text in plt.gca().texts)
+        self.assertIn("Exact 0..∞ physical", annotation_text)
 
     def test_non_result_object_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "Planck2Result"):
@@ -1042,7 +1192,7 @@ class TestMainModule(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
         self.assertIn(f"Planck2 {phys.MODEL_VERSION} (build {phys.BUILD_ID})", completed.stdout)
         self.assertIn("Dimensionless area", completed.stdout)
-        self.assertIn("Exact bolometric value", completed.stdout)
+        self.assertIn("Exact 0..infinity bolometric value", completed.stdout)
 
 
 if __name__ == "__main__":

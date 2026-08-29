@@ -116,6 +116,7 @@ def run_planck2(
     )
     _require_positive_finite_values(
         "The first sampled point",
+        x,
         f_last,
         y_last,
         jac_last,
@@ -147,6 +148,7 @@ def run_planck2(
         )
         _require_positive_finite_values(
             "A sampled point",
+            x,
             f,
             y,
             jac,
@@ -173,9 +175,6 @@ def run_planck2(
     y_peak = pref * f_peak
     computed = (f_peak, y_peak, dimensionless_area, physical_integral)
     _require_positive_finite_values("The completed result", *computed)
-    _require_positive_finite_values("x_values", *x_values)
-    _require_positive_finite_values("coord_values", *coord_values)
-    _require_positive_finite_values("y_values", *y_values)
 
     x_label, y_label = units_label(quantity)
 
