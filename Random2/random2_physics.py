@@ -32,7 +32,7 @@ from typing import Literal, Optional, Tuple
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.0.1"
+MODEL_VERSION = "1.0.2"
 BUILD_ID_COVERS = (
     "random2_physics.py",
     "random2_driver.py",
@@ -178,7 +178,13 @@ def default_radius(
         "radius_factor", radius_factor
     )
 
-    return radius_factor * mean_free_path * math.sqrt(reference_steps)
+    radius = radius_factor * mean_free_path * math.sqrt(reference_steps)
+    if not math.isfinite(radius) or radius <= 0.0:
+        raise ValueError(
+            "the radius computed from reference_steps, mean_free_path, and "
+            "radius_factor must be positive and finite."
+        )
+    return radius
 
 
 def circle_crossing_fraction(
@@ -199,12 +205,24 @@ def circle_crossing_fraction(
     radius = _require_positive_finite_number("radius", radius)
 
     x0, y0 = p0
-    dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+
+    # Scale before subtracting or squaring. This prevents overflow for very
+    # large finite coordinates and underflow for microscopic geometries.
+    scale = max(abs(x0), abs(y0), abs(p1[0]), abs(p1[1]), radius)
+    sx0, sy0 = x0 / scale, y0 / scale
+    sx1, sy1 = p1[0] / scale, p1[1] / scale
+    dx, dy = sx1 - sx0, sy1 - sy0
+    scaled_radius = radius / scale
 
     # |p0 + t*d|^2 = radius^2  =>  a*t^2 + b*t + c = 0
     a = dx * dx + dy * dy
-    b = 2.0 * (x0 * dx + y0 * dy)
-    c = x0 * x0 + y0 * y0 - radius * radius
+    b = 2.0 * (sx0 * dx + sy0 * dy)
+
+    # (r0 - R)(r0 + R) is more accurate than r0**2 - R**2 when
+    # the starting point lies very close to the boundary.
+    r0 = math.hypot(x0, y0)
+    scaled_r0 = math.hypot(sx0, sy0)
+    c = ((r0 - radius) / scale) * (scaled_r0 + scaled_radius)
 
     if a == 0.0:
         return None
@@ -218,10 +236,17 @@ def circle_crossing_fraction(
             return None
 
     sqrt_disc = math.sqrt(disc)
-    t1 = (-b - sqrt_disc) / (2.0 * a)
-    t2 = (-b + sqrt_disc) / (2.0 * a)
 
-    for t in (t1, t2):
+    # Stable quadratic formula: one schoolbook numerator loses precision
+    # when b and sqrt(discriminant) nearly cancel. Compute the well-conditioned
+    # root through q and obtain the other from the product of the roots.
+    q = -0.5 * (b + math.copysign(sqrt_disc, b))
+    if q == 0.0:
+        roots = (-b / (2.0 * a),)
+    else:
+        roots = (q / a, c / q)
+
+    for t in sorted(roots):
         if 0.0 < t <= 1.0:
             return t
     return None

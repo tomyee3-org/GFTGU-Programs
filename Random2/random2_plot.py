@@ -76,6 +76,88 @@ _CORNER_TO_ANCHOR = {
 }
 
 
+def _require_positive_finite_number(name: str, value: Real) -> float:
+    """Validate a positive finite real value supplied to the plot layer."""
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise ValueError(f"{name} must be a positive finite number.")
+    numeric = float(value)
+    if not math.isfinite(numeric) or numeric <= 0.0:
+        raise ValueError(f"{name} must be a positive finite number.")
+    return numeric
+
+
+def _require_finite_point(name: str, value: Tuple[float, float]) -> None:
+    """Validate a two-coordinate point in a constructed plot result."""
+    try:
+        x, y = value
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must contain exactly two finite numbers.") from None
+    if any(
+        isinstance(coordinate, bool)
+        or not isinstance(coordinate, Real)
+        or not math.isfinite(float(coordinate))
+        for coordinate in (x, y)
+    ):
+        raise ValueError(f"{name} must contain exactly two finite numbers.")
+
+
+def _validate_walk2d_result(result: Walk2DResult) -> float:
+    """Defensively validate results that may have been constructed by hand."""
+    if not isinstance(result, Walk2DResult):
+        raise ValueError("result must be a Walk2DResult.")
+
+    radius = _require_positive_finite_number("result.radius", result.radius)
+    _require_positive_finite_number(
+        "result.mean_free_path", result.mean_free_path
+    )
+    for name, value in (
+        ("result.reference_steps", result.reference_steps),
+        ("result.step_cap", result.step_cap),
+    ):
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer.")
+
+    if not isinstance(result.walks, list) or not result.walks:
+        raise ValueError("result.walks must be a non-empty list.")
+
+    for walk_index, walk in enumerate(result.walks):
+        if not isinstance(walk.points, list) or not walk.points:
+            raise ValueError(
+                f"result.walks[{walk_index}].points must be a non-empty list."
+            )
+        for point_index, point in enumerate(walk.points):
+            _require_finite_point(
+                f"result.walks[{walk_index}].points[{point_index}]", point
+            )
+        if (
+            not isinstance(walk.steps_taken, int)
+            or isinstance(walk.steps_taken, bool)
+            or not 0 <= walk.steps_taken <= result.step_cap
+        ):
+            raise ValueError(
+                f"result.walks[{walk_index}].steps_taken must be an integer "
+                "between zero and result.step_cap."
+            )
+        if walk.ray is not None:
+            try:
+                ray_start, ray_end = walk.ray
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"result.walks[{walk_index}].ray must contain two finite points."
+                ) from None
+            _require_finite_point(
+                f"result.walks[{walk_index}].ray[0]", ray_start
+            )
+            _require_finite_point(
+                f"result.walks[{walk_index}].ray[1]", ray_end
+            )
+
+    span = radius * 1.8
+    if not math.isfinite(span) or span <= 0.0:
+        raise ValueError("result.radius is outside the plot's finite display range.")
+    return span
+
+
 def plot_walk2d(
     result: Walk2DResult,
     corner: str = "upper right",
@@ -87,6 +169,8 @@ def plot_walk2d(
     scattering has stopped in the toy model; it is not a model of the
     Sun's outer layers.
     """
+    span = _validate_walk2d_result(result)
+
     if corner not in _CORNER_TO_ANCHOR:
         allowed = ", ".join(f'"{x}"' for x in _CORNER_TO_ANCHOR)
         raise ValueError(f"corner must be one of: {allowed}.")
@@ -144,7 +228,6 @@ def plot_walk2d(
     ax.set_ylabel("y (distance units)")
     ax.set_title("Random2: Isotropic Random Walks in a Schematic Star")
 
-    span = result.radius * 1.8
     ax.set_xlim(-span, span)
     ax.set_ylim(-span, span)
 

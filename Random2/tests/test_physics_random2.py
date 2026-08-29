@@ -16,6 +16,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
+from html.parser import HTMLParser
 from pathlib import Path
 from unittest import mock
 
@@ -53,10 +55,66 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
 
 import random2_driver as driver
 import random2_physics as physics
 import random2_plot as plot
+
+
+class _HelpSemanticParser(HTMLParser):
+    """Collect visible Help text, version text, and table cells."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.visible_text = []
+        self.version_text = []
+        self.table_rows = []
+        self._in_version = False
+        self._in_cell = False
+        self._cell_text = []
+        self._row = []
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if attributes.get("id") == "version_build":
+            self._in_version = True
+        if tag in ("td", "th"):
+            self._in_cell = True
+            self._cell_text = []
+
+    def handle_endtag(self, tag):
+        if tag in ("td", "th") and self._in_cell:
+            self._row.append(" ".join("".join(self._cell_text).split()))
+            self._in_cell = False
+        elif tag == "tr":
+            if self._row:
+                self.table_rows.append(tuple(self._row))
+            self._row = []
+        elif tag == "p" and self._in_version:
+            self._in_version = False
+
+    def handle_data(self, data):
+        self.visible_text.append(data)
+        if self._in_version:
+            self.version_text.append(data)
+        if self._in_cell:
+            self._cell_text.append(data)
+
+
+def parse_help_file() -> _HelpSemanticParser:
+    parser = _HelpSemanticParser()
+    parser.feed((MODULE_DIR / HELP_FILENAME).read_text(encoding="utf-8"))
+    parser.close()
+    return parser
+
+
+@contextmanager
+def isolated_rng(seed: int):
+    """Route program randomness through a private RNG without global mutation."""
+    rng = random.Random(seed)
+    with mock.patch.object(physics, "random", rng):
+        yield rng
 
 
 def recompute_build_id() -> str:
@@ -108,37 +166,60 @@ class TestReleaseMetadataAndCompatibility(unittest.TestCase):
         self.assertEqual(physics.BUILD_ID, recompute_build_id())
 
     def test_help_version_and_build_match_program(self):
-        help_text = (MODULE_DIR / HELP_FILENAME).read_text(encoding="utf-8")
+        help_data = parse_help_file()
+        version_text = " ".join("".join(help_data.version_text).split())
         match = re.search(
-            r'id="version_build"[^>]*>\s*Version\s+([^&<\s]+)'
-            r'&nbsp;(?:&nbsp;)+Build\s+([0-9a-f]{12})',
-            help_text,
+            r"^Version\s+(\S+)\s+Build\s+([0-9a-f]{12})$",
+            version_text,
         )
         self.assertIsNotNone(match, "Help file lacks a parseable version/build line")
         self.assertEqual(match.group(1), physics.MODEL_VERSION)
         self.assertEqual(match.group(2), physics.BUILD_ID)
 
     def test_help_describes_current_modes_and_defaults(self):
-        help_text = (MODULE_DIR / HELP_FILENAME).read_text(encoding="utf-8")
-        for required in (
-            'scaled_distance',
-            'walk2d',
-            'maxSteps</code></td><td><code>4096',
-            'nTrials</code></td><td><code>100',
-            'reference_steps</code></td><td><code>2000',
-            'n_walks</code></td><td><code>4',
-            'mean_free_path</code></td><td><code>1.0',
-            'radius_factor</code></td><td><code>2.0',
-            'ray_length_factor</code></td><td><code>0.6',
-            'step_cap</code></td><td><code>200000',
-            'upper right',
-        ):
-            self.assertIn(required, help_text)
+        help_data = parse_help_file()
+        visible_text = " ".join("".join(help_data.visible_text).split())
+        self.assertIn("scaled_distance", visible_text)
+        self.assertIn("walk2d", visible_text)
+
+        defaults = {
+            row[0]: row[1]
+            for row in help_data.table_rows
+            if len(row) >= 2 and row[0] != "Parameter"
+        }
+        self.assertEqual(
+            {name: defaults.get(name) for name in (
+                "maxSteps",
+                "nTrials",
+                "step_distribution",
+                "reference_steps",
+                "n_walks",
+                "mean_free_path",
+                "radius_factor",
+                "radius",
+                "ray_length_factor",
+                "step_cap",
+                "corner",
+            )},
+            {
+                "maxSteps": "4096",
+                "nTrials": "100",
+                "step_distribution": '"uniform"',
+                "reference_steps": "2000",
+                "n_walks": "4",
+                "mean_free_path": "1.0",
+                "radius_factor": "2.0",
+                "radius": "None",
+                "ray_length_factor": "0.6",
+                "step_cap": "200000",
+                "corner": '"upper right"',
+            },
+        )
 
     def test_student_help_does_not_embed_java_listing(self):
-        help_text = (MODULE_DIR / HELP_FILENAME).read_text(encoding="utf-8")
-        self.assertNotIn("Listing of the Java code", help_text)
-        self.assertNotIn("Math.random()", help_text)
+        visible_text = " ".join("".join(parse_help_file().visible_text).split())
+        self.assertNotIn("Listing of the Java code", visible_text)
+        self.assertNotIn("Math.random()", visible_text)
 
     def test_all_program_files_parse_with_python_310_grammar(self):
         for name in CORE_MODULE_FILES:
@@ -174,9 +255,9 @@ class TestPhysicsValidation(unittest.TestCase):
                 physics.generate_component_step(value)
 
     def test_isotropic_step_has_requested_length(self):
-        random.seed(8101)
-        for _ in range(100):
-            self.assertAlmostEqual(math.hypot(*physics.generate_isotropic_step(2.75)), 2.75, places=12)
+        with isolated_rng(8101):
+            for _ in range(100):
+                self.assertAlmostEqual(math.hypot(*physics.generate_isotropic_step(2.75)), 2.75, places=12)
 
     def test_isotropic_step_angles(self):
         with mock.patch.object(physics.random, "random", return_value=0.0):
@@ -204,12 +285,41 @@ class TestPhysicsValidation(unittest.TestCase):
                 with self.subTest(parameter=parameter, value=value), self.assertRaises(ValueError):
                     physics.default_radius(4, **kwargs)
 
+    def test_default_radius_rejects_computed_underflow_and_overflow(self):
+        with self.assertRaisesRegex(ValueError, "computed.*positive and finite"):
+            physics.default_radius(1, 5e-324, 0.5)
+        with self.assertRaisesRegex(ValueError, "computed.*positive and finite"):
+            physics.default_radius(sys.maxsize, 1e308, 1e308)
+
+    def test_numpy_real_scalars_are_supported(self):
+        with isolated_rng(123):
+            x, y = physics.generate_isotropic_step(np.float64(2.0))
+        self.assertAlmostEqual(x * x + y * y, 4.0)
+        self.assertAlmostEqual(
+            physics.default_radius(4, np.float32(1.5), np.int32(2)), 6.0
+        )
+
     def test_circle_crossing_fraction_for_radial_segment(self):
         self.assertAlmostEqual(physics.circle_crossing_fraction((0, 0), (2, 0), 1), 0.5)
 
     def test_circle_crossing_fraction_for_oblique_segment(self):
         t = physics.circle_crossing_fraction((0.0, 0.0), (2.0, 2.0), math.sqrt(2.0))
         self.assertAlmostEqual(t, 0.5)
+
+    def test_circle_crossing_is_stable_at_extreme_scales(self):
+        tiny_t = physics.circle_crossing_fraction(
+            (0.0, 0.0), (2.0e-200, 0.0), 1.0e-200
+        )
+        self.assertAlmostEqual(tiny_t, 0.5, places=14)
+
+        radius = 1.0e16
+        start = radius - math.ulp(radius)
+        end = 2.0 * radius
+        expected = (radius - start) / (end - start)
+        large_t = physics.circle_crossing_fraction(
+            (start, 0.0), (end, 0.0), radius
+        )
+        self.assertAlmostEqual(large_t / expected, 1.0, places=14)
 
     def test_circle_tangent_and_no_crossing_cases(self):
         self.assertAlmostEqual(physics.circle_crossing_fraction((-2, 1), (2, 1), 1), 0.5)
@@ -346,9 +456,16 @@ class TestDriver(unittest.TestCase):
 
 
 class TestStatisticalProperties(unittest.TestCase):
+    def test_isolated_rng_does_not_mutate_global_state(self):
+        state_before = random.getstate()
+        with isolated_rng(12345):
+            physics.generate_component_step("uniform")
+            physics.generate_component_step("gaussian")
+        self.assertEqual(random.getstate(), state_before)
+
     def test_uniform_component_statistics_and_mean_step_length(self):
-        random.seed(20817)
-        sample = [physics.generate_component_step("uniform") for _ in range(50_000)]
+        with isolated_rng(20817):
+            sample = [physics.generate_component_step("uniform") for _ in range(50_000)]
         for coordinate in range(3):
             values = [step[coordinate] for step in sample]
             self.assertGreaterEqual(min(values), -1.0)
@@ -358,16 +475,18 @@ class TestStatisticalProperties(unittest.TestCase):
         self.assertAlmostEqual(mean_length, 0.9605919565, delta=0.006)
 
     def test_isotropic_step_has_no_preferred_mean_direction(self):
-        random.seed(314159)
-        sample = [physics.generate_isotropic_step() for _ in range(30_000)]
+        with isolated_rng(314159):
+            sample = [physics.generate_isotropic_step() for _ in range(30_000)]
         mean_x = sum(x for x, _ in sample) / len(sample)
         mean_y = sum(y for _, y in sample) / len(sample)
         self.assertAlmostEqual(mean_x, 0.0, delta=0.015)
         self.assertAlmostEqual(mean_y, 0.0, delta=0.015)
 
-    def test_scaled_distance_exponent_is_close_to_one_half(self):
-        random.seed(8675309)
-        lengths, averages = driver.run_scaled_distance_experiment(512, 180, "uniform")
+    def _assert_scaled_distance_exponent(self, distribution, seed):
+        with isolated_rng(seed):
+            lengths, averages = driver.run_scaled_distance_experiment(
+                512, 180, distribution
+            )
         log_x = [math.log(x) for x in lengths]
         log_y = [math.log(y) for y in averages]
         mean_x = sum(log_x) / len(log_x)
@@ -376,6 +495,12 @@ class TestStatisticalProperties(unittest.TestCase):
             (x - mean_x) ** 2 for x in log_x
         )
         self.assertAlmostEqual(slope, 0.5, delta=0.08)
+
+    def test_uniform_scaled_distance_exponent_is_close_to_one_half(self):
+        self._assert_scaled_distance_exponent("uniform", 8675309)
+
+    def test_gaussian_scaled_distance_exponent_is_close_to_one_half(self):
+        self._assert_scaled_distance_exponent("gaussian", 90210)
 
     def test_escape_steps_follow_quadratic_radius_scaling(self):
         def mean_escape_steps(radius: float) -> float:
@@ -390,9 +515,9 @@ class TestStatisticalProperties(unittest.TestCase):
             self.assertTrue(all(walk.escaped for walk in result.walks))
             return sum(walk.steps_taken for walk in result.walks) / len(result.walks)
 
-        random.seed(271828)
-        small = mean_escape_steps(6.0)
-        large = mean_escape_steps(12.0)
+        with isolated_rng(271828):
+            small = mean_escape_steps(6.0)
+            large = mean_escape_steps(12.0)
         self.assertAlmostEqual(large / small, 4.0, delta=0.75)
 
 
@@ -441,6 +566,41 @@ class TestPlotting(unittest.TestCase):
         result = driver.run_walk2d(n_walks=1, radius=100, step_cap=1)
         with self.assertRaisesRegex(ValueError, "corner"):
             plot.plot_walk2d(result, "center")
+
+    def test_walk_plot_rejects_malformed_constructed_results(self):
+        valid_walk = driver.WalkPath(
+            points=[(0.0, 0.0)], escaped=False, steps_taken=0
+        )
+        invalid_results = (
+            driver.Walk2DResult("1", "b", 0.0, 1.0, 1, 1, [valid_walk]),
+            driver.Walk2DResult("1", "b", 1.0, math.nan, 1, 1, [valid_walk]),
+            driver.Walk2DResult("1", "b", 1.0, 1.0, 1, 1, []),
+            driver.Walk2DResult(
+                "1", "b", 1.0, 1.0, 1, 1,
+                [driver.WalkPath([(math.inf, 0.0)], False, 0)],
+            ),
+            driver.Walk2DResult(
+                "1", "b", 1.0, 1.0, 1, 1,
+                [driver.WalkPath([(0.0, 0.0)], True, 1,
+                                 ((0.0, 0.0), (math.nan, 1.0)))],
+            ),
+        )
+        for result in invalid_results:
+            with self.subTest(result=result), self.assertRaises(ValueError):
+                plot.plot_walk2d(result)
+
+    def test_walk_plot_accepts_microscopic_finite_geometry(self):
+        result = driver.Walk2DResult(
+            model_version=physics.MODEL_VERSION,
+            build_id=physics.BUILD_ID,
+            radius=1.0e-200,
+            mean_free_path=1.0e-201,
+            reference_steps=1,
+            step_cap=1,
+            walks=[driver.WalkPath([(0.0, 0.0)], False, 0)],
+        )
+        with mock.patch.object(plot.plt, "show"):
+            plot.plot_walk2d(result)
 
 
 if __name__ == "__main__":
