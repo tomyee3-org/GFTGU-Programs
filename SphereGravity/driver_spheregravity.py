@@ -7,7 +7,7 @@ calculation.
 """
 
 import physics_spheregravity as phys
-from physics_spheregravity import compute_acceleration_profile, OutputType
+from physics_spheregravity import DEFAULT_EPSILON, OutputType, compute_acceleration_profile
 
 
 def get_version_info() -> dict[str, str]:
@@ -18,15 +18,20 @@ def get_version_info() -> dict[str, str]:
     }
 
 
-def run_spheregravity(nDiv=100, outputType: OutputType = "acceleration"):
+def run_spheregravity(
+    nDiv=100,
+    outputType: OutputType = "acceleration",
+    epsilon=DEFAULT_EPSILON,
+):
     """
     Run the SphereGravity simulation.
 
     Parameters:
         nDiv        — number of angular divisions
         outputType  — "acceleration" or "relative difference"
+        epsilon     — positive finite shell mass-scale factor
 
     Returns:
         radius[], acceleration[]
     """
-    return compute_acceleration_profile(nDiv, outputType)
+    return compute_acceleration_profile(nDiv, outputType, epsilon)

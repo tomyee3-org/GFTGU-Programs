@@ -16,7 +16,7 @@ import numpy as np
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.0.0"
+MODEL_VERSION = "1.0.1"
 BUILD_ID_COVERS = (
     "physics_spheregravity.py",
     "driver_spheregravity.py",
@@ -54,6 +54,12 @@ BUILD_ID = _compute_build_id()
 
 OutputType = Literal["acceleration", "relative difference"]
 
+SHELL_RADIUS = 1.0
+DEFAULT_EPSILON = 0.001
+NUM_RADII = 1000
+RADIUS_STEP = 0.005
+SURFACE_INDEX = round(SHELL_RADIUS / RADIUS_STEP)
+
 
 def _validate_nDiv(nDiv):
     """Validate the angular-division count used by the shell calculation."""
@@ -63,16 +69,22 @@ def _validate_nDiv(nDiv):
 
 def _validate_epsilon(epsilon):
     """Validate the shell mass-scale factor."""
-    if (
-        not isinstance(epsilon, (int, float, np.integer, np.floating))
-        or isinstance(epsilon, (bool, np.bool_))
-        or not np.isfinite(epsilon)
-        or epsilon <= 0
+    if not (
+        isinstance(epsilon, (int, float, np.integer, np.floating))
+        and not isinstance(epsilon, (bool, np.bool_))
     ):
         raise ValueError("epsilon must be a positive finite number.")
 
+    try:
+        is_valid = np.isfinite(epsilon) and epsilon > 0
+    except (TypeError, ValueError, OverflowError):
+        is_valid = False
 
-def compute_shell_mass(nDiv, epsilon=0.001):
+    if not is_valid:
+        raise ValueError("epsilon must be a positive finite number.")
+
+
+def compute_shell_mass(nDiv, epsilon=DEFAULT_EPSILON):
     """
     Compute total mass of the spherical shell by summing tile masses.
     """
@@ -94,7 +106,11 @@ def compute_shell_mass(nDiv, epsilon=0.001):
     return mass
 
 
-def compute_acceleration_profile(nDiv, outputType: OutputType = "acceleration", epsilon=0.001):
+def compute_acceleration_profile(
+    nDiv,
+    outputType: OutputType = "acceleration",
+    epsilon=DEFAULT_EPSILON,
+):
     """
     Compute gravitational acceleration at 1000 radii from r = 0 to r = 4.995
     (step 0.005), spanning 5 times the shell radius for a clear view of
@@ -124,16 +140,16 @@ def compute_acceleration_profile(nDiv, outputType: OutputType = "acceleration", 
     # Precompute shell mass
     mass = compute_shell_mass(nDiv, epsilon)
 
-    radius = np.zeros(1000)
-    acceleration = np.zeros(1000)
+    radius = np.zeros(NUM_RADII)
+    acceleration = np.zeros(NUM_RADII)
 
-    # Loop over radii: r = j * 0.005, so r ranges from 0.000 to 4.995.
-    # The shell lies at r = 1, which corresponds to j = 200.
-    for j in range(1000):
-        r = j * 0.005
+    # Loop over radii: r = j * RADIUS_STEP, from 0 through 4.995.
+    # The shell lies at r = SHELL_RADIUS, at SURFACE_INDEX.
+    for j in range(NUM_RADII):
+        r = j * RADIUS_STEP
         radius[j] = r
 
-        if j == 200:  # r = 1 (shell radius) — skip to avoid singularity
+        if j == SURFACE_INDEX:  # r = 1 — omit the idealized shell surface
             acceleration[j] = 0.0
             continue
 
@@ -163,8 +179,8 @@ def compute_acceleration_profile(nDiv, outputType: OutputType = "acceleration", 
         # Using j (not a floating-point r < 1.0 comparison) avoids any
         # ambiguity from r = j*0.005 not landing exactly on 1.0 in floating
         # point at j = 200.
-        for j in range(1000):
-            if j <= 200:
+        for j in range(NUM_RADII):
+            if j <= SURFACE_INDEX:
                 acceleration[j] = acceleration[j] / mass
             else:
                 r = radius[j]
