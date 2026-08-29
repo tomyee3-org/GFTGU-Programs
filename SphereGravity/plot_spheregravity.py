@@ -35,9 +35,18 @@ def plot_spheregravity(radius, acceleration, outputType: OutputType = "accelerat
         raise ValueError("radius and acceleration must contain real numeric values.")
     if not np.all(np.isfinite(radius)) or not np.all(np.isfinite(acceleration)):
         raise ValueError("radius and acceleration must contain only finite values.")
+    if np.any(radius < 0):
+        raise ValueError("radius values must be nonnegative.")
+    if np.any(np.diff(radius) <= 0):
+        raise ValueError("radius values must be strictly increasing.")
+
+    # Keep the physics function's finite zero placeholder for compatibility,
+    # but omit the unevaluated shell-surface sample from the drawn curve.
+    plotted_acceleration = acceleration.astype(float, copy=True)
+    plotted_acceleration[radius == SHELL_RADIUS] = np.nan
 
     fig, ax = plt.subplots(figsize=(8, 6))
-    ax.plot(radius, acceleration, linewidth=2)
+    ax.plot(radius, plotted_acceleration, linewidth=2)
 
     # Mark the shell boundary at r = 1 with a vertical dashed line
     ax.axvline(

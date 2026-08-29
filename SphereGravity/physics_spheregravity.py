@@ -16,7 +16,7 @@ import numpy as np
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.0.1"
+MODEL_VERSION = "1.2.0"
 BUILD_ID_COVERS = (
     "physics_spheregravity.py",
     "driver_spheregravity.py",
@@ -59,12 +59,16 @@ DEFAULT_EPSILON = 0.001
 NUM_RADII = 1000
 RADIUS_STEP = 0.005
 SURFACE_INDEX = round(SHELL_RADIUS / RADIUS_STEP)
+MAX_NDIV = 100_000
+MAX_VECTOR_ELEMENTS = 1_000_000
 
 
 def _validate_nDiv(nDiv):
     """Validate the angular-division count used by the shell calculation."""
     if not isinstance(nDiv, (int, np.integer)) or isinstance(nDiv, bool) or nDiv <= 0:
         raise ValueError("nDiv must be a positive integer.")
+    if nDiv > MAX_NDIV:
+        raise ValueError(f"nDiv must not exceed {MAX_NDIV}.")
 
 
 def _validate_epsilon(epsilon):
@@ -84,48 +88,51 @@ def _validate_epsilon(epsilon):
         raise ValueError("epsilon must be a positive finite number.")
 
 
+def _compute_ring_geometry(nDiv, epsilon):
+    """Return vectorized ring geometry for the optimized implementation."""
+    dPhi = 2.0 * np.pi / nDiv
+    dTheta = 0.5 * dPhi
+    theta = (np.arange(nDiv, dtype=float) + 0.5) * dTheta - 0.5 * np.pi
+    sin_theta = np.sin(theta)
+    ring_mass = (
+        dTheta
+        * dPhi
+        * np.cos(theta)
+        * epsilon
+        * SHELL_RADIUS**2
+        * nDiv
+    )
+    return sin_theta, ring_mass
+
+
 def compute_shell_mass(nDiv, epsilon=DEFAULT_EPSILON):
     """
-    Compute total mass of the spherical shell by summing tile masses.
+    Compute shell mass with the direct textbook midpoint loop.
     """
     _validate_nDiv(nDiv)
     _validate_epsilon(epsilon)
 
-    degToRad = np.pi / 180.0
-    dPhi = 360.0 * degToRad / nDiv
+    dPhi = 2.0 * np.pi / nDiv
     dTheta = 0.5 * dPhi
-
-    theta = 0.5 * dTheta - 90 * degToRad
+    theta = 0.5 * dTheta - 0.5 * np.pi
     mass = 0.0
 
     for _ in range(nDiv):
-        dm = dTheta * dPhi * np.cos(theta) * epsilon
+        dm = (
+            dTheta
+            * dPhi
+            * np.cos(theta)
+            * epsilon
+            * SHELL_RADIUS**2
+        )
         mass += dm * nDiv
         theta += dTheta
 
     return mass
 
 
-def compute_acceleration_profile(
-    nDiv,
-    outputType: OutputType = "acceleration",
-    epsilon=DEFAULT_EPSILON,
-):
-    """
-    Compute gravitational acceleration at 1000 radii from r = 0 to r = 4.995
-    (step 0.005), spanning 5 times the shell radius for a clear view of
-    both interior and exterior behaviour.
-
-    Parameters:
-        nDiv        — number of angular divisions
-        outputType  — "acceleration" or "relative difference"
-        epsilon     — shell thickness
-
-    Returns:
-        radius[]        — radii at which acceleration is evaluated
-        acceleration[]  — computed acceleration or relative difference
-    """
-
+def _validate_profile_inputs(nDiv, outputType, epsilon):
+    """Validate arguments shared by both profile implementations."""
     _validate_nDiv(nDiv)
     if outputType not in ("acceleration", "relative difference"):
         raise ValueError(
@@ -133,58 +140,134 @@ def compute_acceleration_profile(
         )
     _validate_epsilon(epsilon)
 
-    degToRad = np.pi / 180.0
-    dPhi = 360.0 * degToRad / nDiv
-    dTheta = 0.5 * dPhi
 
-    # Precompute shell mass
+def compute_acceleration_profile_textbook(
+    nDiv,
+    outputType: OutputType = "acceleration",
+    epsilon=DEFAULT_EPSILON,
+):
+    """Compute the profile with transparent textbook-style nested loops."""
+    _validate_profile_inputs(nDiv, outputType, epsilon)
+
+    dPhi = 2.0 * np.pi / nDiv
+    dTheta = 0.5 * dPhi
     mass = compute_shell_mass(nDiv, epsilon)
 
     radius = np.zeros(NUM_RADII)
     acceleration = np.zeros(NUM_RADII)
 
-    # Loop over radii: r = j * RADIUS_STEP, from 0 through 4.995.
-    # The shell lies at r = SHELL_RADIUS, at SURFACE_INDEX.
+    # At each observation radius, add the acceleration from every latitude
+    # ring. This deliberately mirrors the numerical-integration discussion in
+    # the textbook rather than hiding the sum inside NumPy broadcasting.
     for j in range(NUM_RADII):
         r = j * RADIUS_STEP
         radius[j] = r
 
-        if j == SURFACE_INDEX:  # r = 1 — omit the idealized shell surface
-            acceleration[j] = 0.0
+        if j == SURFACE_INDEX:
             continue
 
         accel = 0.0
-        theta = 0.5 * dTheta - 90 * degToRad
-
-        # Loop over latitude rings
+        theta = 0.5 * dTheta - 0.5 * np.pi
         for _ in range(nDiv):
-            s = np.sin(theta)
-            dist = np.sqrt(1 + r*r + 2*r*s)
-            dm = dTheta * dPhi * np.cos(theta) * epsilon
-            x = r + s
-            dAccel = dm * x / (dist**3)
+            sin_theta = np.sin(theta)
+            distance = np.sqrt(
+                SHELL_RADIUS**2
+                + r * r
+                + 2.0 * r * SHELL_RADIUS * sin_theta
+            )
+            dm = (
+                dTheta
+                * dPhi
+                * np.cos(theta)
+                * epsilon
+                * SHELL_RADIUS**2
+            )
+            axial_separation = r + SHELL_RADIUS * sin_theta
+            dAccel = dm * axial_separation / distance**3
             accel += dAccel * nDiv
             theta += dTheta
 
         acceleration[j] = accel
 
-    # Relative difference mode
     if outputType == "relative difference":
-        # Indices 0..200 inclusive (r = 0.00 through r = 1.00, i.e. inside
-        # the shell and the shell itself) are normalised by dividing by
-        # `mass` — which equals the Newtonian acceleration just outside the
-        # shell, since Newton's g = mass/r^2 evaluates to exactly `mass` at
-        # r = 1. Indices 201+ (strictly outside) use the standard relative-
-        # difference formula against the Newtonian prediction at that radius.
-        # Using j (not a floating-point r < 1.0 comparison) avoids any
-        # ambiguity from r = j*0.005 not landing exactly on 1.0 in floating
-        # point at j = 200.
         for j in range(NUM_RADII):
-            if j <= SURFACE_INDEX:
-                acceleration[j] = acceleration[j] / mass
-            else:
-                r = radius[j]
-                newton = mass / (r * r)
+            if j < SURFACE_INDEX:
+                acceleration[j] /= mass
+            elif j > SURFACE_INDEX:
+                newton = mass / radius[j] ** 2
                 acceleration[j] = (acceleration[j] - newton) / newton
 
     return radius, acceleration
+
+
+def compute_acceleration_profile_optimized(
+    nDiv,
+    outputType: OutputType = "acceleration",
+    epsilon=DEFAULT_EPSILON,
+):
+    """
+    Compute the same profile with bounded NumPy vectorization.
+
+    Parameters:
+        nDiv        — number of angular divisions
+        outputType  — "acceleration" or "relative difference"
+        epsilon     — positive finite shell mass-scale factor
+
+    Returns:
+        radius[]        — radii at which acceleration is evaluated
+        acceleration[]  — computed acceleration or relative difference
+    """
+
+    _validate_profile_inputs(nDiv, outputType, epsilon)
+
+    sin_theta, ring_mass = _compute_ring_geometry(nDiv, epsilon)
+    mass = float(np.sum(ring_mass))
+
+    radius = np.arange(NUM_RADII, dtype=float) * RADIUS_STEP
+    acceleration = np.empty(NUM_RADII, dtype=float)
+
+    # Work in bounded radial chunks. This vectorizes all latitude-ring
+    # contributions while avoiding the large temporary arrays that a single
+    # NUM_RADII-by-nDiv broadcast would require.
+    chunk_size = max(1, min(NUM_RADII, MAX_VECTOR_ELEMENTS // nDiv))
+    for first, last in ((0, SURFACE_INDEX), (SURFACE_INDEX + 1, NUM_RADII)):
+        for start in range(first, last, chunk_size):
+            stop = min(start + chunk_size, last)
+            r = radius[start:stop, np.newaxis]
+            distance_squared = (
+                SHELL_RADIUS**2
+                + r * r
+                + 2.0 * r * SHELL_RADIUS * sin_theta[np.newaxis, :]
+            )
+            numerator = r + SHELL_RADIUS * sin_theta[np.newaxis, :]
+            contributions = (
+                ring_mass[np.newaxis, :]
+                * numerator
+                / (distance_squared * np.sqrt(distance_squared))
+            )
+            acceleration[start:stop] = np.sum(contributions, axis=1)
+
+    # Preserve the legacy returned-data contract. The plotter replaces this
+    # placeholder with NaN only in a plotting copy so the curve has a gap.
+    acceleration[SURFACE_INDEX] = 0.0
+
+    # Relative difference mode
+    if outputType == "relative difference":
+        interior = radius < SHELL_RADIUS
+        exterior = radius > SHELL_RADIUS
+        acceleration[interior] /= mass
+        newton = mass / radius[exterior] ** 2
+        acceleration[exterior] = (acceleration[exterior] - newton) / newton
+        acceleration[SURFACE_INDEX] = 0.0
+
+    return radius, acceleration
+
+
+# IMPLEMENTATION SELECTION
+#
+# The transparent textbook implementation is the normal program behavior.
+# To compare it with the optimized NumPy implementation, comment out the
+# first assignment and uncomment the second. Both functions have identical
+# signatures and return values, so driver_spheregravity.py needs no changes.
+compute_acceleration_profile = compute_acceleration_profile_textbook
+# compute_acceleration_profile = compute_acceleration_profile_optimized
