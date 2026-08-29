@@ -7,6 +7,7 @@ modules during upload.
 
 import ast
 import hashlib
+from html.parser import HTMLParser
 import math
 import os
 from pathlib import Path
@@ -66,14 +67,63 @@ def relative_error(actual, expected):
     return abs(actual - expected) / abs(expected)
 
 
-def independent_build_id():
+def independent_build_id(module_dir=MODULE_DIR):
+    """Reproduce the release framing from raw bytes, independently of open()."""
     digest = hashlib.sha256()
     for name in CORE_MODULE_FILENAMES:
-        content = (MODULE_DIR / name).read_text(encoding="utf-8").encode("utf-8")
+        raw = (Path(module_dir) / name).read_bytes()
+        text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        content = text.encode("utf-8")
         digest.update(name.encode("utf-8"))
         digest.update(len(content).to_bytes(8, "big"))
         digest.update(content)
     return digest.hexdigest()[:12]
+
+
+class HelpStructureParser(HTMLParser):
+    """Collect IDs, links, and table rows without third-party dependencies."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.ids = []
+        self.hrefs = []
+        self.rows = []
+        self.section_id = None
+        self.in_row = False
+        self.in_cell = False
+        self.current_row = []
+        self.current_cell = []
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        element_id = attributes.get("id")
+        if element_id:
+            self.ids.append(element_id)
+        if tag == "a" and "href" in attributes:
+            self.hrefs.append((self.section_id, attributes["href"]))
+        if tag == "section":
+            self.section_id = element_id
+        elif tag == "tr":
+            self.in_row = True
+            self.current_row = []
+        elif tag in ("td", "th") and self.in_row:
+            self.in_cell = True
+            self.current_cell = []
+
+    def handle_data(self, data):
+        if self.in_cell:
+            self.current_cell.append(data)
+
+    def handle_endtag(self, tag):
+        if tag in ("td", "th") and self.in_cell:
+            text = " ".join("".join(self.current_cell).split())
+            self.current_row.append(text)
+            self.in_cell = False
+        elif tag == "tr" and self.in_row:
+            self.rows.append((self.section_id, tuple(self.current_row)))
+            self.in_row = False
+        elif tag == "section":
+            self.section_id = None
 
 
 class TestFileLocationAndReleaseMetadata(unittest.TestCase):
@@ -115,6 +165,41 @@ class TestFileLocationAndReleaseMetadata(unittest.TestCase):
         self.assertEqual(phys.BUILD_ID, independent_build_id())
         self.assertEqual(phys.BUILD_ID, phys._compute_build_id())
 
+    def test_build_id_is_invariant_under_lf_crlf_and_classic_cr(self):
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            trees = [root / name for name in ("lf", "crlf", "cr")]
+            endings = (b"\n", b"\r\n", b"\r")
+            for tree, ending in zip(trees, endings):
+                tree.mkdir()
+                for name in CORE_MODULE_FILENAMES:
+                    (tree / name).write_bytes(ending.join((b"alpha", b"beta", b"")))
+            build_ids = [phys._compute_build_id(tree) for tree in trees]
+            self.assertEqual(build_ids, [build_ids[0]] * len(build_ids))
+            self.assertEqual(independent_build_id(trees[0]), build_ids[0])
+
+    def test_build_id_treats_bom_and_unicode_normalization_as_changes(self):
+        base = {name: "value = 'plain'\n" for name in CORE_MODULE_FILENAMES}
+        with_bom = dict(base)
+        with_bom[CORE_MODULE_FILENAMES[0]] = "\ufeff" + with_bom[CORE_MODULE_FILENAMES[0]]
+        self.assertNotEqual(
+            phys._build_id_from_texts(base),
+            phys._build_id_from_texts(with_bom),
+        )
+
+        composed = dict(base)
+        decomposed = dict(base)
+        composed[CORE_MODULE_FILENAMES[0]] = "label = 'é'\n"
+        decomposed[CORE_MODULE_FILENAMES[0]] = "label = 'e\u0301'\n"
+        self.assertNotEqual(
+            phys._build_id_from_texts(composed),
+            phys._build_id_from_texts(decomposed),
+        )
+
+    def test_build_id_returns_unknown_for_incomplete_tree(self):
+        with tempfile.TemporaryDirectory() as temp_name:
+            self.assertEqual(phys._compute_build_id(temp_name), "unknown")
+
     def test_help_version_and_build_match_program(self):
         text = HELP_FILE.read_text(encoding="utf-8")
         match = re.search(
@@ -137,6 +222,28 @@ class TestFileLocationAndReleaseMetadata(unittest.TestCase):
         )
         expected = f"Planck2 {phys.MODEL_VERSION} (build {phys.BUILD_ID})"
         self.assertEqual(completed.stdout.strip(), expected)
+
+    def test_flat_layout_import_and_driver_smoke(self):
+        with tempfile.TemporaryDirectory() as temp_name:
+            flat = Path(temp_name)
+            for name in CORE_MODULE_FILENAMES:
+                shutil.copy2(MODULE_DIR / name, flat / name)
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "from planck2_driver import run_planck2; "
+                        "r=run_planck2(5900.0, 'frequency', 20); "
+                        "assert len(r.x_values)==21 and r.physical_integral>0"
+                    ),
+                ],
+                cwd=flat,
+                text=True,
+                capture_output=True,
+                timeout=60,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
 
     @unittest.skipIf(
         os.environ.get("PLANCK2_SKIP_FLAT_LAYOUT_TEST") == "1",
@@ -328,6 +435,46 @@ class TestDomainAndInputValidation(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "step size"):
             driver.run_planck2(5900.0, "frequency", 2, domain)
 
+    def test_ln_shape_function_validates_exponent_and_domain_contract(self):
+        for p in (-1, 0, 2, 4, 6, 3.0, True, "3", None):
+            with self.subTest(p=p):
+                with self.assertRaisesRegex(ValueError, "integer 3 or 5"):
+                    phys.ln_shape_function(1.0, p, phys.PlanckDomain())
+        for domain in (None, object(), {}, "domain"):
+            with self.subTest(domain=domain):
+                with self.assertRaisesRegex(ValueError, "PlanckDomain"):
+                    phys.ln_shape_function(1.0, 3, domain)
+        with self.assertRaises(ValueError):
+            phys.ln_shape_function(
+                1.0,
+                3,
+                phys.PlanckDomain(x_low=5.0, x_high=4.0),
+            )
+        with self.assertRaisesRegex(ValueError, "PlanckDomain"):
+            driver.run_planck2(5900.0, "frequency", 10, domain="invalid")
+
+    def test_extreme_finite_values_raise_explanatory_value_errors(self):
+        calls = (
+            lambda: phys.prefactor("wavelength", 1.0e308),
+            lambda: phys.prefactor("wavelength", 1.0e-200),
+            lambda: phys.exact_physical_integral("frequency", 1.0e308),
+            lambda: phys.exact_physical_integral("frequency", 1.0e-200),
+            lambda: phys.coordinate_jacobian("wavelength", 1.0e308, 1.0e308),
+            lambda: phys.x_to_wavelength(1.0e-308, 1.0e-308),
+            lambda: phys.x_to_frequency(1.0e308, 1.0e308),
+            lambda: driver.run_planck2(1.0e308, "frequency", 10),
+            lambda: driver.run_planck2(1.0e-200, "frequency", 10),
+        )
+        for call in calls:
+            with self.subTest(call=call):
+                with self.assertRaisesRegex(ValueError, "representable|range"):
+                    call()
+
+    def test_driver_rejects_nonfinite_derived_result(self):
+        with mock.patch.object(driver, "prefactor", return_value=math.inf):
+            with self.assertRaisesRegex(ValueError, "representable"):
+                driver.run_planck2(5900.0, "frequency", 10)
+
 
 class TestShapeFunction(unittest.TestCase):
     def setUp(self):
@@ -359,6 +506,37 @@ class TestShapeFunction(unittest.TestCase):
                 delta=expected * 2e-14,
             )
 
+    def test_x_low_boundary_uses_exact_branch_only_at_and_above_threshold(self):
+        p = 3
+        boundary = self.domain.x_low
+        below = math.nextafter(boundary, -math.inf)
+        above = math.nextafter(boundary, math.inf)
+        self.assertAlmostEqual(
+            phys.ln_shape_function(below, p, self.domain),
+            (p - 1) * math.log(below),
+            places=14,
+        )
+        for x in (boundary, above):
+            self.assertEqual(
+                phys.ln_shape_function(x, p, self.domain),
+                p * math.log(x) - math.log(math.expm1(x)),
+            )
+
+    def test_x_high_boundary_uses_wien_branch_only_above_threshold(self):
+        p = 5
+        boundary = self.domain.x_high
+        below = math.nextafter(boundary, -math.inf)
+        above = math.nextafter(boundary, math.inf)
+        for x in (below, boundary):
+            self.assertEqual(
+                phys.ln_shape_function(x, p, self.domain),
+                p * math.log(x) - math.log(math.expm1(x)),
+            )
+        self.assertEqual(
+            phys.ln_shape_function(above, p, self.domain),
+            p * math.log(above) - above,
+        )
+
     def test_shape_exponents(self):
         self.assertEqual(phys.SHAPE_EXPONENT["wavelength"], 5)
         self.assertEqual(phys.SHAPE_EXPONENT["frequency"], 3)
@@ -380,6 +558,53 @@ class TestDriverScientificResults(unittest.TestCase):
         self.assertEqual(len(result.y_values), 11)
         self.assertEqual(result.x_values[0], phys.PlanckDomain().x_min)
         self.assertEqual(result.x_values[-1], phys.PlanckDomain().x_max)
+
+    def test_result_lists_and_peak_fields_are_consistent(self):
+        for result in self.results.values():
+            with self.subTest(quantity=result.quantity):
+                self.assertGreater(len(result.x_values), 0)
+                self.assertEqual(len(result.x_values), len(result.coord_values))
+                self.assertEqual(len(result.x_values), len(result.y_values))
+                peak_index = result.x_values.index(result.x_peak)
+                self.assertEqual(result.coord_values[peak_index], result.coord_peak)
+                self.assertEqual(result.y_values[peak_index], result.y_peak)
+
+    def test_coordinates_are_strictly_monotonic_in_sample_order(self):
+        wavelength = self.results["wavelength"].coord_values
+        self.assertTrue(all(a > b for a, b in zip(wavelength, wavelength[1:])))
+        for quantity in ("frequency", "energy_density"):
+            coords = self.results[quantity].coord_values
+            with self.subTest(quantity=quantity):
+                self.assertTrue(all(a < b for a, b in zip(coords, coords[1:])))
+
+    def test_domain_wholly_below_peak_selects_right_endpoint(self):
+        domain = phys.PlanckDomain(x_min=0.1, x_max=1.0, x_low=0.1, x_high=1.0)
+        result = driver.run_planck2(5900.0, "frequency", 40, domain)
+        self.assertEqual(result.x_peak, domain.x_max)
+
+    def test_domain_wholly_above_peak_selects_left_endpoint(self):
+        domain = phys.PlanckDomain(x_min=4.0, x_max=8.0, x_low=4.0, x_high=8.0)
+        result = driver.run_planck2(5900.0, "frequency", 40, domain)
+        self.assertEqual(result.x_peak, domain.x_min)
+
+    def test_narrow_domain_brackets_analytic_peak(self):
+        exact_peak = 2.821439372122079
+        domain = phys.PlanckDomain(x_min=2.8, x_max=2.84, x_low=2.8, x_high=2.84)
+        result = driver.run_planck2(5900.0, "frequency", 40, domain)
+        self.assertLessEqual(abs(result.x_peak - exact_peak), 0.0005)
+
+    def test_one_step_domain_uses_both_endpoints(self):
+        domain = phys.PlanckDomain(x_min=0.1, x_max=1.0, x_low=0.1, x_high=1.0)
+        result = driver.run_planck2(5900.0, "frequency", 1, domain)
+        self.assertEqual(result.x_values, [domain.x_min, domain.x_max])
+        self.assertEqual(result.x_peak, domain.x_max)
+
+    def test_equal_sampled_values_keep_first_sample_as_peak(self):
+        domain = phys.PlanckDomain(x_min=1.0, x_max=2.0, x_low=1.0, x_high=2.0)
+        with mock.patch.object(driver, "_ln_shape_function_unchecked", return_value=0.0):
+            result = driver.run_planck2(5900.0, "frequency", 1, domain)
+        self.assertEqual(result.y_values[0], result.y_values[1])
+        self.assertEqual(result.x_peak, domain.x_min)
 
     def test_result_carries_release_metadata(self):
         result = self.results["wavelength"]
@@ -490,6 +715,21 @@ class TestPlotting(unittest.TestCase):
         x_data = list(plt.gca().lines[0].get_xdata())
         self.assertEqual(x_data, sorted(x_data))
 
+    def test_peak_marker_title_and_axis_labels_for_every_mode(self):
+        for quantity in phys.SHAPE_EXPONENT:
+            result = driver.run_planck2(5900.0, quantity, 100)
+            with self.subTest(quantity=quantity), mock.patch.object(plt, "show"):
+                plotter.plot_planck2(result)
+                axes = plt.gca()
+                self.assertGreaterEqual(len(axes.lines), 2)
+                marker_x = list(axes.lines[1].get_xdata())
+                self.assertEqual(marker_x, [result.coord_peak, result.coord_peak])
+                self.assertEqual(axes.get_xlabel(), result.x_label)
+                self.assertEqual(axes.get_ylabel(), result.y_label)
+                self.assertIn(quantity.replace("_", " ").title(), axes.get_title())
+                self.assertIn("T = 5900 K", axes.get_title())
+                plt.close("all")
+
     def test_all_annotation_corners_are_accepted(self):
         result = driver.run_planck2(5900.0, "frequency", 20)
         for corner in ("upper right", "upper left", "lower right", "lower left"):
@@ -532,47 +772,81 @@ class TestHelpFile(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.text = HELP_FILE.read_text(encoding="utf-8")
+        cls.parser = HelpStructureParser()
+        cls.parser.feed(cls.text)
 
     def test_help_file_exists_and_is_html5_utf8(self):
         self.assertTrue(HELP_FILE.is_file())
         self.assertIn("<!DOCTYPE html>", self.text[:100])
         self.assertRegex(self.text[:500], r'<meta charset="utf-8"\s*/?>')
 
-    def test_help_lists_current_defaults(self):
-        expected_fragments = (
-            '<td class="pdefault">5900.0</td>',
-            '<td class="pdefault">"wavelength"</td>',
-            '<td class="pdefault">2000</td>',
-            '<td class="pdefault">0.01</td>',
-            '<td class="pdefault">100.0</td>',
-            '<td class="pdefault">0.05</td>',
-            '<td class="pdefault">20.0</td>',
-            '<td class="pdefault">"upper right"</td>',
-            '<td class="pdefault">0.003</td>',
-        )
-        for fragment in expected_fragments:
-            self.assertIn(fragment, self.text)
+    def test_exactly_one_version_build_element(self):
+        self.assertEqual(self.parser.ids.count("version_build"), 1)
 
-    def test_help_describes_three_quantity_modes_and_units(self):
-        for quantity in ('"wavelength"', '"frequency"', '"energy_density"'):
-            self.assertIn(quantity, self.text)
-        for units in ("W m⁻³ sr⁻¹", "W m⁻² sr⁻¹ Hz⁻¹", "J m⁻³ Hz⁻¹"):
-            self.assertIn(units, self.text)
+    def test_parameter_names_and_defaults_are_paired_in_rows(self):
+        rows = {
+            row[0]: row[1]
+            for section, row in self.parser.rows
+            if section == "parameters" and len(row) >= 2 and row[0] != "Parameter"
+        }
+        expected = {
+            "T": "5900.0",
+            "quantity": '"wavelength"',
+            "n_steps": "2000",
+            "x_min": "0.01",
+            "x_max": "100.0",
+            "x_low": "0.05",
+            "x_high": "20.0",
+            "corner": '"upper right"',
+            "y_frac_window": "0.003",
+        }
+        self.assertEqual({name: rows[name] for name in expected}, expected)
+
+    def test_quantity_mode_fields_are_paired_in_rows(self):
+        rows = {
+            row[0]: row
+            for section, row in self.parser.rows
+            if section == "quantities" and len(row) == 4 and row[0] != "Mode string"
+        }
+        expected = {
+            '"wavelength"': ("Spectral radiance", "x^5", "Wavelength (m)"),
+            '"frequency"': ("Spectral radiance", "x^3", "Frequency (Hz)"),
+            '"energy_density"': ("Spectral energy density", "x^3", "Frequency (Hz)"),
+        }
+        expected_units = {
+            '"wavelength"': "W m⁻³ sr⁻¹",
+            '"frequency"': "W m⁻² sr⁻¹ Hz⁻¹",
+            '"energy_density"': "J m⁻³ Hz⁻¹",
+        }
+        self.assertEqual(set(rows), set(expected))
+        for mode, (quantity_name, shape, coordinate) in expected.items():
+            with self.subTest(mode=mode):
+                row = rows[mode]
+                self.assertIn(quantity_name, row[1])
+                self.assertIn(expected_units[mode], row[1])
+                self.assertIn(shape, row[2])
+                self.assertEqual(row[3], coordinate)
 
     def test_help_distinguishes_dimensionless_and_physical_integrals(self):
         self.assertIn("distinct from", self.text)
         self.assertIn("coordinate Jacobian", self.text)
         self.assertIn(r"\frac{\sigma T^4}{\pi}", self.text)
         self.assertIn(r"\frac{4\sigma}{c}T^4", self.text)
+        normalized = " ".join(self.text.split())
+        self.assertIn(r"x=\frac{hc}{\lambda kT}=\frac{h\nu}{kT}", normalized)
+        self.assertIn(r"\int_0^\infty\frac{x^3}{e^x-1}\,dx=\frac{\pi^4}{15}", normalized)
+        self.assertIn(r"\int_0^\infty B_\lambda\,d\lambda", normalized)
 
     def test_help_documents_validation_contract(self):
         self.assertIn("1–1,000,000", self.text)
         self.assertIn("representable positive step", self.text)
         self.assertIn("finite range 0–1", self.text)
+        self.assertIn("representable floating-point range", self.text)
 
-    def test_exercises_are_sequential_and_progressive(self):
+    def test_exercise_identifiers_are_unique_and_sequential(self):
         numbers = re.findall(r'<div class="ec-num">EXP-(\d+)</div>', self.text)
         self.assertEqual(numbers, [str(number) for number in range(1, 9)])
+        self.assertEqual(len(numbers), len(set(numbers)))
         headings = re.findall(
             r'<div class="ec-num">EXP-\d+</div><h4>(.*?)</h4>',
             self.text,
@@ -580,9 +854,34 @@ class TestHelpFile(unittest.TestCase):
         self.assertEqual(headings[0], "Solar Black-Body Approximation")
         self.assertEqual(headings[-1], "Rayleigh–Jeans and Wien Limits")
 
+    def test_internal_navigation_targets_exist(self):
+        targets = set(self.parser.ids)
+        internal_links = [href for _, href in self.parser.hrefs if href.startswith("#")]
+        self.assertGreater(len(internal_links), 0)
+        for href in internal_links:
+            with self.subTest(href=href):
+                self.assertIn(href[1:], targets)
+
+    def test_related_program_links_are_module_relative_html_links(self):
+        related = [href for section, href in self.parser.hrefs if section == "related"]
+        self.assertEqual(related, ["../08-Star/Star.html", "../08-Random2/Random2.html"])
+
     def test_student_content_contains_no_ai_or_review_history(self):
         student_text = self.text.split('<section id="license">', 1)[0]
-        for term in ("Claude", "Copilot", "Gemini", "AI-generated", "audit round"):
+        suspicious_terms = (
+            "Claude",
+            "Copilot",
+            "Gemini",
+            "ChatGPT",
+            "Anthropic",
+            "AI-generated",
+            "audit round",
+            "previous version",
+            "porting fix",
+            "legacy implementation",
+            "reviewer",
+        )
+        for term in suspicious_terms:
             self.assertNotIn(term, student_text)
 
     def test_java_provenance_is_confined_to_license(self):
@@ -601,7 +900,7 @@ class TestMainModule(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "No closed form"):
             planck2_main._exact_dimensionless_area(4)
 
-    def test_default_program_runs_headlessly(self):
+    def test_default_program_runs_with_noninteractive_backend(self):
         env = os.environ.copy()
         env["MPLBACKEND"] = "Agg"
         completed = subprocess.run(

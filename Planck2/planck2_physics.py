@@ -25,7 +25,7 @@ import math
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.0.1"
+MODEL_VERSION = "1.0.2"
 BUILD_ID_COVERS = (
     "planck2_physics.py",
     "planck2_driver.py",
@@ -34,28 +34,47 @@ BUILD_ID_COVERS = (
 )
 
 
-def _compute_build_id() -> str:
+def _build_id_from_texts(source_texts) -> str:
+    """Hash a mapping containing the normalized text of every core module.
+
+    Line-ending normalization belongs to the file-reading boundary in
+    ``_compute_build_id``.  Other textual differences, including a UTF-8 BOM
+    or different Unicode normalization, intentionally identify a new build.
+    """
+    import hashlib
+
+    digest = hashlib.sha256()
+    for name in BUILD_ID_COVERS:
+        content = source_texts[name].encode("utf-8")
+        digest.update(name.encode("utf-8"))
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()[:12]
+
+
+def _compute_build_id(module_dir=None) -> str:
     """Return a short, reproducible identifier for the core source files.
 
     Files are read as UTF-8 text with universal-newline conversion, so merely
     switching between LF and CRLF line endings does not create a new build.
-    Filename and byte-length framing prevents ambiguous concatenations.
+    Filename and byte-length framing prevents ambiguous concatenations.  A
+    UTF-8 BOM and Unicode normalization changes are treated as content changes.
     """
-    import hashlib
     import os
 
     try:
-        here = os.path.dirname(os.path.abspath(__file__))
-        digest = hashlib.sha256()
+        here = (
+            os.path.dirname(os.path.abspath(__file__))
+            if module_dir is None
+            else os.path.abspath(os.fspath(module_dir))
+        )
+        source_texts = {}
         for name in BUILD_ID_COVERS:
             path = os.path.join(here, name)
             with open(path, "r", encoding="utf-8", newline=None) as source:
-                content = source.read().encode("utf-8")
-            digest.update(name.encode("utf-8"))
-            digest.update(len(content).to_bytes(8, "big"))
-            digest.update(content)
-        return digest.hexdigest()[:12]
-    except (OSError, UnicodeDecodeError):
+                source_texts[name] = source.read()
+        return _build_id_from_texts(source_texts)
+    except (KeyError, OSError, UnicodeDecodeError, UnicodeEncodeError):
         return "unknown"
 
 
@@ -113,11 +132,37 @@ def validate_quantity(quantity: str) -> None:
         )
 
 
-def ln_shape_function(x: float, p: int, domain: PlanckDomain) -> float:
-    """Return ln[x^p/(exp(x)-1)] using stable small/exact/large-x branches."""
-    if not isinstance(x, (int, float)) or isinstance(x, bool) or not math.isfinite(x) or x <= 0.0:
+def _validate_temperature(T: float) -> None:
+    if (
+        not isinstance(T, (int, float))
+        or isinstance(T, bool)
+        or not math.isfinite(T)
+        or T <= 0.0
+    ):
+        raise ValueError("Temperature must be a finite positive number.")
+
+
+def _validate_x(x: float) -> None:
+    if (
+        not isinstance(x, (int, float))
+        or isinstance(x, bool)
+        or not math.isfinite(x)
+        or x <= 0.0
+    ):
         raise ValueError("x must be a finite positive number.")
 
+
+def _require_positive_finite_result(value: float, label: str) -> float:
+    if not math.isfinite(value) or value <= 0.0:
+        raise ValueError(
+            f"{label} is outside the representable floating-point range "
+            "for the supplied values."
+        )
+    return value
+
+
+def _ln_shape_function_unchecked(x: float, p: int, domain: PlanckDomain) -> float:
+    """Internal branch evaluator after x, p, and domain have been validated."""
     if x > domain.x_high:
         # exp(x) >> 1, so ln(exp(x)-1) ~= x.
         ln_denom = x
@@ -131,6 +176,17 @@ def ln_shape_function(x: float, p: int, domain: PlanckDomain) -> float:
     return p * math.log(x) - ln_denom
 
 
+def ln_shape_function(x: float, p: int, domain: PlanckDomain) -> float:
+    """Return ln[x^p/(exp(x)-1)] for p=3 or p=5 on a valid domain."""
+    _validate_x(x)
+    if not isinstance(p, int) or isinstance(p, bool) or p not in (3, 5):
+        raise ValueError("p must be the integer 3 or 5.")
+    if not isinstance(domain, PlanckDomain):
+        raise ValueError("domain must be a PlanckDomain instance.")
+    domain.validate()
+    return _ln_shape_function_unchecked(x, p, domain)
+
+
 def shape_function(x: float, quantity: PlanckQuantity, domain: PlanckDomain) -> float:
     """Return the dimensionless shape function for the selected quantity."""
     validate_quantity(quantity)
@@ -140,80 +196,84 @@ def shape_function(x: float, quantity: PlanckQuantity, domain: PlanckDomain) -> 
 def prefactor(quantity: PlanckQuantity, T: float) -> float:
     """Return the SI prefactor multiplying the selected dimensionless shape."""
     validate_quantity(quantity)
-    if not isinstance(T, (int, float)) or isinstance(T, bool) or not math.isfinite(T) or T <= 0.0:
-        raise ValueError("Temperature must be a finite positive number.")
+    _validate_temperature(T)
 
-    if quantity == "wavelength":
-        # B_lambda = [2 k^5 T^5/(h^4 c^3)] x^5/(exp(x)-1)
-        return 2.0 * K_BOLTZMANN**5 * T**5 / (H_PLANCK**4 * C_LIGHT**3)
-    if quantity == "frequency":
-        # B_nu = [2 k^3 T^3/(h^2 c^2)] x^3/(exp(x)-1)
-        return 2.0 * K_BOLTZMANN**3 * T**3 / (H_PLANCK**2 * C_LIGHT**2)
-
-    # u_nu = (4 pi/c) B_nu
-    return 8.0 * math.pi * K_BOLTZMANN**3 * T**3 / (H_PLANCK**2 * C_LIGHT**3)
+    try:
+        if quantity == "wavelength":
+            # B_lambda = [2 k^5 T^5/(h^4 c^3)] x^5/(exp(x)-1)
+            value = 2.0 * K_BOLTZMANN**5 * T**5 / (H_PLANCK**4 * C_LIGHT**3)
+        elif quantity == "frequency":
+            # B_nu = [2 k^3 T^3/(h^2 c^2)] x^3/(exp(x)-1)
+            value = 2.0 * K_BOLTZMANN**3 * T**3 / (H_PLANCK**2 * C_LIGHT**2)
+        else:
+            # u_nu = (4 pi/c) B_nu
+            value = (
+                8.0 * math.pi * K_BOLTZMANN**3 * T**3
+                / (H_PLANCK**2 * C_LIGHT**3)
+            )
+    except OverflowError as exc:
+        raise ValueError(
+            "Temperature is outside the representable range for the spectral prefactor."
+        ) from exc
+    return _require_positive_finite_result(value, "The spectral prefactor")
 
 
 def coordinate_jacobian(quantity: PlanckQuantity, x: float, T: float) -> float:
     """Return |d(lambda)/dx| or d(nu)/dx for integrating the physical spectrum."""
     validate_quantity(quantity)
-    if not isinstance(T, (int, float)) or isinstance(T, bool) or not math.isfinite(T) or T <= 0.0:
-        raise ValueError("Temperature must be a finite positive number.")
-    if not isinstance(x, (int, float)) or isinstance(x, bool) or not math.isfinite(x) or x <= 0.0:
-        raise ValueError("x must be a finite positive number.")
+    _validate_temperature(T)
+    _validate_x(x)
 
-    if quantity == "wavelength":
-        # lambda = hc/(x k T)
-        # This ordering avoids premature underflow in k*T at very low T.
-        return WIEN_SCALE / x / x / T
-    # nu = x k T / h
-    return FREQUENCY_SCALE * T
+    try:
+        if quantity == "wavelength":
+            # lambda = hc/(x k T)
+            value = WIEN_SCALE / x / x / T
+        else:
+            # nu = x k T / h
+            value = FREQUENCY_SCALE * T
+    except (OverflowError, ZeroDivisionError) as exc:
+        raise ValueError(
+            "The coordinate Jacobian is outside the representable range."
+        ) from exc
+    return _require_positive_finite_result(value, "The coordinate Jacobian")
 
 
 def exact_physical_integral(quantity: PlanckQuantity, T: float) -> float:
     """Exact bolometric integral for the selected physical spectral quantity."""
     validate_quantity(quantity)
-    if not isinstance(T, (int, float)) or isinstance(T, bool) or not math.isfinite(T) or T <= 0.0:
-        raise ValueError("Temperature must be a finite positive number.")
+    _validate_temperature(T)
 
-    if quantity in ("wavelength", "frequency"):
-        # Integral of spectral radiance over wavelength or frequency.
-        return SIGMA_SB * T**4 / math.pi
-    # Total black-body energy density.
-    return 4.0 * SIGMA_SB * T**4 / C_LIGHT
+    try:
+        if quantity in ("wavelength", "frequency"):
+            # Integral of spectral radiance over wavelength or frequency.
+            value = SIGMA_SB * T**4 / math.pi
+        else:
+            # Total black-body energy density.
+            value = 4.0 * SIGMA_SB * T**4 / C_LIGHT
+    except OverflowError as exc:
+        raise ValueError(
+            "Temperature is outside the representable range for the bolometric integral."
+        ) from exc
+    return _require_positive_finite_result(value, "The bolometric integral")
 
 
 def x_to_wavelength(x: float, T: float) -> float:
     """lambda = hc/(x k T), in metres."""
-    if (
-        not isinstance(x, (int, float))
-        or isinstance(x, bool)
-        or not math.isfinite(x)
-        or x <= 0.0
-        or not isinstance(T, (int, float))
-        or isinstance(T, bool)
-        or not math.isfinite(T)
-        or T <= 0.0
-    ):
-        raise ValueError("x and T must be finite positive numbers.")
-    # This ordering avoids premature underflow in x*k*T at very low T.
-    return WIEN_SCALE / x / T
+    _validate_x(x)
+    _validate_temperature(T)
+    try:
+        value = WIEN_SCALE / x / T
+    except (OverflowError, ZeroDivisionError) as exc:
+        raise ValueError("Wavelength is outside the representable range.") from exc
+    return _require_positive_finite_result(value, "Wavelength")
 
 
 def x_to_frequency(x: float, T: float) -> float:
     """nu = x k T/h, in hertz."""
-    if (
-        not isinstance(x, (int, float))
-        or isinstance(x, bool)
-        or not math.isfinite(x)
-        or x <= 0.0
-        or not isinstance(T, (int, float))
-        or isinstance(T, bool)
-        or not math.isfinite(T)
-        or T <= 0.0
-    ):
-        raise ValueError("x and T must be finite positive numbers.")
-    return FREQUENCY_SCALE * x * T
+    _validate_x(x)
+    _validate_temperature(T)
+    value = FREQUENCY_SCALE * x * T
+    return _require_positive_finite_result(value, "Frequency")
 
 
 def units_label(quantity: PlanckQuantity) -> tuple[str, str]:

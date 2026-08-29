@@ -9,9 +9,9 @@ from planck2_physics import (
     PlanckDomain,
     PlanckQuantity,
     SHAPE_EXPONENT,
+    _ln_shape_function_unchecked,
     coordinate_jacobian,
     exact_physical_integral,
-    ln_shape_function,
     physical_integral_units,
     prefactor,
     units_label,
@@ -63,6 +63,8 @@ def run_planck2(
         domain = PlanckDomain()
 
     validate_quantity(quantity)
+    if not isinstance(domain, PlanckDomain):
+        raise ValueError("domain must be a PlanckDomain instance.")
     domain.validate()
     if not isinstance(T, (int, float)) or isinstance(T, bool) or not math.isfinite(T) or T <= 0.0:
         raise ValueError("Temperature must be a finite positive number.")
@@ -81,6 +83,7 @@ def run_planck2(
             "The domain and n_steps must produce a finite positive step size."
         )
     pref = prefactor(quantity, T)
+    exact_integral = exact_physical_integral(quantity, T)
     p = SHAPE_EXPONENT[quantity]
 
     x_values: List[float] = []
@@ -89,7 +92,7 @@ def run_planck2(
 
     # Evaluate the first endpoint before beginning trapezoidal accumulation.
     x = domain.x_min
-    f_last = math.exp(ln_shape_function(x, p, domain))
+    f_last = math.exp(_ln_shape_function_unchecked(x, p, domain))
     y_last = pref * f_last
     jac_last = coordinate_jacobian(quantity, x, T)
 
@@ -114,7 +117,7 @@ def run_planck2(
         # Preserve the requested right endpoint exactly.  The general formula
         # can round the final value slightly below or above x_max.
         x = domain.x_max if i == n_steps else domain.x_min + i * dx
-        f = math.exp(ln_shape_function(x, p, domain))
+        f = math.exp(_ln_shape_function_unchecked(x, p, domain))
         y = pref * f
         jac = coordinate_jacobian(quantity, x, T)
         coord = (
@@ -140,6 +143,14 @@ def run_planck2(
         y_last = y
         jac_last = jac
 
+    y_peak = pref * f_peak
+    computed = (f_peak, y_peak, dimensionless_area, physical_integral)
+    if not all(math.isfinite(value) and value > 0.0 for value in computed):
+        raise ValueError(
+            "The selected temperature and domain produce results outside "
+            "the representable floating-point range."
+        )
+
     x_label, y_label = units_label(quantity)
 
     return Planck2Result(
@@ -152,10 +163,10 @@ def run_planck2(
         y_values=y_values,
         x_peak=x_peak,
         coord_peak=coord_peak,
-        y_peak=pref * f_peak,
+        y_peak=y_peak,
         dimensionless_area=dimensionless_area,
         physical_integral=physical_integral,
-        exact_physical_integral=exact_physical_integral(quantity, T),
+        exact_physical_integral=exact_integral,
         physical_integral_units=physical_integral_units(quantity),
         x_label=x_label,
         y_label=y_label,
