@@ -18,21 +18,25 @@ def plot_cannon_overlay(trajectories):
     exercises while leaving students responsible for generating the data.
     """
     fig, ax = plt.subplots(figsize=(8, 6))
-    count = 0
-    for label, xs, hs in trajectories:
-        ax.plot(xs, hs, label=label)
-        count += 1
+    try:
+        count = 0
+        for label, xs, hs in trajectories:
+            ax.plot(xs, hs, label=label)
+            count += 1
 
-    if count == 0:
+        if count == 0:
+            raise ValueError("at least one trajectory is required")
+
+        ax.scatter([0], [0], color="orange", label="Launch point")
+        ax.set_xlabel("Horizontal distance (m)")
+        ax.set_ylabel("Vertical distance (m)")
+        ax.set_title("CannonTrajectory — Newtonian Projectile Motion")
+        ax.set_aspect("equal", "box")  # Same physical scale on both axes.
+        ax.grid(True)
+        ax.legend()
+        plt.show()
+    except Exception:
         plt.close(fig)
-        raise ValueError("at least one trajectory is required")
+        raise
 
-    ax.scatter([0], [0], color="orange", label="Launch point")
-    ax.set_xlabel("Horizontal distance (m)")
-    ax.set_ylabel("Vertical distance (m)")
-    ax.set_title("CannonTrajectory — Newtonian Projectile Motion")
-    ax.set_aspect("equal", "box")  # Same physical scale on both axes.
-    ax.grid(True)
-    ax.legend()
-    plt.show()
     return fig, ax

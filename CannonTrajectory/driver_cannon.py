@@ -24,26 +24,35 @@ def version_info():
 
 
 def _require_real(name, value):
-    """Reject non-real settings before numerical operations begin."""
+    """Return a finite built-in float or raise an explanatory exception."""
     if isinstance(value, bool) or not isinstance(value, numbers.Real):
         raise TypeError(f"{name} must be a real number")
-    if not math.isfinite(value):
+
+    try:
+        normalized = float(value)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{name} must be finite and representable as a float"
+        ) from exc
+
+    if not math.isfinite(normalized):
         raise ValueError(f"{name} must be finite")
+    return normalized
 
 
 def _validate_inputs(speed, angle_deg, dt, max_steps, method):
-    _require_real("speed", speed)
+    speed = _require_real("speed", speed)
     if speed <= 0.0:
         raise ValueError("speed must be a finite positive number")
 
-    _require_real("angle_deg", angle_deg)
+    angle_deg = _require_real("angle_deg", angle_deg)
     if not 0.0 <= angle_deg <= 90.0:
         raise ValueError(
             "angle_deg must be between 0 and 90 degrees for a projectile "
             "launched from ground level"
         )
 
-    _require_real("dt", dt)
+    dt = _require_real("dt", dt)
     if dt <= 0.0:
         raise ValueError("dt must be a finite positive number")
 
@@ -59,7 +68,7 @@ def _validate_inputs(speed, angle_deg, dt, max_steps, method):
     if not isinstance(method, str) or method not in {"euler", "improved"}:
         raise ValueError('method must be "euler" or "improved"')
 
-    return max_steps
+    return speed, angle_deg, dt, max_steps
 
 
 def run_cannon_trajectory(
@@ -78,7 +87,9 @@ def run_cannon_trajectory(
     Raises ValueError for invalid input and RuntimeError if max_steps is
     exhausted before a below-ground sample is reached.
     """
-    max_steps = _validate_inputs(speed, angle_deg, dt, max_steps, method)
+    speed, angle_deg, dt, max_steps = _validate_inputs(
+        speed, angle_deg, dt, max_steps, method
+    )
 
     theta = math.radians(angle_deg)
     u = speed * math.cos(theta)

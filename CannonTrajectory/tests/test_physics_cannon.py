@@ -7,6 +7,7 @@ flattened beside the four program modules.
 
 import ast
 from collections import Counter
+from fractions import Fraction
 import hashlib
 from html.parser import HTMLParser
 import inspect
@@ -526,6 +527,23 @@ class TestDriverValidation(unittest.TestCase):
         with self.assertRaisesRegex(FloatingPointError, "non-finite"):
             driver.run_cannon_trajectory(speed=1e308, dt=1e308)
 
+    def test_unrepresentable_finite_reals_raise_explanatory_value_error(self):
+        for keyword in ("speed", "dt"):
+            for value in (10**1000, Fraction(10**1000, 1)):
+                with self.subTest(keyword=keyword, value_type=type(value).__name__):
+                    with self.assertRaisesRegex(ValueError, "representable as a float"):
+                        driver.run_cannon_trajectory(**{keyword: value})
+
+    def test_representable_fractions_are_normalized_and_accepted(self):
+        xs, hs = driver.run_cannon_trajectory(
+            speed=Fraction(100, 1),
+            angle_deg=Fraction(45, 1),
+            dt=Fraction(1, 10),
+        )
+        self.assertEqual(len(xs), 146)
+        self.assertEqual(xs.shape, hs.shape)
+        self.assertEqual(xs.dtype, float)
+
 
 class TestPlottingAndMain(unittest.TestCase):
     def tearDown(self):
@@ -600,6 +618,20 @@ class TestPlottingAndMain(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "at least one trajectory"):
                 plotting.plot_cannon_overlay([])
         show.assert_not_called()
+
+    def test_overlay_closes_figure_after_malformed_input(self):
+        import matplotlib.pyplot as plt
+
+        baseline = set(plt.get_fignums())
+        malformed = (
+            [("missing heights", [0.0, 1.0])],
+            [("unequal lengths", [0.0, 1.0], [0.0])],
+        )
+        for trajectories in malformed:
+            with self.subTest(trajectories=trajectories):
+                with self.assertRaises(ValueError):
+                    plotting.plot_cannon_overlay(trajectories)
+                self.assertEqual(set(plt.get_fignums()), baseline)
 
     def test_main_smoke_run_with_noninteractive_backend(self):
         environment = os.environ.copy()
@@ -684,11 +716,29 @@ class TestHelpFile(unittest.TestCase):
 
     def test_errors_and_runtime_requirements_are_in_relevant_sections(self):
         parameter_text = normalized_text(nodes_by_id(self.root, "parameters")[0])
-        for required in ("FloatingPointError", "Python 3.10 or later"):
+        for required in (
+            "FloatingPointError",
+            "Python 3.10 or later",
+            "representable as finite Python floats",
+        ):
             with self.subTest(required=required):
                 self.assertIn(required, parameter_text)
         algorithm_text = normalized_text(nodes_by_id(self.root, "algorithm")[0])
         self.assertIn("RuntimeError", algorithm_text)
+
+    def test_exact_ground_landing_needs_no_interpolation(self):
+        algorithm_text = normalized_text(nodes_by_id(self.root, "algorithm")[0])
+        self.assertIn(
+            "it is already the landing point and no interpolation is required",
+            algorithm_text,
+        )
+        experiment_section = nodes_by_id(self.root, "experiments")[0]
+        cards = descendants(
+            experiment_section, lambda node: has_class(node, "experiment-card")
+        )
+        experiment_five = normalized_text(cards[4])
+        self.assertIn("that stored sample is already the landing point", experiment_five)
+        self.assertIn("no interpolation is needed", experiment_five)
 
     def test_help_documents_mathjax_connectivity_plainly(self):
         self.assertIn("cdn.jsdelivr.net/npm/mathjax@3", self.html)
