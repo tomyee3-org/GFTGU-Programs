@@ -7,6 +7,8 @@ can investigate timestep error and interpolate the ground crossing themselves.
 """
 
 import math
+import numbers
+import operator
 import numpy as np
 
 import physics_cannon as phys
@@ -21,30 +23,43 @@ def version_info():
     }
 
 
+def _require_real(name, value):
+    """Reject non-real settings before numerical operations begin."""
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        raise TypeError(f"{name} must be a real number")
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be finite")
+
+
 def _validate_inputs(speed, angle_deg, dt, max_steps, method):
-    if not math.isfinite(speed) or speed <= 0.0:
+    _require_real("speed", speed)
+    if speed <= 0.0:
         raise ValueError("speed must be a finite positive number")
 
-    if not math.isfinite(angle_deg):
-        raise ValueError("angle_deg must be finite")
+    _require_real("angle_deg", angle_deg)
     if not 0.0 <= angle_deg <= 90.0:
         raise ValueError(
             "angle_deg must be between 0 and 90 degrees for a projectile "
             "launched from ground level"
         )
 
-    if not math.isfinite(dt) or dt <= 0.0:
+    _require_real("dt", dt)
+    if dt <= 0.0:
         raise ValueError("dt must be a finite positive number")
 
-    if (
-        not isinstance(max_steps, int)
-        or isinstance(max_steps, bool)
-        or max_steps < 2
-    ):
+    if isinstance(max_steps, bool):
+        raise TypeError("max_steps must be an integer")
+    try:
+        max_steps = operator.index(max_steps)
+    except TypeError as exc:
+        raise TypeError("max_steps must be an integer") from exc
+    if max_steps < 2:
         raise ValueError("max_steps must be an integer of at least 2")
 
-    if method not in {"euler", "improved"}:
+    if not isinstance(method, str) or method not in {"euler", "improved"}:
         raise ValueError('method must be "euler" or "improved"')
+
+    return max_steps
 
 
 def run_cannon_trajectory(
@@ -63,11 +78,11 @@ def run_cannon_trajectory(
     Raises ValueError for invalid input and RuntimeError if max_steps is
     exhausted before a below-ground sample is reached.
     """
-    _validate_inputs(speed, angle_deg, dt, max_steps, method)
+    max_steps = _validate_inputs(speed, angle_deg, dt, max_steps, method)
 
-    theta = np.radians(angle_deg)
-    u = speed * np.cos(theta)
-    v = speed * np.sin(theta)
+    theta = math.radians(angle_deg)
+    u = speed * math.cos(theta)
+    v = speed * math.sin(theta)
     state = np.array([0.0, 0.0, u, v], dtype=float)
 
     xs = np.zeros(max_steps, dtype=float)
@@ -82,7 +97,17 @@ def run_cannon_trajectory(
 
     j = 1
     while j < max_steps and state[1] >= 0.0:
-        state = stepper(state, dt)
+        try:
+            with np.errstate(over="raise", invalid="raise"):
+                state = stepper(state, dt)
+        except FloatingPointError as exc:
+            raise FloatingPointError(
+                "trajectory became non-finite; reduce speed or timestep"
+            ) from exc
+        if not np.all(np.isfinite(state)):
+            raise FloatingPointError(
+                "trajectory became non-finite; reduce speed or timestep"
+            )
         xs[j] = state[0]
         hs[j] = state[1]
         j += 1

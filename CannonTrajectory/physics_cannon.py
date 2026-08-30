@@ -14,7 +14,7 @@ Model:
 
 import numpy as np
 
-MODEL_VERSION = "1.0.0"
+MODEL_VERSION = "1.1.0"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -64,7 +64,10 @@ def _compute_build_id():
 BUILD_ID = _compute_build_id()
 
 
-g = 9.8  # Near-surface gravitational acceleration (m/s^2)
+# Standard acceleration due to gravity, defined exactly by international
+# agreement.  It is a representative near-surface value, not a claim that
+# gravity has precisely this value at every point on Earth.
+g = 9.80665  # m/s^2
 
 
 def derivs_cannon(state):
