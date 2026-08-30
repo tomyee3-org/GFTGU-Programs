@@ -10,6 +10,7 @@ layout and an uploaded/flattened copy beside the four program modules.
 
 import ast
 import hashlib
+from html import unescape
 from html.parser import HTMLParser
 import math
 import os
@@ -92,6 +93,25 @@ def _module_imports(path):
         elif isinstance(node, ast.ImportFrom) and node.module:
             names.add(node.module.split(".")[0])
     return names
+
+
+def _exercise_fragment(document, number):
+    """Return the HTML for one numbered exercise card."""
+    marker = f'<div class="ec-num">EXP-{number} ·'
+    start = document.index(marker)
+    next_card = document.find('<div class="exp-card">', start + len(marker))
+    if next_card == -1:
+        next_card = document.index("</div><!-- /exp-grid -->", start)
+    return document[start:next_card]
+
+
+def _exercise_code(document, number):
+    """Extract and HTML-unescape the Python block from an exercise card."""
+    fragment = _exercise_fragment(document, number)
+    match = re.search(r'<div class="ep">(.*?)</div>', fragment, flags=re.DOTALL)
+    if match is None:
+        raise AssertionError(f"EXP-{number} has no Python code block")
+    return unescape(match.group(1)).strip()
 
 
 class ModuleDiscoveryTests(unittest.TestCase):
@@ -490,7 +510,7 @@ class DriverBehaviorTests(unittest.TestCase):
         self.assertEqual(len(xs), 1000)
         self.assertGreater(np.min(np.hypot(xs, ys)), physics.R_EARTH)
 
-    def test_three_level_energy_convergence_is_monotonic_and_first_order(self):
+    def test_circular_inverse_square_energy_error_shows_first_order_convergence(self):
         h0 = 300_000.0
         r0 = physics.R_EARTH + h0
         circular_speed = math.sqrt(physics.MU_EARTH / r0)
@@ -555,20 +575,30 @@ class DriverBehaviorTests(unittest.TestCase):
             self.assertGreater(metric_errors[0], metric_errors[1])
             self.assertGreater(metric_errors[1], metric_errors[2])
 
+        # Version 1.1.1 baselines at 2880 updates were approximately:
+        # 0.0636 rad angular error, 1.37% radial error, 6.54% position
+        # error, and 6.37% velocity error.  These ceilings retain a modest
+        # cross-platform margin while detecting a meaningful degradation.
         fine_angle, fine_radius, fine_position, fine_velocity = errors[-1]
-        self.assertLess(fine_angle, 0.07)
-        self.assertLess(fine_radius / initial_radius, 0.02)
-        self.assertLess(fine_position / initial_radius, 0.07)
-        self.assertLess(fine_velocity / initial_speed, 0.07)
+        self.assertLess(fine_angle, 0.068)
+        self.assertLess(fine_radius / initial_radius, 0.015)
+        self.assertLess(fine_position / initial_radius, 0.068)
+        self.assertLess(fine_velocity / initial_speed, 0.068)
 
-        position_orders = [
-            math.log(errors[index][2] / errors[index + 1][2], 2.0)
-            for index in range(2)
-        ]
-        for order in position_orders:
-            with self.subTest(observed_position_order=order):
-                self.assertGreater(order, 0.8)
-                self.assertLess(order, 1.2)
+        metric_names = ("angle", "radius", "position", "velocity")
+        for metric_index, metric_name in enumerate(metric_names):
+            observed_orders = [
+                math.log(
+                    errors[index][metric_index]
+                    / errors[index + 1][metric_index],
+                    2.0,
+                )
+                for index in range(2)
+            ]
+            for order in observed_orders:
+                with self.subTest(metric=metric_name, observed_order=order):
+                    self.assertGreater(order, 0.8)
+                    self.assertLess(order, 1.2)
 
 
 class PlotTests(unittest.TestCase):
@@ -744,21 +774,51 @@ class HelpFileTests(unittest.TestCase):
         self.assertIn("final plotted point may lie slightly below", self.html)
         self.assertIn("Interpolate the Impact Point", self.html)
 
-    def test_diagnostic_experiment_snippets_include_required_imports(self):
-        experiments = {
-            number: self.html.split(f"EXP-{number} ·", 1)[1].split(
-                '<div class="exp-card">', 1
-            )[0]
-            for number in (4, 9, 10)
-        }
-        for number, experiment in experiments.items():
+    def test_runnable_diagnostic_blocks_parse_and_execute(self):
+        namespaces = {}
+        for number in (4, 9, 10):
             with self.subTest(experiment=number):
-                self.assertIn(
-                    "from driver_earthorbit import run_earth_orbit",
-                    experiment,
+                code = _exercise_code(self.html, number)
+                ast.parse(
+                    code,
+                    filename=f"EarthOrbit.html EXP-{number}",
+                    feature_version=(3, 10),
                 )
-                self.assertIn("import numpy as np", experiment)
-                self.assertNotIn("run_earth_orbit(...", experiment)
+                namespace = {}
+                exec(compile(code, f"EXP-{number}", "exec"), namespace)
+                namespaces[number] = namespace
+
+        impact_radius = math.hypot(
+            namespaces[4]["x_hit"], namespaces[4]["y_hit"]
+        )
+        self.assertAlmostEqual(impact_radius, physics.R_EARTH, delta=1.0)
+
+        angle_travelled = namespaces[9]["angle_travelled"]
+        self.assertGreater(float(angle_travelled[-1]), 2.0 * math.pi)
+        self.assertEqual(len(angle_travelled), len(namespaces[9]["ts"]))
+
+        self.assertEqual(
+            len(namespaces[10]["r"]), len(namespaces[10]["speed_squared"])
+        )
+        self.assertEqual(len(namespaces[10]["r"]), len(namespaces[10]["ts"]))
+
+    def test_advanced_blocks_are_explicitly_runnable_starter_code(self):
+        for number in (9, 10):
+            with self.subTest(experiment=number):
+                fragment = _exercise_fragment(self.html, number)
+                self.assertIn("Runnable starter code", fragment)
+                self.assertNotIn("run_earth_orbit(...", fragment)
+
+        exp9_tree = ast.parse(_exercise_code(self.html, 9))
+        top_level_targets = {
+            target.id
+            for node in exp9_tree.body
+            if isinstance(node, ast.Assign)
+            for target in node.targets
+            if isinstance(target, ast.Name)
+        }
+        self.assertNotIn("force_law", top_level_targets)
+        self.assertNotIn("G_SURFACE", _exercise_code(self.html, 10))
 
     def test_cannon_trajectory_is_listed_as_direct_predecessor(self):
         related = self.html.split('<section id="related">', 1)[1]
