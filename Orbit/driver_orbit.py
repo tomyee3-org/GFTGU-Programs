@@ -167,16 +167,35 @@ def _minimum_segment_radius(
     x1: float,
     y1: float,
 ) -> float:
-    """Minimum distance from the origin to the straight endpoint segment."""
-    dx = x1 - x0
-    dy = y1 - y0
+    """Minimum segment radius using scaled coordinates to avoid overflow."""
+    scale = max(abs(x0), abs(y0), abs(x1), abs(y1))
+    if scale == 0.0:
+        return 0.0
+
+    sx0 = x0 / scale
+    sy0 = y0 / scale
+    sx1 = x1 / scale
+    sy1 = y1 / scale
+    dx = sx1 - sx0
+    dy = sy1 - sy0
     denom = dx * dx + dy * dy
     if denom == 0.0:
         return math.hypot(x0, y0)
 
-    t = -(x0 * dx + y0 * dy) / denom
+    t = -(sx0 * dx + sy0 * dy) / denom
     t = min(1.0, max(0.0, t))
-    return math.hypot(x0 + t * dx, y0 + t * dy)
+    return math.hypot(sx0 + t * dx, sy0 + t * dy) * scale
+
+
+def _checked_time_advance(t: float, dt: float) -> float:
+    """Return t + dt, rejecting overflow or loss of floating-point progress."""
+    advanced = t + dt
+    if not math.isfinite(advanced) or advanced <= t:
+        raise RuntimeError(
+            "The timestep can no longer advance simulated time at "
+            f"t={t:.6g} s (working dt={dt:.6g} s)."
+        )
+    return advanced
 
 
 def run_orbit(
@@ -222,12 +241,21 @@ def run_orbit(
 
     initial_radius = math.hypot(x, y)
     initial_speed = math.hypot(vx, vy)
+    if not math.isfinite(initial_radius):
+        raise ValueError("The initial radius is outside floating-point range.")
+    if not math.isfinite(initial_speed):
+        raise ValueError("The initial speed is outside floating-point range.")
     energy0 = specific_energy(x, y, vx, vy, k)
     h0 = specific_angular_momentum(x, y, vx, vy)
 
-    # Numerical guard only, not a physical stellar radius.  It prevents the
-    # ideal point-mass singularity from generating infinities/NaNs.
-    singularity_guard = max(1.0e-12 * initial_radius, 1.0e-6)
+    # Scale-relative numerical guard only, not a physical stellar radius.  The
+    # ulp term keeps the threshold representable without imposing an SI length
+    # floor that would exclude otherwise valid microscopic models.
+    singularity_guard = max(
+        1.0e-12 * initial_radius,
+        32.0 * math.ulp(initial_radius),
+    )
+    singularity_stop_radius = 1024.0 * singularity_guard
 
     xs = [x]
     ys = [y]
@@ -259,6 +287,7 @@ def run_orbit(
     dt_work = float(dt0)
     max_corrector_iterations = 10
     max_retries_per_step = 80
+    max_angular_step = 0.5 * math.pi
 
     angle_previous = math.atan2(y, x)
     accumulated_angle = 0.0
@@ -270,6 +299,10 @@ def run_orbit(
     closure_velocity_residual = None
 
     while accepted_steps < maxSteps:
+        if math.hypot(x, y) <= singularity_stop_radius:
+            termination_reason = "central_singularity"
+            break
+
         accepted = False
 
         for _retry in range(max_retries_per_step):
@@ -281,10 +314,15 @@ def run_orbit(
             x_pred = x + 0.5 * (vx + vx_pred) * dt_work
             y_pred = y + 0.5 * (vy + vy_pred) * dt_work
 
-            if _minimum_segment_radius(x, y, x_pred, y_pred) <= singularity_guard:
-                termination_reason = "central_singularity"
-                accepted = False
-                break
+            predicted_values = (x_pred, y_pred, vx_pred, vy_pred)
+            predicted_radius = math.hypot(x_pred, y_pred)
+            if (
+                not all(math.isfinite(value) for value in predicted_values)
+                or not math.isfinite(predicted_radius)
+                or predicted_radius <= singularity_guard
+            ):
+                dt_work *= 0.5
+                continue
 
             ax_pred, ay_pred = compute_acceleration(x_pred, y_pred, k)
 
@@ -304,6 +342,7 @@ def run_orbit(
             dvx_guess = dvx_reference
             dvy_guess = dvy_reference
             converged = False
+            trial_hits_guard = False
 
             for _ in range(max_corrector_iterations):
                 vx_corr = vx + 0.5 * (ax0 + ax_end) * dt_work
@@ -311,8 +350,14 @@ def run_orbit(
                 x_corr = x + 0.5 * (vx + vx_corr) * dt_work
                 y_corr = y + 0.5 * (vy + vy_corr) * dt_work
 
-                if _minimum_segment_radius(x, y, x_corr, y_corr) <= singularity_guard:
-                    termination_reason = "central_singularity"
+                corrected_values = (x_corr, y_corr, vx_corr, vy_corr)
+                corrected_radius = math.hypot(x_corr, y_corr)
+                if (
+                    not all(math.isfinite(value) for value in corrected_values)
+                    or not math.isfinite(corrected_radius)
+                    or corrected_radius <= singularity_guard
+                ):
+                    trial_hits_guard = True
                     converged = False
                     break
 
@@ -337,17 +382,37 @@ def run_orbit(
 
                 ax_end, ay_end = compute_acceleration(x_guess, y_guess, k)
 
-            if termination_reason == "central_singularity":
-                break
+            if trial_hits_guard:
+                dt_work *= 0.5
+                continue
 
             if not converged:
                 dt_work *= 0.5
                 continue
 
-            accepted = True
-            break
+            segment_radius = _minimum_segment_radius(x, y, x_guess, y_guess)
+            if segment_radius <= singularity_guard:
+                # A guard intersection in a coarse trial is not itself a
+                # physical event.  Retry with a smaller step; genuine infall
+                # terminates only after accepted states approach the guard.
+                dt_work *= 0.5
+                continue
 
-        if termination_reason == "central_singularity":
+            h_start = abs(specific_angular_momentum(x, y, vx, vy))
+            h_end = abs(specific_angular_momentum(x_guess, y_guess, vx_guess, vy_guess))
+            try:
+                angular_step_estimate = (
+                    max(h_start, h_end) / segment_radius / segment_radius * dt_work
+                )
+            except OverflowError:
+                angular_step_estimate = math.inf
+            if not math.isfinite(angular_step_estimate) or angular_step_estimate > max_angular_step:
+                # Endpoint-angle unwrapping is unambiguous only when an
+                # accepted step cannot span half a revolution or more.
+                dt_work *= 0.5
+                continue
+
+            accepted = True
             break
 
         if not accepted:
@@ -359,17 +424,17 @@ def run_orbit(
 
         x1, y1 = x_guess, y_guess
         vx1, vy1 = vx_guess, vy_guess
-        t1 = t + dt_work
+        t1 = _checked_time_advance(t, dt_work)
 
         angle_new = math.atan2(y1, x1)
         delta_angle = _unwrap_delta(angle_new, angle_previous)
         accumulated_before = accumulated_angle
         accumulated_after = accumulated_angle + delta_angle
 
-        # If this accepted step crosses the requested accumulated revolution
-        # count, interpolate to that angular crossing.  Radius, velocity, and
-        # time are linearly interpolated over this final small step, while
-        # position is reconstructed at the exact target azimuth.
+        # If this converged step overshoots the requested accumulated angle,
+        # retry it with a shorter timestep.  This leaves the final state on the
+        # predictor-corrector solution instead of linearly interpolating state
+        # components after integration.
         crossed_target = (
             abs(accumulated_before) < target_angle
             and abs(accumulated_after) >= target_angle
@@ -380,27 +445,18 @@ def run_orbit(
             needed = target_angle - abs(accumulated_before)
             fraction = min(1.0, max(0.0, needed / abs(delta_angle)))
             direction = 1.0 if accumulated_after > 0.0 else -1.0
+            angular_overshoot = abs(accumulated_after) - target_angle
+            event_tolerance = 1.0e-12 * max(1.0, target_angle)
+            if angular_overshoot > event_tolerance:
+                refined_dt = dt_work * fraction
+                _checked_time_advance(t, refined_dt)
+                dt_work = refined_dt
+                continue
 
-            r0 = math.hypot(x, y)
-            r1 = math.hypot(x1, y1)
-            r_final = r0 + fraction * (r1 - r0)
-
-            final_angle = math.atan2(yInit, xInit) + direction * target_angle
-            x1 = r_final * math.cos(final_angle)
-            y1 = r_final * math.sin(final_angle)
-            vx1 = vx + fraction * (vx1 - vx)
-            vy1 = vy + fraction * (vy1 - vy)
-            t1 = t + fraction * dt_work
-
+            # The integrated endpoint is within the event tolerance.  Preserve
+            # its state and snap only the reported accumulated angle.
             accumulated_after = direction * target_angle
-            angle_new = math.atan2(y1, x1)
             termination_reason = "max_orbits"
-
-        if not math.isfinite(t1) or t1 <= t:
-            raise RuntimeError(
-                "The timestep can no longer advance simulated time at "
-                f"t={t:.6g} s (working dt={dt_work:.6g} s)."
-            )
 
         x, y, vx, vy, t = x1, y1, vx1, vy1, t1
         accumulated_angle = accumulated_after

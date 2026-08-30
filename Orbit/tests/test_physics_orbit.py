@@ -14,7 +14,6 @@ from html.parser import HTMLParser
 import importlib.util
 import io
 import math
-import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -55,6 +54,7 @@ if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 
 import driver_orbit as driver  # noqa: E402
+import main as orbit_main  # noqa: E402
 import physics_orbit as physics  # noqa: E402
 import plot_orbit as plotting  # noqa: E402
 
@@ -188,6 +188,26 @@ class BuildMetadataTests(unittest.TestCase):
                 target.write("\n# build-id regression probe\n")
             self.assertNotEqual(expected_build_id(copied), physics.BUILD_ID)
 
+    def test_help_and_test_changes_do_not_change_build_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            copied = Path(temp_name)
+            for name in CORE_MODULE_FILES:
+                shutil.copy2(MODULE_DIR / name, copied / name)
+            (copied / "Orbit.html").write_text("changed help", encoding="utf-8")
+            (copied / "test_physics_orbit.py").write_text("changed tests", encoding="utf-8")
+            self.assertEqual(expected_build_id(copied), physics.BUILD_ID)
+
+    def test_build_id_falls_back_to_unknown_when_core_file_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            copied_physics = Path(temp_name) / "physics_orbit.py"
+            shutil.copy2(MODULE_DIR / "physics_orbit.py", copied_physics)
+            spec = importlib.util.spec_from_file_location("physics_orbit_missing_core", copied_physics)
+            self.assertIsNotNone(spec)
+            module = importlib.util.module_from_spec(spec)
+            assert spec.loader is not None
+            spec.loader.exec_module(module)
+            self.assertEqual(module.BUILD_ID, "unknown")
+
 
 class PhysicsFunctionTests(unittest.TestCase):
     def test_acceleration_known_three_four_five_geometry(self) -> None:
@@ -304,6 +324,43 @@ class DriverValidationTests(unittest.TestCase):
         result = driver.run_orbit(**values)
         self.assertEqual(result.accepted_steps, 2)
 
+    def test_rejects_nonrepresentable_derived_initial_norms(self) -> None:
+        self.assert_invalid(xInit=1.3e308, yInit=1.3e308)
+        self.assert_invalid(vxInit=1.3e308, vyInit=1.3e308)
+
+
+class DriverHelperAndFailureTests(unittest.TestCase):
+    def test_minimum_segment_radius_is_overflow_safe(self) -> None:
+        radius = driver._minimum_segment_radius(1.0e308, 0.0, 1.0e308, 1.0e308)
+        self.assertEqual(radius, 1.0e308)
+        self.assertEqual(driver._minimum_segment_radius(-2.0, 0.0, 2.0, 0.0), 0.0)
+
+    def test_checked_time_advance_rejects_loss_of_progress_and_overflow(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "can no longer advance"):
+            driver._checked_time_advance(1.0e20, 1.0)
+        with self.assertRaisesRegex(RuntimeError, "can no longer advance"):
+            driver._checked_time_advance(sys.float_info.max, sys.float_info.max)
+
+    def test_forced_corrector_nonconvergence_exhausts_retries(self) -> None:
+        with mock.patch.object(driver, "_relative_increment_change", return_value=math.inf):
+            with self.assertRaisesRegex(RuntimeError, "80 retries"):
+                circular_result(maxSteps=1)
+
+    def test_main_presents_value_and_runtime_errors_without_tracebacks(self) -> None:
+        for exception in (ValueError("bad input"), RuntimeError("no convergence")):
+            output = io.StringIO()
+            with self.subTest(exception=type(exception).__name__):
+                with (
+                    mock.patch.object(orbit_main, "run_orbit", side_effect=exception),
+                    mock.patch.object(sys, "argv", ["main.py"]),
+                    contextlib.redirect_stdout(output),
+                ):
+                    orbit_main.main()
+                self.assertIn("Orbit could not run:", output.getvalue())
+                self.assertNotIn("Traceback", output.getvalue())
+                output.seek(0)
+                output.truncate(0)
+
 
 class OrbitIntegrationTests(unittest.TestCase):
     @classmethod
@@ -354,11 +411,11 @@ class OrbitIntegrationTests(unittest.TestCase):
         self.assertAlmostEqual(clockwise.revolutions_completed, 1.0, places=12)
         self.assertAlmostEqual(rotated.revolutions_completed, 1.0, places=12)
 
-    def test_fractional_orbit_has_interpolated_angle_but_no_closure_diagnostics(self) -> None:
+    def test_fractional_orbit_has_integrated_target_angle_but_no_closure_diagnostics(self) -> None:
         result = circular_result(maxOrbits=0.5)
         self.assertEqual(result.termination_reason, "max_orbits")
         self.assertAlmostEqual(result.revolutions_completed, 0.5, places=12)
-        self.assertAlmostEqual(math.atan2(result.ys[-1], result.xs[-1]), math.pi, places=12)
+        self.assertAlmostEqual(abs(math.atan2(result.ys[-1], result.xs[-1])), math.pi, places=12)
         self.assertIsNone(result.closure_radius_residual)
         self.assertIsNone(result.closure_velocity_residual)
 
@@ -383,19 +440,50 @@ class OrbitIntegrationTests(unittest.TestCase):
         self.assertTrue(np.isfinite(result.xs).all())
         self.assertTrue(np.isfinite(result.vxs).all())
 
+    def test_oversized_outward_trial_does_not_false_trigger_singularity(self) -> None:
+        result = driver.run_orbit(1.0, 0.0, 2.0, 0.0, 1.0, 6.0, 1, 10.0, 10.0, 1.0)
+        self.assertEqual(result.termination_reason, "max_steps")
+        self.assertGreater(result.xs[-1], result.xs[0])
+
+    def test_scale_relative_guard_accepts_microscopic_starting_radii(self) -> None:
+        for radius in (1.0e-8, 5.0e-7, 1.0e-6, 2.0e-6):
+            with self.subTest(radius=radius):
+                result = driver.run_orbit(
+                    radius, 0.0, 0.0, radius, radius**3,
+                    0.01, 1, 0.05, 1.0e-4, 1.0,
+                )
+                self.assertEqual(result.termination_reason, "max_steps")
+                self.assertEqual(result.accepted_steps, 1)
+
+    def test_angular_step_limit_prevents_endpoint_unwrap_aliasing(self) -> None:
+        result = driver.run_orbit(1.0, 0.0, 0.0, 1.0, 1.0, 10.0, 5_000, 10.0, 10.0, 1.0)
+        angles = np.arctan2(result.ys, result.xs)
+        deltas = [
+            abs(driver._unwrap_delta(float(new), float(old)))
+            for old, new in zip(angles[:-1], angles[1:])
+        ]
+        self.assertEqual(result.termination_reason, "max_orbits")
+        self.assertAlmostEqual(result.revolutions_completed, 1.0, places=12)
+        self.assertLess(max(deltas), 0.5 * math.pi)
+
     def test_parabolic_case_uses_absolute_not_fractional_energy_drift(self) -> None:
         result = driver.run_orbit(1.0, 0.0, 0.0, math.sqrt(2.0), 1.0, 0.01, 100, 0.05, 1.0e-4, 1.0)
         self.assertIsNone(result.max_fractional_energy_drift)
         self.assertGreater(result.max_absolute_specific_energy_drift, 0.0)
         self.assertTrue(math.isfinite(result.max_absolute_specific_energy_drift))
 
-    def test_tighter_tolerances_improve_circular_orbit_diagnostics(self) -> None:
-        loose = circular_result(eps1=0.1, eps2=1.0e-2)
-        tight = circular_result(eps1=0.01, eps2=1.0e-8)
+    def test_tighter_eps1_alone_improves_circular_orbit_trend(self) -> None:
+        loose = circular_result(eps1=0.1, eps2=1.0e-4)
+        tight = circular_result(eps1=0.01, eps2=1.0e-4)
         self.assertGreater(tight.accepted_steps, loose.accepted_steps)
         self.assertLess(tight.max_fractional_energy_drift, loose.max_fractional_energy_drift)
-        self.assertLess(tight.closure_velocity_residual, loose.closure_velocity_residual)
         self.assertLess(abs(tight.final_time - 2.0 * math.pi), abs(loose.final_time - 2.0 * math.pi))
+
+    def test_tighter_eps2_alone_improves_corrector_conservation(self) -> None:
+        loose = circular_result(eps1=0.05, eps2=1.0e-2)
+        tight = circular_result(eps1=0.05, eps2=1.0e-8)
+        self.assertLess(tight.max_fractional_energy_drift, loose.max_fractional_energy_drift)
+        self.assertLess(tight.closure_velocity_residual, loose.closure_velocity_residual)
 
 
 class PlotTests(unittest.TestCase):
@@ -420,6 +508,31 @@ class PlotTests(unittest.TestCase):
     def test_unknown_output_mode_raises_value_error(self) -> None:
         with self.assertRaisesRegex(ValueError, "Unknown output mode"):
             plotting.plot_orbit(self.result, output="not-a-mode")
+
+    def test_plotted_data_and_equal_aspect_match_result(self) -> None:
+        with mock.patch.object(plotting.plt, "show"):
+            plotting.plot_orbit(self.result, output="orbit")
+            axis = plotting.plt.gcf().axes[0]
+            np.testing.assert_array_equal(axis.lines[0].get_xdata(), self.result.xs)
+            np.testing.assert_array_equal(axis.lines[0].get_ydata(), self.result.ys)
+            self.assertEqual(axis.get_aspect(), 1.0)
+            plotting.plt.close("all")
+
+            plotting.plot_orbit(self.result, output="velocity")
+            axis = plotting.plt.gcf().axes[0]
+            np.testing.assert_array_equal(axis.lines[0].get_xdata(), self.result.vxs)
+            np.testing.assert_array_equal(axis.lines[0].get_ydata(), self.result.vys)
+            self.assertEqual(axis.get_aspect(), 1.0)
+            plotting.plt.close("all")
+
+            plotting.plot_orbit(self.result, output="energy")
+            axis = plotting.plt.gcf().axes[0]
+            np.testing.assert_allclose(
+                axis.lines[2].get_ydata(),
+                self.result.KEs + self.result.PEs,
+                rtol=0.0,
+                atol=0.0,
+            )
 
 
 class HelpFileTests(unittest.TestCase):
@@ -459,15 +572,16 @@ class HelpFileTests(unittest.TestCase):
         self.assertIn("fixed central", self.html)
 
     def test_help_documents_termination_and_diagnostic_edge_cases(self) -> None:
+        normalized_html = " ".join(self.html.split())
         for text in (
             "central_singularity",
             "integral number of revolutions",
             "initial energy is zero or nearly zero",
             "absolute specific-energy drift",
-            "not a separately corrected integrator state",
+            "without linearly interpolating state components",
         ):
             with self.subTest(text=text):
-                self.assertIn(text, self.html)
+                self.assertIn(text, normalized_html)
 
     def test_mathjax_offline_explanation_is_static_and_no_local_install_is_promised(self) -> None:
         self.assertIn("loaded from a public CDN", self.html)
@@ -489,6 +603,16 @@ class HelpFileTests(unittest.TestCase):
         self.assertIn("EXP-1 · Introductory", self.html)
         self.assertIn("EXP-15 · Advanced Programming Extension", self.html)
         self.assertIn("Compare Error Measures", self.html)
+
+    def test_help_preserves_original_textbook_cross_references(self) -> None:
+        for reference in ("Table 4.3", "Table 4.2", "Investigation 4.1", "Investigation 4.2", "Chapter 6"):
+            with self.subTest(reference=reference):
+                self.assertIn(reference, self.html)
+
+    def test_exp11_tells_students_how_to_access_returned_arrays(self) -> None:
+        self.assertIn("result.xs", self.html)
+        self.assertIn("result.ys", self.html)
+        self.assertIn("result.ts", self.html)
 
 
 if __name__ == "__main__":

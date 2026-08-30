@@ -23,7 +23,7 @@ from numbers import Real
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.1.0"
+MODEL_VERSION = "1.2.0"
 BUILD_ID_COVERS = (
     "physics_orbit.py",
     "driver_orbit.py",
@@ -85,6 +85,8 @@ def compute_acceleration(x: float, y: float, mu: float) -> tuple[float, float]:
     r = math.hypot(x, y)
     if r == 0.0:
         raise ValueError("The point-mass gravitational field is singular at r=0.")
+    if not math.isfinite(r):
+        raise ValueError("The radius is outside floating-point range.")
 
     try:
         acceleration_magnitude = mu / r / r
@@ -120,8 +122,12 @@ def specific_energy(
     r = math.hypot(x, y)
     if r == 0.0:
         raise ValueError("Specific energy is undefined at r=0.")
+    if not math.isfinite(r):
+        raise ValueError("The radius is outside floating-point range.")
 
     speed = math.hypot(vx, vy)
+    if not math.isfinite(speed):
+        raise ValueError("The speed is outside floating-point range.")
     kinetic = 0.5 * speed * speed
     potential = -mu / r
     energy = kinetic + potential
