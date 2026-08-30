@@ -379,6 +379,26 @@ class DriverHelperAndFailureTests(unittest.TestCase):
                 output.seek(0)
                 output.truncate(0)
 
+    def test_main_displays_safeguard_and_event_refinement_diagnostics(self) -> None:
+        result = circular_result(maxOrbits=0.1)
+        output = io.StringIO()
+        with (
+            mock.patch.object(orbit_main, "run_orbit", return_value=result),
+            mock.patch.object(orbit_main, "plot_orbit"),
+            mock.patch.object(sys, "argv", ["main.py"]),
+            contextlib.redirect_stdout(output),
+        ):
+            orbit_main.main()
+        summary = output.getvalue()
+        self.assertIn(
+            f"angular-step rejections : {result.angular_step_rejections}",
+            summary,
+        )
+        self.assertIn(
+            f"endpoint refinement trials: {result.event_refinement_trials}",
+            summary,
+        )
+
 
 class OrbitIntegrationTests(unittest.TestCase):
     @classmethod
@@ -622,6 +642,11 @@ class HelpFileTests(unittest.TestCase):
         ):
             with self.subTest(text=text):
                 self.assertIn(text, normalized_html)
+
+    def test_help_documents_effort_counters_printed_by_main(self) -> None:
+        normalized_html = " ".join(self.html.split())
+        self.assertIn("angular-step rejections", normalized_html)
+        self.assertIn("final-endpoint refinement trials", normalized_html)
 
     def test_mathjax_offline_explanation_is_static_and_no_local_install_is_promised(self) -> None:
         self.assertIn("loaded from a public CDN", self.html)

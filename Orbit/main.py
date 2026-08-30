@@ -83,6 +83,8 @@ def main() -> None:
     print(f"  accepted steps          : {result.accepted_steps}")
     print(f"  elapsed simulated time  : {result.final_time:.6g} s")
     print(f"  azimuthal revolutions   : {result.revolutions_completed:.8f}")
+    print(f"  angular-step rejections : {result.angular_step_rejections}")
+    print(f"  endpoint refinement trials: {result.event_refinement_trials}")
     if result.max_fractional_energy_drift is None:
         print("  max fractional energy drift       : n/a (initial energy is near zero)")
     else:
