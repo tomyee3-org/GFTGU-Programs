@@ -10,6 +10,11 @@ State vector:
 Model:
     Horizontal acceleration is zero.
     Vertical acceleration is the constant -g.
+
+These low-level teaching functions deliberately expose the integration
+formulas without duplicating the driver's validation machinery.  Direct
+callers must supply a finite, one-dimensional four-value state and a finite
+scalar timestep.  ``run_cannon_trajectory`` validates ordinary user settings.
 """
 
 import numpy as np

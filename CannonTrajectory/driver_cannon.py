@@ -85,32 +85,28 @@ def run_cannon_trajectory(
     v = speed * math.sin(theta)
     state = np.array([0.0, 0.0, u, v], dtype=float)
 
-    xs = np.zeros(max_steps, dtype=float)
-    hs = np.zeros(max_steps, dtype=float)
-    xs[0] = state[0]
-    hs[0] = state[1]
+    # Store only points actually calculated.  In Python, append-only lists
+    # avoid allocating memory in proportion to an untrusted safety ceiling.
+    xs = [state[0]]
+    hs = [state[1]]
 
     stepper = {
         "euler": euler_step,
         "improved": improved_euler_step,
     }[method]
 
-    j = 1
-    while j < max_steps and state[1] >= 0.0:
-        try:
-            with np.errstate(over="raise", invalid="raise"):
+    try:
+        with np.errstate(over="raise", invalid="raise"):
+            while len(xs) < max_steps and state[1] >= 0.0:
                 state = stepper(state, dt)
-        except FloatingPointError as exc:
-            raise FloatingPointError(
-                "trajectory became non-finite; reduce speed or timestep"
-            ) from exc
-        if not np.all(np.isfinite(state)):
-            raise FloatingPointError(
-                "trajectory became non-finite; reduce speed or timestep"
-            )
-        xs[j] = state[0]
-        hs[j] = state[1]
-        j += 1
+                if not np.all(np.isfinite(state)):
+                    raise FloatingPointError
+                xs.append(state[0])
+                hs.append(state[1])
+    except FloatingPointError as exc:
+        raise FloatingPointError(
+            "trajectory became non-finite; reduce speed or timestep"
+        ) from exc
 
     if state[1] >= 0.0:
         raise RuntimeError(
@@ -118,4 +114,4 @@ def run_cannon_trajectory(
             "max_steps or use a larger timestep"
         )
 
-    return xs[:j], hs[:j]
+    return np.asarray(xs, dtype=float), np.asarray(hs, dtype=float)
