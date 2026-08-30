@@ -21,16 +21,18 @@ compute_acceleration().
 "inverse_square"
     Uses
 
-        |a| = g * (R_Earth / r)^2
+        |a| = MU_EARTH / r^2
 
-    so the acceleration falls with distance and produces the usual
-    Keplerian inverse-square dynamics.
+    with the modern JPL DE440 value of Earth's gravitational parameter, so
+    the acceleration falls with distance and produces the usual Keplerian
+    inverse-square dynamics.
 """
 
 import math
+import numbers
 from typing import Literal
 
-MODEL_VERSION = "1.0.0"
+MODEL_VERSION = "1.1.0"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -81,11 +83,16 @@ BUILD_ID = _compute_build_id()
 
 
 # Physical constants used by the simulation.
+#
+# G_SURFACE and R_EARTH deliberately retain the rounded textbook values used
+# by the near-surface EarthOrbit exercise.  MU_EARTH is the modern Earth GM
+# from JPL DE440 and is used by the optional inverse-square extension.
 G_SURFACE = 9.8
-R_EARTH = 6_378_200.0  # m; reference radius, close to Earth's equatorial radius
+R_EARTH = 6_378_200.0  # m; textbook reference radius, close to the equatorial radius
+MU_EARTH = 3.986_004_355_07e14  # m^3/s^2; JPL DE440 Earth GM
 
-# Approximate gravitational parameter implied by the rounded values above.
-# It is close to, but not exactly equal to, the accepted GM_Earth.
+# Kept for comparison with the textbook-derived value and for compatibility
+# with earlier student calculations.  The inverse-square force uses MU_EARTH.
 K_APPROX = G_SURFACE * R_EARTH * R_EARTH
 
 ForceLaw = Literal["simplified", "inverse_square"]
@@ -103,29 +110,42 @@ def compute_acceleration(
         Position of the projectile in metres (origin = Earth's centre).
     force_law : "simplified" or "inverse_square"
         "simplified" uses the constant-magnitude-g model.
-        "inverse_square" uses the inverse-square extension.
+        "inverse_square" uses MU_EARTH/r**2.
 
     Returns
     -------
     ax, ay : float
         Acceleration components in m/s^2.
     """
-    if not math.isfinite(x) or not math.isfinite(y):
-        raise ValueError("x and y must be finite positions in metres")
+    for name, value in (("x", x), ("y", y)):
+        if (
+            not isinstance(value, numbers.Real)
+            or isinstance(value, bool)
+            or not math.isfinite(value)
+        ):
+            raise ValueError(f"{name} must be a finite real position in metres")
 
-    r2 = x * x + y * y
-    r = math.sqrt(r2)
+    # hypot() avoids the avoidable overflow/underflow of sqrt(x*x + y*y)
+    # for extreme but finite direct calls.
+    r = math.hypot(x, y)
     if r == 0.0:
         raise ValueError("gravitational acceleration is undefined at Earth's centre")
 
+    unit_x = x / r
+    unit_y = y / r
+
     if force_law == "simplified":
-        ax = -G_SURFACE * x / r
-        ay = -G_SURFACE * y / r
+        magnitude = G_SURFACE
     elif force_law == "inverse_square":
-        r3 = r * r2
-        ax = -K_APPROX * x / r3
-        ay = -K_APPROX * y / r3
+        # Dividing twice avoids forming r**2 or r**3, either of which may
+        # overflow even when the physically correct acceleration is finite.
+        magnitude = MU_EARTH / r / r
     else:
         raise ValueError(f"Unknown force_law: {force_law!r}")
 
-    return ax, ay
+    if not math.isfinite(magnitude):
+        raise ValueError(
+            "gravitational acceleration is too large to represent at this radius"
+        )
+
+    return -magnitude * unit_x, -magnitude * unit_y

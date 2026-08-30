@@ -71,6 +71,9 @@ def run_earth_orbit(
     if force_law not in ("simplified", "inverse_square"):
         raise ValueError("force_law must be 'simplified' or 'inverse_square'")
 
+    if not isinstance(return_diagnostics, bool):
+        raise ValueError("return_diagnostics must be True or False")
+
     for name, value in (("h0", h0), ("uInit", uInit), ("vInit", vInit), ("dt", dt)):
         if not isinstance(value, numbers.Real) or isinstance(value, bool) or not math.isfinite(value):
             raise ValueError(f"{name} must be a finite real number")
@@ -82,24 +85,35 @@ def run_earth_orbit(
     if not isinstance(maxSteps, numbers.Integral) or isinstance(maxSteps, bool) or maxSteps < 2:
         raise ValueError("maxSteps must be an integer >= 2")
 
+    # NumPy accepts integral scalar types, but normalising to int makes array
+    # allocation behavior consistent across supported NumPy versions.
+    maxSteps = int(maxSteps)
+
     x = 0.0
     y = R_EARTH + h0
 
     u0 = float(uInit)
     v0 = float(vInit)
 
-    xs = np.zeros(maxSteps)
-    ys = np.zeros(maxSteps)
+    try:
+        xs = np.zeros(maxSteps)
+        ys = np.zeros(maxSteps)
+        if return_diagnostics:
+            us = np.zeros(maxSteps)
+            vs = np.zeros(maxSteps)
+    except (MemoryError, OverflowError, ValueError) as exc:
+        raise ValueError(
+            "maxSteps is too large for the available memory or platform"
+        ) from exc
+
     xs[0] = x
     ys[0] = y
 
     if return_diagnostics:
-        us = np.zeros(maxSteps)
-        vs = np.zeros(maxSteps)
         us[0] = u0
         vs[0] = v0
 
-    r = np.sqrt(x * x + y * y)
+    r = math.hypot(x, y)
 
     j = 1
     while r >= R_EARTH and j < maxSteps:
@@ -114,7 +128,13 @@ def run_earth_orbit(
         x = x + (u0 + u1) * 0.5 * dt
         y = y + (v0 + v1) * 0.5 * dt
 
-        r = np.sqrt(x * x + y * y)
+        if not all(math.isfinite(value) for value in (x, y, u1, v1)):
+            raise FloatingPointError(
+                "integration produced a non-finite state; reduce the timestep "
+                "or use less extreme initial values"
+            )
+
+        r = math.hypot(x, y)
 
         xs[j] = x
         ys[j] = y
