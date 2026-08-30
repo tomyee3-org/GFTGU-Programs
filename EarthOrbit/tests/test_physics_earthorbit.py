@@ -122,6 +122,8 @@ class ModuleDiscoveryTests(unittest.TestCase):
 
 
 class VersionAndBuildTests(unittest.TestCase):
+    """Compatibility-contract tests for released version/build metadata."""
+
     def test_version_is_semantic(self):
         self.assertRegex(physics.MODEL_VERSION, r"^\d+\.\d+\.\d+$")
 
@@ -129,6 +131,7 @@ class VersionAndBuildTests(unittest.TestCase):
         self.assertEqual(physics.BUILD_ID_COVERS, CORE_MODULE_FILENAMES)
 
     def test_build_id_matches_independent_calculation(self):
+        """Lock the documented filename/length/content hash framing."""
         self.assertEqual(physics.BUILD_ID, _independent_build_id(MODULE_DIR))
         self.assertRegex(physics.BUILD_ID, r"^[0-9a-f]{12}$")
 
@@ -207,6 +210,8 @@ class PhysicalConstantTests(unittest.TestCase):
 
 
 class AccelerationTests(unittest.TestCase):
+    """Scientific invariants and defensive bounds for the physics layer."""
+
     def test_simplified_axis_components(self):
         self.assertEqual(
             physics.compute_acceleration(physics.R_EARTH, 0.0),
@@ -261,6 +266,17 @@ class AccelerationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "too large to represent"):
             physics.compute_acceleration(1.0e-200, 0.0, "inverse_square")
 
+    def test_native_overflow_is_translated_to_value_error(self):
+        class OverflowingParameter:
+            def __truediv__(self, other):
+                raise OverflowError("simulated platform overflow")
+
+        with mock.patch.object(physics, "MU_EARTH", OverflowingParameter()):
+            with self.assertRaisesRegex(ValueError, "too large to represent"):
+                physics.compute_acceleration(
+                    physics.R_EARTH, 0.0, "inverse_square"
+                )
+
     def test_centre_is_rejected(self):
         for law in ("simplified", "inverse_square"):
             with self.subTest(force_law=law):
@@ -287,6 +303,8 @@ class AccelerationTests(unittest.TestCase):
 
 
 class DriverValidationTests(unittest.TestCase):
+    """Public input-validation and error-reporting contracts."""
+
     def test_invalid_scalar_inputs_are_rejected(self):
         cases = (
             ("h0", {"h0": -1.0}),
@@ -342,6 +360,8 @@ class DriverValidationTests(unittest.TestCase):
 
 
 class DriverBehaviorTests(unittest.TestCase):
+    """Scientific behavior plus explicitly named legacy regression contracts."""
+
     def test_initial_conditions_and_first_simplified_step(self):
         xs, ys, x_earth, y_earth, ts, us, vs = driver.run_earth_orbit(
             maxSteps=2, return_diagnostics=True
@@ -380,7 +400,8 @@ class DriverBehaviorTests(unittest.TestCase):
         self.assertAlmostEqual(ys[1], expected_y, places=9)
         self.assertEqual(ts[-1], dt)
 
-    def test_default_trajectory_regression(self):
+    def test_legacy_contract_exact_default_trajectory_regression(self):
+        """Protect the current non-interpolated Schutz-style default loop."""
         xs, ys, x_earth, y_earth = driver.run_earth_orbit()
         self.assertEqual(len(xs), 503)
         self.assertEqual(len(ys), 503)
@@ -469,7 +490,7 @@ class DriverBehaviorTests(unittest.TestCase):
         self.assertEqual(len(xs), 1000)
         self.assertGreater(np.min(np.hypot(xs, ys)), physics.R_EARTH)
 
-    def test_halving_timestep_reduces_inverse_square_energy_error(self):
+    def test_three_level_energy_convergence_is_monotonic_and_first_order(self):
         h0 = 300_000.0
         r0 = physics.R_EARTH + h0
         circular_speed = math.sqrt(physics.MU_EARTH / r0)
@@ -488,12 +509,71 @@ class DriverBehaviorTests(unittest.TestCase):
             energy = 0.5 * (us * us + vs * vs) - physics.MU_EARTH / radius
             return float(np.max(np.abs(energy - energy[0])))
 
-        coarse_error = maximum_error(2.0)
-        fine_error = maximum_error(1.0)
-        self.assertLess(fine_error, 0.55 * coarse_error)
+        errors = [maximum_error(dt) for dt in (4.0, 2.0, 1.0)]
+        self.assertGreater(errors[0], errors[1])
+        self.assertGreater(errors[1], errors[2])
+        observed_orders = [
+            math.log(errors[index] / errors[index + 1], 2.0)
+            for index in range(2)
+        ]
+        for order in observed_orders:
+            with self.subTest(observed_order=order):
+                self.assertGreater(order, 0.8)
+                self.assertLess(order, 1.2)
+
+    def test_full_period_orbit_recovery_converges_toward_initial_state(self):
+        h0 = 300_000.0
+        initial_radius = physics.R_EARTH + h0
+        initial_speed = math.sqrt(physics.MU_EARTH / initial_radius)
+        period = 2.0 * math.pi * math.sqrt(
+            initial_radius**3 / physics.MU_EARTH
+        )
+
+        errors = []
+        for update_count in (720, 1440, 2880):
+            dt = period / update_count
+            xs, ys, _, _, _, us, vs = driver.run_earth_orbit(
+                h0=h0,
+                uInit=initial_speed,
+                vInit=0.0,
+                dt=dt,
+                maxSteps=update_count + 1,
+                force_law="inverse_square",
+                return_diagnostics=True,
+            )
+            angle = np.unwrap(np.arctan2(ys, xs))
+            angle_error = abs(abs(angle[-1] - angle[0]) - 2.0 * math.pi)
+            radius_error = abs(math.hypot(xs[-1], ys[-1]) - initial_radius)
+            position_error = math.hypot(xs[-1], ys[-1] - initial_radius)
+            velocity_error = math.hypot(us[-1] - initial_speed, vs[-1])
+            errors.append(
+                (angle_error, radius_error, position_error, velocity_error)
+            )
+
+        for metric_index in range(4):
+            metric_errors = [row[metric_index] for row in errors]
+            self.assertGreater(metric_errors[0], metric_errors[1])
+            self.assertGreater(metric_errors[1], metric_errors[2])
+
+        fine_angle, fine_radius, fine_position, fine_velocity = errors[-1]
+        self.assertLess(fine_angle, 0.07)
+        self.assertLess(fine_radius / initial_radius, 0.02)
+        self.assertLess(fine_position / initial_radius, 0.07)
+        self.assertLess(fine_velocity / initial_speed, 0.07)
+
+        position_orders = [
+            math.log(errors[index][2] / errors[index + 1][2], 2.0)
+            for index in range(2)
+        ]
+        for order in position_orders:
+            with self.subTest(observed_position_order=order):
+                self.assertGreater(order, 0.8)
+                self.assertLess(order, 1.2)
 
 
 class PlotTests(unittest.TestCase):
+    """Presentation-contract tests for the documented matplotlib output."""
+
     def tearDown(self):
         plt.close("all")
 
@@ -540,6 +620,8 @@ class PlotTests(unittest.TestCase):
 
 
 class MainProgramTests(unittest.TestCase):
+    """Command-line and documented console-interface contract tests."""
+
     def test_version_option(self):
         result = subprocess.run(
             [sys.executable, "main.py", "--version"],
@@ -555,7 +637,7 @@ class MainProgramTests(unittest.TestCase):
         )
         self.assertEqual(result.stderr, "")
 
-    def test_headless_main_smoke_run(self):
+    def test_documented_console_contract_and_headless_smoke_run(self):
         environment = os.environ.copy()
         environment["MPLBACKEND"] = "Agg"
         result = subprocess.run(
@@ -571,11 +653,16 @@ class MainProgramTests(unittest.TestCase):
             f"EarthOrbit {physics.MODEL_VERSION} (build {physics.BUILD_ID})",
             result.stdout,
         )
-        self.assertIn("503 trajectory samples", result.stdout)
+        expected_samples = len(driver.run_earth_orbit()[0])
+        self.assertIn(
+            f"{expected_samples:,} trajectory samples", result.stdout
+        )
         self.assertEqual(result.stderr, "")
 
 
 class HelpFileTests(unittest.TestCase):
+    """Documentation-interface, scientific wording, and presentation contracts."""
+
     @classmethod
     def setUpClass(cls):
         cls.html = HELP_FILE.read_text(encoding="utf-8")
@@ -656,6 +743,22 @@ class HelpFileTests(unittest.TestCase):
         self.assertIn("return_diagnostics", self.html)
         self.assertIn("final plotted point may lie slightly below", self.html)
         self.assertIn("Interpolate the Impact Point", self.html)
+
+    def test_diagnostic_experiment_snippets_include_required_imports(self):
+        experiments = {
+            number: self.html.split(f"EXP-{number} ·", 1)[1].split(
+                '<div class="exp-card">', 1
+            )[0]
+            for number in (4, 9, 10)
+        }
+        for number, experiment in experiments.items():
+            with self.subTest(experiment=number):
+                self.assertIn(
+                    "from driver_earthorbit import run_earth_orbit",
+                    experiment,
+                )
+                self.assertIn("import numpy as np", experiment)
+                self.assertNotIn("run_earth_orbit(...", experiment)
 
     def test_cannon_trajectory_is_listed_as_direct_predecessor(self):
         related = self.html.split('<section id="related">', 1)[1]

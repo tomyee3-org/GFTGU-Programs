@@ -32,7 +32,7 @@ import math
 import numbers
 from typing import Literal
 
-MODEL_VERSION = "1.1.0"
+MODEL_VERSION = "1.1.1"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -139,7 +139,12 @@ def compute_acceleration(
     elif force_law == "inverse_square":
         # Dividing twice avoids forming r**2 or r**3, either of which may
         # overflow even when the physically correct acceleration is finite.
-        magnitude = MU_EARTH / r / r
+        try:
+            magnitude = MU_EARTH / r / r
+        except OverflowError as exc:
+            raise ValueError(
+                "gravitational acceleration is too large to represent at this radius"
+            ) from exc
     else:
         raise ValueError(f"Unknown force_law: {force_law!r}")
 
