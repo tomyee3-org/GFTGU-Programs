@@ -262,6 +262,15 @@ class PhysicsFunctionTests(unittest.TestCase):
             with self.subTest(arguments=arguments), self.assertRaises(ValueError):
                 physics.specific_energy(*arguments)
 
+    def test_specific_energy_rejects_every_invalid_type_in_each_position(self) -> None:
+        valid = [1.0, 0.0, 0.0, 1.0, 1.0]
+        for index in range(len(valid)):
+            for bad in (None, "1", math.nan, math.inf, True):
+                arguments = valid.copy()
+                arguments[index] = bad
+                with self.subTest(index=index, bad=bad), self.assertRaises(ValueError):
+                    physics.specific_energy(*arguments)
+
     def test_specific_angular_momentum_sign_and_zero_radial_case(self) -> None:
         self.assertEqual(physics.specific_angular_momentum(2.0, 0.0, 0.0, 3.0), 6.0)
         self.assertEqual(physics.specific_angular_momentum(2.0, 0.0, 0.0, -3.0), -6.0)
@@ -271,6 +280,15 @@ class PhysicsFunctionTests(unittest.TestCase):
         for arguments in ((1.0, 0.0, False, 1.0), (1.0e308, 0.0, 0.0, 1.0e308)):
             with self.subTest(arguments=arguments), self.assertRaises(ValueError):
                 physics.specific_angular_momentum(*arguments)
+
+    def test_specific_angular_momentum_rejects_every_invalid_type_in_each_position(self) -> None:
+        valid = [1.0, 0.0, 0.0, 1.0]
+        for index in range(len(valid)):
+            for bad in (None, "1", math.nan, math.inf, True):
+                arguments = valid.copy()
+                arguments[index] = bad
+                with self.subTest(index=index, bad=bad), self.assertRaises(ValueError):
+                    physics.specific_angular_momentum(*arguments)
 
 
 class DriverValidationTests(unittest.TestCase):
@@ -415,7 +433,14 @@ class OrbitIntegrationTests(unittest.TestCase):
         result = circular_result(maxOrbits=0.5)
         self.assertEqual(result.termination_reason, "max_orbits")
         self.assertAlmostEqual(result.revolutions_completed, 0.5, places=12)
-        self.assertAlmostEqual(abs(math.atan2(result.ys[-1], result.xs[-1])), math.pi, places=12)
+        self.assertAlmostEqual(abs(math.atan2(result.ys[-1], result.xs[-1])), math.pi, places=11)
+        angles = np.arctan2(result.ys, result.xs)
+        integrated_revolutions = abs(sum(
+            driver._unwrap_delta(float(new), float(old))
+            for old, new in zip(angles[:-1], angles[1:])
+        )) / (2.0 * math.pi)
+        self.assertEqual(result.revolutions_completed, integrated_revolutions)
+        self.assertGreater(result.event_refinement_trials, 1)
         self.assertIsNone(result.closure_radius_residual)
         self.assertIsNone(result.closure_velocity_residual)
 
@@ -465,6 +490,21 @@ class OrbitIntegrationTests(unittest.TestCase):
         self.assertEqual(result.termination_reason, "max_orbits")
         self.assertAlmostEqual(result.revolutions_completed, 1.0, places=12)
         self.assertLess(max(deltas), 0.5 * math.pi)
+        self.assertGreater(result.angular_step_rejections, 0)
+
+    def test_angular_safeguard_survives_eccentric_periapsis_with_loose_tolerances(self) -> None:
+        result = driver.run_orbit(
+            1.0, 0.0, 0.0, 0.5, 1.0,
+            10.0, 20_000, 10.0, 10.0, 1.0,
+        )
+        angles = np.arctan2(result.ys, result.xs)
+        deltas = [
+            abs(driver._unwrap_delta(float(new), float(old)))
+            for old, new in zip(angles[:-1], angles[1:])
+        ]
+        self.assertEqual(result.termination_reason, "max_orbits")
+        self.assertGreater(result.angular_step_rejections, 0)
+        self.assertLess(max(deltas), math.pi)
 
     def test_parabolic_case_uses_absolute_not_fractional_energy_drift(self) -> None:
         result = driver.run_orbit(1.0, 0.0, 0.0, math.sqrt(2.0), 1.0, 0.01, 100, 0.05, 1.0e-4, 1.0)
@@ -578,7 +618,7 @@ class HelpFileTests(unittest.TestCase):
             "integral number of revolutions",
             "initial energy is zero or nearly zero",
             "absolute specific-energy drift",
-            "without linearly interpolating state components",
+            "state components are not linearly interpolated",
         ):
             with self.subTest(text=text):
                 self.assertIn(text, normalized_html)

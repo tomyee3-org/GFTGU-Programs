@@ -68,6 +68,8 @@ class OrbitResult:
 
     closure_radius_residual: float | None
     closure_velocity_residual: float | None
+    angular_step_rejections: int
+    event_refinement_trials: int
 
 
 def _validate_inputs(
@@ -255,7 +257,11 @@ def run_orbit(
         1.0e-12 * initial_radius,
         32.0 * math.ulp(initial_radius),
     )
-    singularity_stop_radius = 1024.0 * singularity_guard
+    # Stop accepted radial infall before roundoff-scale trial rejection makes
+    # further progress unreliable.  This factor leaves room for timestep
+    # refinement without assigning a physical radius to the central body.
+    singularity_stop_factor = 1024.0
+    singularity_stop_radius = singularity_stop_factor * singularity_guard
 
     xs = [x]
     ys = [y]
@@ -288,6 +294,7 @@ def run_orbit(
     max_corrector_iterations = 10
     max_retries_per_step = 80
     max_angular_step = 0.5 * math.pi
+    max_event_refinement_trials = 80
 
     angle_previous = math.atan2(y, x)
     accumulated_angle = 0.0
@@ -297,6 +304,17 @@ def run_orbit(
     accepted_steps = 0
     closure_radius_residual = None
     closure_velocity_residual = None
+    angular_step_rejections = 0
+    event_refinement_trials = 0
+
+    # Event refinement always re-integrates from the current accepted state.
+    # These variables bracket the final timestep and its angular advance.
+    event_needed = None
+    event_lower_dt = 0.0
+    event_lower_angle = 0.0
+    event_upper_dt = 0.0
+    event_upper_angle = 0.0
+    event_trials_this_step = 0
 
     while accepted_steps < maxSteps:
         if math.hypot(x, y) <= singularity_stop_radius:
@@ -407,8 +425,9 @@ def run_orbit(
             except OverflowError:
                 angular_step_estimate = math.inf
             if not math.isfinite(angular_step_estimate) or angular_step_estimate > max_angular_step:
-                # Endpoint-angle unwrapping is unambiguous only when an
-                # accepted step cannot span half a revolution or more.
+                # This conservative endpoint/chord estimate is a numerical
+                # safeguard, not a formal bound on the curved numerical path.
+                angular_step_rejections += 1
                 dt_work *= 0.5
                 continue
 
@@ -441,22 +460,55 @@ def run_orbit(
             and delta_angle != 0.0
         )
 
-        if crossed_target:
-            needed = target_angle - abs(accumulated_before)
-            fraction = min(1.0, max(0.0, needed / abs(delta_angle)))
-            direction = 1.0 if accumulated_after > 0.0 else -1.0
-            angular_overshoot = abs(accumulated_after) - target_angle
+        if crossed_target and event_needed is None:
+            event_needed = target_angle - abs(accumulated_before)
+            event_upper_dt = dt_work
+            event_upper_angle = abs(delta_angle)
+
+        if event_needed is not None:
+            event_trials_this_step += 1
+            event_refinement_trials += 1
+            if event_trials_this_step > max_event_refinement_trials:
+                raise RuntimeError(
+                    "Orbit could not refine the final revolution endpoint after "
+                    f"{max_event_refinement_trials} trials at t={t:.6g} s."
+                )
+
+            trial_angle = abs(delta_angle)
+            event_error = trial_angle - event_needed
             event_tolerance = 1.0e-12 * max(1.0, target_angle)
-            if angular_overshoot > event_tolerance:
-                refined_dt = dt_work * fraction
+            if abs(event_error) <= event_tolerance:
+                # Keep the actual integrated azimuth so the returned arrays
+                # and revolutions_completed describe the same endpoint.
+                termination_reason = "max_orbits"
+            else:
+                if event_error > 0.0:
+                    event_upper_dt = dt_work
+                    event_upper_angle = trial_angle
+                else:
+                    event_lower_dt = dt_work
+                    event_lower_angle = trial_angle
+
+                angle_span = event_upper_angle - event_lower_angle
+                if angle_span > 0.0:
+                    refined_dt = event_lower_dt + (
+                        (event_needed - event_lower_angle)
+                        * (event_upper_dt - event_lower_dt)
+                        / angle_span
+                    )
+                else:
+                    refined_dt = 0.5 * (event_lower_dt + event_upper_dt)
+
+                # Keep the proposal strictly inside the bracket so rounding
+                # cannot repeat an endpoint indefinitely.
+                dt_margin = 0.1 * (event_upper_dt - event_lower_dt)
+                refined_dt = min(
+                    event_upper_dt - dt_margin,
+                    max(event_lower_dt + dt_margin, refined_dt),
+                )
                 _checked_time_advance(t, refined_dt)
                 dt_work = refined_dt
                 continue
-
-            # The integrated endpoint is within the event tolerance.  Preserve
-            # its state and snap only the reported accumulated angle.
-            accumulated_after = direction * target_angle
-            termination_reason = "max_orbits"
 
         x, y, vx, vy, t = x1, y1, vx1, vy1, t1
         accumulated_angle = accumulated_after
@@ -508,7 +560,7 @@ def run_orbit(
                 _fractional_drift(h_now, h0),
             )
 
-        if crossed_target:
+        if termination_reason == "max_orbits":
             # Closure residuals compare the final state with the initial state
             # and are meaningful only after an integral number of revolutions.
             nearest_integer_orbits = round(maxOrbits)
@@ -548,4 +600,6 @@ def run_orbit(
         max_absolute_specific_angular_momentum_drift=max_absolute_h_drift,
         closure_radius_residual=closure_radius_residual,
         closure_velocity_residual=closure_velocity_residual,
+        angular_step_rejections=angular_step_rejections,
+        event_refinement_trials=event_refinement_trials,
     )
