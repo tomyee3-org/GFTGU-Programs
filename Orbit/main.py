@@ -83,17 +83,28 @@ def main() -> None:
     print(f"  accepted steps          : {result.accepted_steps}")
     print(f"  elapsed simulated time  : {result.final_time:.6g} s")
     print(f"  azimuthal revolutions   : {result.revolutions_completed:.8f}")
+    if result.max_fractional_energy_drift is None:
+        print("  max fractional energy drift       : n/a (initial energy is near zero)")
+    else:
+        print(
+            "  max fractional energy drift       : "
+            f"{result.max_fractional_energy_drift:.3e}"
+        )
     print(
-        "  max fractional energy drift       : "
-        f"{result.max_fractional_energy_drift:.3e}"
+        "  max absolute specific-energy drift: "
+        f"{result.max_absolute_specific_energy_drift:.3e} J/kg"
     )
     if result.max_fractional_angular_momentum_drift is None:
-        print("  max fractional angular-momentum drift: n/a (initial h is zero)")
+        print("  max fractional angular-momentum drift: n/a (initial h is zero or near zero)")
     else:
         print(
             "  max fractional angular-momentum drift: "
             f"{result.max_fractional_angular_momentum_drift:.3e}"
         )
+    print(
+        "  max absolute specific-angular-momentum drift: "
+        f"{result.max_absolute_specific_angular_momentum_drift:.3e} m^2/s"
+    )
 
     if result.closure_radius_residual is not None:
         print(

@@ -18,11 +18,12 @@ The central body remains fixed, so this is a test-particle model.
 from __future__ import annotations
 
 import math
+from numbers import Real
 
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.0.0"
+MODEL_VERSION = "1.1.0"
 BUILD_ID_COVERS = (
     "physics_orbit.py",
     "driver_orbit.py",
@@ -63,20 +64,44 @@ BUILD_ID = _compute_build_id()
 GM_SUN = 1.3271244e20
 
 
+def _require_finite_real(name: str, value: float) -> None:
+    """Raise ValueError unless *value* is a finite, non-Boolean real number."""
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise ValueError(f"{name} must be a finite real number.")
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be finite.")
+
+
 def compute_acceleration(x: float, y: float, mu: float) -> tuple[float, float]:
     """Return Newtonian gravitational acceleration components."""
-    if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(mu)):
-        raise ValueError("x, y, and mu must be finite.")
+    _require_finite_real("x", x)
+    _require_finite_real("y", y)
+    _require_finite_real("mu", mu)
     if mu <= 0.0:
         raise ValueError("mu=GM must be positive.")
 
-    r2 = x * x + y * y
-    if r2 <= 0.0:
+    # hypot() and the magnitude/unit-vector form avoid premature overflow in
+    # x*x + y*y and r**3 for otherwise representable inputs.
+    r = math.hypot(x, y)
+    if r == 0.0:
         raise ValueError("The point-mass gravitational field is singular at r=0.")
 
-    r = math.sqrt(r2)
-    factor = -mu / (r2 * r)
-    return factor * x, factor * y
+    try:
+        acceleration_magnitude = mu / r / r
+    except OverflowError as exc:
+        raise ValueError(
+            "The gravitational acceleration is too large for floating-point calculation."
+        ) from exc
+    if not math.isfinite(acceleration_magnitude):
+        raise ValueError(
+            "The gravitational acceleration is too large for floating-point calculation."
+        )
+
+    ax = -acceleration_magnitude * (x / r)
+    ay = -acceleration_magnitude * (y / r)
+    if not (math.isfinite(ax) and math.isfinite(ay)):
+        raise ValueError("The acceleration components are not representable as finite numbers.")
+    return ax, ay
 
 
 def specific_energy(
@@ -87,15 +112,22 @@ def specific_energy(
     mu: float,
 ) -> float:
     """Return specific mechanical energy, v^2/2 - mu/r (J/kg)."""
-    if not all(math.isfinite(value) for value in (x, y, vx, vy, mu)):
-        raise ValueError("Position, velocity, and mu must be finite.")
+    for name, value in (("x", x), ("y", y), ("vx", vx), ("vy", vy), ("mu", mu)):
+        _require_finite_real(name, value)
     if mu <= 0.0:
         raise ValueError("mu=GM must be positive.")
 
     r = math.hypot(x, y)
-    if r <= 0.0:
+    if r == 0.0:
         raise ValueError("Specific energy is undefined at r=0.")
-    return 0.5 * (vx * vx + vy * vy) - mu / r
+
+    speed = math.hypot(vx, vy)
+    kinetic = 0.5 * speed * speed
+    potential = -mu / r
+    energy = kinetic + potential
+    if not all(math.isfinite(value) for value in (kinetic, potential, energy)):
+        raise ValueError("Specific energy is not representable as a finite number.")
+    return energy
 
 
 def specific_angular_momentum(
@@ -105,6 +137,9 @@ def specific_angular_momentum(
     vy: float,
 ) -> float:
     """Return signed specific angular momentum h_z = x*vy - y*vx."""
-    if not all(math.isfinite(value) for value in (x, y, vx, vy)):
-        raise ValueError("Position and velocity components must be finite.")
-    return x * vy - y * vx
+    for name, value in (("x", x), ("y", y), ("vx", vx), ("vy", vy)):
+        _require_finite_real(name, value)
+    angular_momentum = x * vy - y * vx
+    if not math.isfinite(angular_momentum):
+        raise ValueError("Specific angular momentum is not representable as a finite number.")
+    return angular_momentum

@@ -16,6 +16,7 @@ the orbit changes rapidly and then recover toward dt0.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from numbers import Integral, Real
 from typing import Literal
 import math
 
@@ -60,8 +61,10 @@ class OrbitResult:
     final_time: float
     revolutions_completed: float
 
-    max_fractional_energy_drift: float
+    max_fractional_energy_drift: float | None
+    max_absolute_specific_energy_drift: float
     max_fractional_angular_momentum_drift: float | None
+    max_absolute_specific_angular_momentum_drift: float
 
     closure_radius_residual: float | None
     closure_velocity_residual: float | None
@@ -91,6 +94,8 @@ def _validate_inputs(
         "maxOrbits": maxOrbits,
     }
     for name, value in values.items():
+        if isinstance(value, bool) or not isinstance(value, Real):
+            raise ValueError(f"{name} must be a finite real number.")
         if not math.isfinite(value):
             raise ValueError(f"{name} must be finite.")
 
@@ -100,7 +105,7 @@ def _validate_inputs(
         raise ValueError("mu=GM must be positive.")
     if dt0 <= 0.0:
         raise ValueError("dt0 must be positive.")
-    if not isinstance(maxSteps, int) or isinstance(maxSteps, bool) or maxSteps <= 0:
+    if not isinstance(maxSteps, Integral) or isinstance(maxSteps, bool) or maxSteps <= 0:
         raise ValueError("maxSteps must be a positive integer.")
     if eps1 <= 0.0:
         raise ValueError("eps1 must be positive.")
@@ -200,6 +205,15 @@ def run_orbit(
         k, dt0, maxSteps, eps1, eps2, maxOrbits,
     )
 
+    # Normalize accepted numeric scalar types (including NumPy real/integer
+    # scalars) to the built-in types used throughout the integration.
+    k = float(k)
+    dt0 = float(dt0)
+    maxSteps = int(maxSteps)
+    eps1 = float(eps1)
+    eps2 = float(eps2)
+    maxOrbits = float(maxOrbits)
+
     x = float(xInit)
     y = float(yInit)
     vx = float(vxInit)
@@ -224,13 +238,23 @@ def run_orbit(
     KEs = [0.5 * initial_speed * initial_speed]
     Hs = [h0]
 
-    max_energy_drift = 0.0
+    max_absolute_energy_drift = 0.0
+    energy_scale = max(abs(KEs[0]), abs(PEs[0]))
+    report_fractional_energy_drift = (
+        energy_scale > 0.0 and abs(energy0) > 1.0e-12 * energy_scale
+    )
+    max_energy_drift = 0.0 if report_fractional_energy_drift else None
 
     # A fractional angular-momentum drift is not meaningful when the initial
     # angular momentum is zero (or numerically indistinguishable from zero).
-    h_scale = initial_radius * max(initial_speed, 1.0)
-    report_fractional_h_drift = abs(h0) > 1.0e-12 * h_scale
+    h_scale = initial_radius * initial_speed
+    report_fractional_h_drift = (
+        math.isfinite(h_scale)
+        and h_scale > 0.0
+        and abs(h0) > 1.0e-12 * h_scale
+    )
     max_h_drift = 0.0 if report_fractional_h_drift else None
+    max_absolute_h_drift = 0.0
 
     dt_work = float(dt0)
     max_corrector_iterations = 10
@@ -372,16 +396,29 @@ def run_orbit(
             angle_new = math.atan2(y1, x1)
             termination_reason = "max_orbits"
 
+        if not math.isfinite(t1) or t1 <= t:
+            raise RuntimeError(
+                "The timestep can no longer advance simulated time at "
+                f"t={t:.6g} s (working dt={dt_work:.6g} s)."
+            )
+
         x, y, vx, vy, t = x1, y1, vx1, vy1, t1
         accumulated_angle = accumulated_after
         angle_previous = angle_new
 
         radius = math.hypot(x, y)
-        speed2 = vx * vx + vy * vy
+        speed = math.hypot(vx, vy)
+        speed2 = speed * speed
         pe = -k / radius
         ke = 0.5 * speed2
         h_now = specific_angular_momentum(x, y, vx, vy)
-        energy_now = ke + pe
+        energy_now = specific_energy(x, y, vx, vy, k)
+
+        if not all(math.isfinite(value) for value in (radius, pe, ke)):
+            raise RuntimeError(
+                "The accepted state produced a non-finite derived quantity at "
+                f"t={t:.6g} s, r={radius:.6g} m."
+            )
 
         xs.append(x)
         ys.append(y)
@@ -394,10 +431,21 @@ def run_orbit(
 
         accepted_steps += 1
 
-        max_energy_drift = max(
-            max_energy_drift,
-            _fractional_drift(energy_now, energy0),
+        absolute_energy_drift = abs(energy_now - energy0)
+        absolute_h_drift = abs(h_now - h0)
+        if not all(math.isfinite(value) for value in (absolute_energy_drift, absolute_h_drift)):
+            raise RuntimeError("A conservation diagnostic overflowed floating-point range.")
+
+        max_absolute_energy_drift = max(
+            max_absolute_energy_drift,
+            absolute_energy_drift,
         )
+        max_absolute_h_drift = max(max_absolute_h_drift, absolute_h_drift)
+        if max_energy_drift is not None:
+            max_energy_drift = max(
+                max_energy_drift,
+                _fractional_drift(energy_now, energy0),
+            )
         if max_h_drift is not None:
             max_h_drift = max(
                 max_h_drift,
@@ -439,7 +487,9 @@ def run_orbit(
         final_time=t,
         revolutions_completed=revolutions,
         max_fractional_energy_drift=max_energy_drift,
+        max_absolute_specific_energy_drift=max_absolute_energy_drift,
         max_fractional_angular_momentum_drift=max_h_drift,
+        max_absolute_specific_angular_momentum_drift=max_absolute_h_drift,
         closure_radius_residual=closure_radius_residual,
         closure_velocity_residual=closure_velocity_residual,
     )
