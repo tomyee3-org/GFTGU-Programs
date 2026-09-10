@@ -6,7 +6,12 @@ the trajectory of a cannonball near the surface of the Earth.
 import argparse
 
 import physics_cannon
-from driver_cannon import run_cannon_trajectory, version_info
+from driver_cannon import (
+    interpolated_landing_range,
+    maximum_height,
+    run_cannon_trajectory,
+    version_info,
+)
 from plot_cannon import plot_cannon
 
 
@@ -39,10 +44,14 @@ def main():
     )
 
     metadata = version_info()
+    range_m = interpolated_landing_range(xs, hs)
+    height_m = maximum_height(hs)
     print(
         f"CannonTrajectory {metadata['model_version']} "
         f"(build {metadata['build_id']}) — {len(xs):,} trajectory samples"
     )
+    print(f"Range (interpolated ground crossing): {range_m:.1f} m")
+    print(f"Maximum height: {height_m:.1f} m")
     plot_cannon(xs, hs)
 
 

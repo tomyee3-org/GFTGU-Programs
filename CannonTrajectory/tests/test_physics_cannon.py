@@ -219,7 +219,7 @@ class TestModuleDiscovery(unittest.TestCase):
 
 class TestMetadataAndCompatibility(unittest.TestCase):
     def test_model_version(self):
-        self.assertEqual(physics.MODEL_VERSION, "1.1.0")
+        self.assertEqual(physics.MODEL_VERSION, "1.2.0")
 
     def test_build_coverage_is_exactly_the_executable_core(self):
         self.assertEqual(tuple(physics.BUILD_ID_COVERS), CORE_MODULE_FILES)
@@ -405,6 +405,15 @@ class TestDriverNominalBehavior(unittest.TestCase):
             abs(interpolated_range(xs, hs) - exact),
             abs(xs[-1] - exact),
         )
+
+    def test_driver_summary_helpers_match_default_printout_rounding(self):
+        xs, hs = driver.run_cannon_trajectory()
+        range_m = driver.interpolated_landing_range(xs, hs)
+        height_m = driver.maximum_height(hs)
+        self.assertAlmostEqual(range_m, interpolated_range(xs, hs), delta=1e-12)
+        self.assertEqual(f"{range_m:.1f}", "1019.7")
+        self.assertEqual(f"{height_m:.1f}", "254.9")
+        self.assertGreaterEqual(height_m, max(0.0, float(hs[-2])))
 
     def test_complementary_angles_have_same_interpolated_range(self):
         ranges = []
@@ -649,6 +658,8 @@ class TestPlottingAndMain(unittest.TestCase):
         self.assertIn(f"CannonTrajectory {physics.MODEL_VERSION}", result.stdout)
         self.assertIn(f"(build {physics.BUILD_ID})", result.stdout)
         self.assertIn("146 trajectory samples", result.stdout)
+        self.assertIn("Range (interpolated ground crossing): 1019.7 m", result.stdout)
+        self.assertIn("Maximum height: 254.9 m", result.stdout)
 
 
 class TestHelpFile(unittest.TestCase):

@@ -126,3 +126,38 @@ def run_cannon_trajectory(
         )
 
     return np.asarray(xs, dtype=float), np.asarray(hs, dtype=float)
+
+
+def interpolated_landing_range(xs, hs):
+    """Return the linearly interpolated ground-crossing range.
+
+    The stored trajectory ends at the first sample below ground.  Linear
+    interpolation between that sample and the preceding non-negative sample
+    gives a range accurate enough for the introductory comparisons, without
+    requiring the student to write the interpolation themselves.
+    """
+    xs = np.asarray(xs, dtype=float)
+    hs = np.asarray(hs, dtype=float)
+    if xs.ndim != 1 or hs.ndim != 1 or xs.size != hs.size:
+        raise ValueError("xs and hs must be one-dimensional arrays of equal length")
+    if xs.size < 2:
+        raise ValueError("at least two trajectory samples are required")
+    if not (np.isfinite(xs[-2:]).all() and np.isfinite(hs[-2:]).all()):
+        raise ValueError("landing samples must be finite")
+    if hs[-1] >= 0.0:
+        raise ValueError("trajectory does not include a below-ground sample")
+    if hs[-2] < 0.0:
+        raise ValueError("the sample before landing must be at or above ground")
+    if hs[-2] == 0.0:
+        return float(xs[-2])
+    return float(xs[-2] + (xs[-1] - xs[-2]) * hs[-2] / (hs[-2] - hs[-1]))
+
+
+def maximum_height(hs):
+    """Return the highest stored vertical coordinate."""
+    hs = np.asarray(hs, dtype=float)
+    if hs.ndim != 1 or hs.size == 0:
+        raise ValueError("hs must be a non-empty one-dimensional array")
+    if not np.isfinite(hs).all():
+        raise ValueError("height samples must be finite")
+    return float(np.max(hs))
