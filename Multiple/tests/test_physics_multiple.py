@@ -381,6 +381,20 @@ class TestConservationFunctions(unittest.TestCase):
         original = phys.positions_in_display_frame(positions, masses, "USER")
         np.testing.assert_array_equal(original, positions)
 
+    def test_uniform_boost_adds_total_mass_times_boost_to_momentum(self):
+        masses = np.array([1.0, 1.0, 1.0])
+        velocities = np.array(
+            [[0.0, 0.0, 0.0], [0.0, -30000.0, 0.0], [-30000.0, 0.0, 0.0]]
+        )
+        original = phys.scaled_total_momentum(velocities, masses)
+        np.testing.assert_allclose(original, [-3.0e4, -3.0e4, 0.0])
+        boost = np.array([1.0e5, 0.0, 0.0])
+        boosted = phys.scaled_total_momentum(velocities + boost, masses)
+        np.testing.assert_allclose(
+            boosted, original + float(np.sum(masses)) * boost
+        )
+        np.testing.assert_allclose(boosted, [2.7e5, -3.0e4, 0.0])
+
     def test_display_frame_rejects_unknown_names(self):
         with self.assertRaisesRegex(ValueError, "com"):
             phys.positions_in_display_frame(
@@ -780,6 +794,22 @@ class TestSimulation(unittest.TestCase):
         )
         com = phys.center_of_mass(displayed, result["masses_solar"])
         np.testing.assert_allclose(com, np.zeros_like(com), atol=1.0e-6)
+        unboosted = driver.run_simulation(
+            make_params(
+                velocities_init=[[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+                max_steps=20,
+                dt=200.0,
+            )
+        )
+        unboosted_display = phys.positions_in_display_frame(
+            unboosted["positions"], unboosted["masses_solar"], "com"
+        )
+        np.testing.assert_allclose(
+            displayed[:, 1] - displayed[:, 0],
+            unboosted_display[:, 1] - unboosted_display[:, 0],
+            rtol=0.0,
+            atol=1.0,
+        )
 
     def test_near_zero_initial_energy_uses_characteristic_scale(self):
         separation = 1.0e11
@@ -907,6 +937,54 @@ class TestPlotting(unittest.TestCase):
         self.assertEqual(controls["state"]["index"], 0)
         show.assert_called_once()
 
+    @mock.patch.object(plotting.plt, "show")
+    def test_animation_f_key_toggles_display_frame_and_note(self, show):
+        result = driver.run_simulation(
+            make_params(output_type="animation", max_steps=2, frame_time=50)
+        )
+        controls = plotting.animate_multiple(result)
+        self.assertEqual(controls["state"]["display_frame"], "com")
+        event = mock.Mock()
+        event.key = "f"
+        controls["on_key"](event)
+        self.assertEqual(controls["state"]["display_frame"], "user")
+        note = controls["frame_note"].get_text()
+        self.assertTrue(note.startswith("Switched — Display frame: user"))
+        self.assertIn("interpolated-frame totals", note)
+        self.assertIn("\nE=", note)
+        self.assertIn("\nP=", note)
+        self.assertIn("\nL=", note)
+        event.key = "F"
+        controls["on_key"](event)
+        self.assertEqual(controls["state"]["display_frame"], "com")
+        self.assertIn("COM", controls["frame_note"].get_text())
+        show.assert_called_once()
+
+    @mock.patch.object(plotting.plt, "show")
+    def test_legacy_result_without_masses_is_labeled_user_frame(self, show):
+        positions = np.array(
+            [[[0.0, 0.0, 0.0], [1.0e10, 0.0, 0.0]],
+             [[1.0e9, 0.0, 0.0], [1.1e10, 0.0, 0.0]]]
+        )
+        result = {
+            "type": "trajectories",
+            "positions": positions,
+        }
+        self.assertEqual(plotting._resolve_display_frame(result), "user")
+        plotting.plot_trajectories(result)
+        title = plotting.plt.gca().get_title()
+        self.assertIn("user frame", title)
+        show.assert_called_once()
+
+    def test_explicit_com_without_masses_raises(self):
+        result = {
+            "type": "trajectories",
+            "positions": np.zeros((2, 2, 3)),
+            "display_frame": "com",
+        }
+        with self.assertRaisesRegex(ValueError, "masses_solar"):
+            plotting._resolve_display_frame(result)
+
 
 class TestBuildDocumentationAndCompatibility(unittest.TestCase):
     @staticmethod
@@ -975,6 +1053,8 @@ class TestBuildDocumentationAndCompatibility(unittest.TestCase):
             "Introductory",
             "Intermediate",
             "Advanced",
+            "E_internal",
+            "interpolated-frame totals",
         )
         for fragment in required_fragments:
             with self.subTest(fragment=fragment):
@@ -1037,7 +1117,7 @@ class TestBuildDocumentationAndCompatibility(unittest.TestCase):
             "Center-of-mass frame",
             "Binary hardening",
             "Small star cluster",
-            "Compare with MercPert — advanced",
+            "Compare with MercPert",
             "Galaxy collision — optional toy model",
         )
         locations = [help_text.index(title) for title in titles]
@@ -1051,6 +1131,56 @@ class TestBuildDocumentationAndCompatibility(unittest.TestCase):
                 self.assertNotIn(suspicious, pre_license)
         self.assertIn("port and extension", license_and_after)
         self.assertIn("Triana/Java", license_and_after)
+
+    def test_help_scenario_cards_each_have_one_difficulty_badge(self):
+        help_text = (MODULE_DIR / HELP_FILE).read_text(encoding="utf-8")
+        heads = re.findall(
+            r'<div class="sc-head"><div class="sc-title">(.*?)</div>'
+            r'<span class="diff diff-\w+">(.*?)</span></div>',
+            help_text,
+        )
+        self.assertEqual(len(heads), 10)
+        allowed = {"Introductory", "Intermediate", "Advanced"}
+        expected = {
+            "Two-body sanity check": "Introductory",
+            "Default three-body encounter": "Introductory",
+            "Change the masses": "Introductory",
+            "Out-of-plane encounter": "Intermediate",
+            "Numerical convergence": "Intermediate",
+            "Center-of-mass frame": "Intermediate",
+            "Binary hardening": "Intermediate",
+            "Small star cluster": "Advanced",
+            "Compare with MercPert": "Advanced",
+            "Galaxy collision — optional toy model": "Advanced",
+        }
+        found = {}
+        for title, badge in heads:
+            self.assertIn(badge, allowed)
+            found[title] = badge
+        self.assertEqual(found, expected)
+        self.assertEqual(help_text.count('class="diff '), 10)
+        self.assertNotIn("equal the total mass times the boost", help_text)
+        self.assertIn(r"P_{\rm new}=\mathbf P_{\rm old}+M\mathbf u", help_text)
+
+    def test_console_totals_report_energy_not_kinetic_only(self):
+        import main as multiple_main
+
+        state = phys.conservation_state(
+            [[-1.0e10, 0.0, 0.0], [1.0e10, 0.0, 0.0]],
+            [[0.0, -1000.0, 0.0], [0.0, 500.0, 0.0]],
+            [1.0, 2.0],
+        )
+        text = multiple_main._format_conservation_totals(
+            "Initial", state, [1.0, 2.0]
+        )
+        self.assertIn("user-frame totals", text)
+        self.assertIn("E=", text)
+        self.assertIn("E_internal=", text)
+        self.assertIn("P=", text)
+        self.assertIn("L=", text)
+        self.assertNotIn("KE=", text)
+        energy = float(state["energy"])
+        self.assertIn(f"{energy:.6e}", text)
 
 
 if __name__ == "__main__":

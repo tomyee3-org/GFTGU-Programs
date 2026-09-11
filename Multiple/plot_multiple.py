@@ -27,14 +27,34 @@ def _projection_indices(projection: str):
         raise ValueError('projection must be "xy", "xz", or "yz".') from exc
 
 
-def _normalized_display_frame(value, default="com") -> str:
-    if value is None:
-        return default
+def _normalized_display_frame(value) -> str:
     if not isinstance(value, str):
         raise ValueError('display_frame must be "com" or "user".')
     frame = value.lower()
     if frame not in ("com", "user"):
         raise ValueError('display_frame must be "com" or "user".')
+    return frame
+
+
+def _resolve_display_frame(result: Dict[str, Any]) -> str:
+    """
+    Choose a display frame that can actually be computed from result.
+
+    Legacy results that omit both display_frame and masses_solar are treated
+    as user-frame data. An explicit COM request without masses is rejected
+    rather than labeled COM while raw coordinates are drawn.
+    """
+    requested = result.get("display_frame")
+    masses = result.get("masses_solar")
+    if requested is None:
+        if masses is None:
+            return "user"
+        return "com"
+    frame = _normalized_display_frame(requested)
+    if frame == "com" and masses is None:
+        raise ValueError(
+            "COM display requires masses_solar in the result dictionary."
+        )
     return frame
 
 
@@ -52,9 +72,13 @@ def _frame_note(frame: str) -> str:
 
 def _positions_for_display(result: Dict[str, Any], positions, frame: str):
     masses = result.get("masses_solar")
-    if masses is None:
-        return np.asarray(positions, dtype=float)
-    return positions_in_display_frame(positions, masses, frame)
+    if frame == "com":
+        if masses is None:
+            raise ValueError(
+                "COM display requires masses_solar in the result dictionary."
+            )
+        return positions_in_display_frame(positions, masses, "com")
+    return np.asarray(positions, dtype=float)
 
 
 def _fixed_limits(projected):
@@ -78,7 +102,7 @@ def plot_trajectories(
     if result.get("type") != "trajectories":
         raise ValueError("plot_trajectories requires a trajectories result.")
 
-    frame = _normalized_display_frame(result.get("display_frame"))
+    frame = _resolve_display_frame(result)
     positions = _positions_for_display(result, result["positions"], frame)
     _, n_bodies, _ = positions.shape
     i1, i2, label1, label2 = _projection_indices(projection)
@@ -230,7 +254,7 @@ def animate_multiple(result: Dict[str, Any]):
     trail_time = float(result["trail_time"])
     projection = result["projection"]
     axis_mode = result["axis_mode"]
-    display_frame = _normalized_display_frame(result.get("display_frame"))
+    display_frame = _resolve_display_frame(result)
     masses = result.get("masses_solar")
     source_velocities = result.get("frame_velocities")
     if source_velocities is not None:
@@ -268,7 +292,7 @@ def animate_multiple(result: Dict[str, Any]):
         transform=ax.transAxes,
         ha="left", va="bottom",
         family="monospace",
-        fontsize=9,
+        fontsize=8,
         bbox={"boxstyle": "round,pad=0.25", "facecolor": "wheat", "alpha": 0.92},
     )
 
@@ -300,7 +324,26 @@ def animate_multiple(result: Dict[str, Any]):
         ax.set_xlim(*xlim)
         ax.set_ylim(*ylim)
 
-    def _set_frame(frame_name, announce=False):
+    def _interpolated_totals_text(i):
+        if masses is None or source_velocities is None:
+            return ""
+        cons = conservation_state(
+            source_positions[i], source_velocities[i], masses
+        )
+        momentum = cons["momentum"]
+        angular = cons["angular_momentum"]
+        total_mass = float(np.sum(masses))
+        internal = float(cons["energy"]) - float(
+            np.dot(momentum, momentum)
+        ) / (2.0 * total_mass)
+        return (
+            "\ninterpolated-frame totals (user coordinates):\n"
+            f"E={cons['energy']:.4e}  E_int={internal:.4e}\n"
+            f"P=({momentum[0]:.3e}, {momentum[1]:.3e}, {momentum[2]:.3e})\n"
+            f"L=({angular[0]:.3e}, {angular[1]:.3e}, {angular[2]:.3e})"
+        )
+
+    def _set_frame(frame_name, announce=False, index=None):
         state["display_frame"] = frame_name
         state["projected"] = _projected_for_frame(frame_name)
         ax.set_title(
@@ -310,7 +353,9 @@ def animate_multiple(result: Dict[str, Any]):
         note = _frame_note(frame_name)
         if announce:
             note = "Switched — " + note
-        frame_note.set_text(note)
+        if index is None:
+            index = state["index"]
+        frame_note.set_text(note + _interpolated_totals_text(index))
         _apply_fixed_limits()
 
     _set_frame(display_frame, announce=False)
@@ -359,23 +404,14 @@ def animate_multiple(result: Dict[str, Any]):
                 lines[body].set_data([], [])
 
         _auto_limits(i)
-        totals_line = ""
-        if masses is not None and source_velocities is not None:
-            cons = conservation_state(
-                source_positions[i], source_velocities[i], masses
-            )
-            momentum = cons["momentum"]
-            angular = cons["angular_momentum"]
-            totals_line = (
-                f"\nE={cons['energy']:.4e} "
-                f"P=({momentum[0]:.3e}, {momentum[1]:.3e}, {momentum[2]:.3e}) "
-                f"L=({angular[0]:.3e}, {angular[1]:.3e}, {angular[2]:.3e})"
-            )
         time_text.set_text(
             f"t = {frame_times[i]:.4g} s\n"
             f"frame {i + 1} / {n_frames}"
-            f"{totals_line}"
         )
+        header = _frame_note(state["display_frame"])
+        if "Switched — " in frame_note.get_text():
+            header = "Switched — " + header
+        frame_note.set_text(header + _interpolated_totals_text(i))
         return [*lines, *markers, time_text, frame_note]
 
     # Persistent canvas timer: remains valid after the last displayed frame.
@@ -455,4 +491,10 @@ def animate_multiple(result: Dict[str, Any]):
     timer.start()
     plt.show()
 
-    return {"timer": timer, "state": state}
+    return {
+        "timer": timer,
+        "state": state,
+        "figure": fig,
+        "frame_note": frame_note,
+        "on_key": on_key,
+    }

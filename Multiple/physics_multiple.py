@@ -7,7 +7,7 @@ import numpy as np
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.2.1"
+MODEL_VERSION = "1.2.2"
 BUILD_ID_COVERS = (
     "physics_multiple.py",
     "driver_multiple.py",
@@ -375,10 +375,13 @@ def center_of_mass_velocity(
     masses_solar: np.ndarray,
 ) -> np.ndarray:
     """
-    Return the mass-weighted center-of-mass velocity.
+    Return the mass-weighted center-of-mass velocity V_CM.
 
-    This is the velocity of the system's center of momentum. velocities may
-    have shape (n_bodies, 3) or (n_states, n_bodies, 3).
+    velocities may have shape (n_bodies, 3) or (n_states, n_bodies, 3).
+    For an isolated Newtonian system the inertial frame that moves at
+    V_CM is the center-of-momentum frame, meaning the frame in which the
+    total linear momentum vanishes. V_CM itself is a velocity, not the
+    velocity of a "center-of-momentum point."
     """
     return center_of_mass(velocities, masses_solar)
 

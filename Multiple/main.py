@@ -25,14 +25,22 @@ def parse_args():
     return parser.parse_args()
 
 
-def _format_conservation_totals(label: str, state: dict) -> str:
-    """Format user-frame scaled total energy, linear momentum, and angular momentum."""
+def _format_conservation_totals(label: str, state: dict, masses_solar) -> str:
+    """Format user-frame scaled E, P, L and the boost-independent internal energy."""
     energy = float(state["energy"])
     momentum = state["momentum"]
     angular = state["angular_momentum"]
+    total_mass = float(sum(masses_solar))
+    p_squared = (
+        float(momentum[0]) ** 2
+        + float(momentum[1]) ** 2
+        + float(momentum[2]) ** 2
+    )
+    internal = energy - p_squared / (2.0 * total_mass)
     return (
         f"{label} user-frame totals (scaled by one solar mass): "
         f"E={energy:.6e} m^2/s^2; "
+        f"E_internal={internal:.6e} m^2/s^2; "
         f"P=({momentum[0]:.6e}, {momentum[1]:.6e}, {momentum[2]:.6e}) m/s; "
         f"L=({angular[0]:.6e}, {angular[1]:.6e}, {angular[2]:.6e}) m^2/s"
     )
@@ -91,9 +99,10 @@ def main():
     frame_name = result["display_frame"]
     if frame_name == "com":
         frame_note = (
-            "Display frame: COM (center-of-mass / center-of-momentum). "
-            "Plots subtract R_CM at each stored state; the integrator uses "
-            "the user-supplied inertial coordinates."
+            "Display frame: COM (center of mass). "
+            "Plots subtract the instantaneous center-of-mass position R_CM; "
+            "the integrator and the printed E, P, and L stay in the "
+            "user-supplied inertial coordinates."
         )
     else:
         frame_note = (
@@ -107,8 +116,20 @@ def main():
         f"simulated time: {result['final_time'] / 86400.0:.3f} days"
     )
     print(frame_note)
-    print(_format_conservation_totals("Initial", result["initial_conservation"]))
-    print(_format_conservation_totals("Final", result["final_conservation"]))
+    print(
+        _format_conservation_totals(
+            "Initial",
+            result["initial_conservation"],
+            params.masses_solar,
+        )
+    )
+    print(
+        _format_conservation_totals(
+            "Final",
+            result["final_conservation"],
+            params.masses_solar,
+        )
+    )
     print(
         "Maximum conservation drift: "
         f"energy={result['max_fractional_energy_drift']:.3e}, "
