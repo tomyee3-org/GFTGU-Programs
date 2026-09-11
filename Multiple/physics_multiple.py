@@ -7,7 +7,7 @@ import numpy as np
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.1.2"
+MODEL_VERSION = "1.2.1"
 BUILD_ID_COVERS = (
     "physics_multiple.py",
     "driver_multiple.py",
@@ -308,3 +308,116 @@ def conservation_state(
             positions, velocities, masses_solar
         ),
     }
+
+
+def _normalized_display_frame(frame) -> str:
+    """Return a canonical display-frame name or raise ValueError."""
+    if not isinstance(frame, str):
+        raise ValueError('display_frame must be "com" or "user".')
+    normalized = frame.lower()
+    if normalized not in ("com", "user"):
+        raise ValueError('display_frame must be "com" or "user".')
+    return normalized
+
+
+def center_of_mass(
+    positions: np.ndarray,
+    masses_solar: np.ndarray,
+) -> np.ndarray:
+    """
+    Return the mass-weighted center of mass.
+
+    positions may have shape (n_bodies, 3) or (n_states, n_bodies, 3).
+    The result has shape (3,) or (n_states, 3) respectively.
+    """
+    positions = _as_finite_float_array(positions, "positions")
+    masses_solar = _as_finite_float_array(masses_solar, "masses_solar")
+    if masses_solar.ndim != 1 or masses_solar.size < 2:
+        raise ValueError(
+            "masses_solar must be a one-dimensional array with at least "
+            "two values."
+        )
+    if np.any(masses_solar <= 0.0):
+        raise ValueError("All masses must be positive.")
+
+    if positions.ndim == 2:
+        if positions.shape != (masses_solar.size, 3):
+            raise ValueError(
+                "positions must have shape (number of masses, 3)."
+            )
+        with np.errstate(over="ignore", invalid="ignore"):
+            weighted = np.sum(masses_solar[:, None] * positions, axis=0)
+            com = weighted / float(np.sum(masses_solar))
+    elif positions.ndim == 3:
+        if positions.shape[1:] != (masses_solar.size, 3):
+            raise ValueError(
+                "stacked positions must have shape "
+                "(n_states, number of masses, 3)."
+            )
+        with np.errstate(over="ignore", invalid="ignore"):
+            weighted = np.sum(masses_solar[None, :, None] * positions, axis=1)
+            com = weighted / float(np.sum(masses_solar))
+    else:
+        raise ValueError(
+            "positions must have shape (n_bodies, 3) or "
+            "(n_states, n_bodies, 3)."
+        )
+
+    if not np.all(np.isfinite(com)):
+        raise ValueError(
+            "Center of mass is outside the floating-point range."
+        )
+    return com
+
+
+def center_of_mass_velocity(
+    velocities: np.ndarray,
+    masses_solar: np.ndarray,
+) -> np.ndarray:
+    """
+    Return the mass-weighted center-of-mass velocity.
+
+    This is the velocity of the system's center of momentum. velocities may
+    have shape (n_bodies, 3) or (n_states, n_bodies, 3).
+    """
+    return center_of_mass(velocities, masses_solar)
+
+
+def positions_in_display_frame(
+    positions: np.ndarray,
+    masses_solar: np.ndarray,
+    display_frame: str = "com",
+) -> np.ndarray:
+    """
+    Return positions expressed in the requested display frame.
+
+    "user" leaves the integration coordinates unchanged. "com" subtracts the
+    instantaneous center of mass from every body so the plotted origin sits
+    at R_CM. The integration itself is never modified.
+    """
+    frame = _normalized_display_frame(display_frame)
+    positions = _as_finite_float_array(positions, "positions")
+    if frame == "user":
+        if positions.ndim == 2:
+            _validated_positions_masses(positions, masses_solar)
+        elif positions.ndim == 3:
+            if positions.shape[0] == 0:
+                raise ValueError("positions must contain at least one state.")
+            _validated_positions_masses(positions[0], masses_solar)
+        else:
+            raise ValueError(
+                "positions must have shape (n_bodies, 3) or "
+                "(n_states, n_bodies, 3)."
+            )
+        return positions
+
+    com = center_of_mass(positions, masses_solar)
+    if positions.ndim == 2:
+        shifted = positions - com
+    else:
+        shifted = positions - com[:, None, :]
+    if not np.all(np.isfinite(shifted)):
+        raise ValueError(
+            "COM-frame positions are outside the floating-point range."
+        )
+    return shifted

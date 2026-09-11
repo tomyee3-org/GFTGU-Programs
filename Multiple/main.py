@@ -25,6 +25,19 @@ def parse_args():
     return parser.parse_args()
 
 
+def _format_conservation_totals(label: str, state: dict) -> str:
+    """Format user-frame scaled total energy, linear momentum, and angular momentum."""
+    energy = float(state["energy"])
+    momentum = state["momentum"]
+    angular = state["angular_momentum"]
+    return (
+        f"{label} user-frame totals (scaled by one solar mass): "
+        f"E={energy:.6e} m^2/s^2; "
+        f"P=({momentum[0]:.6e}, {momentum[1]:.6e}, {momentum[2]:.6e}) m/s; "
+        f"L=({angular[0]:.6e}, {angular[1]:.6e}, {angular[2]:.6e}) m^2/s"
+    )
+
+
 def main():
     parse_args()
 
@@ -67,6 +80,7 @@ def main():
         trail_time=6.0e5,              # simulated seconds of recent trail
         projection="xy",               # "xy", "xz", or "yz"
         axis_mode="fixed",             # "fixed" or "auto"
+        display_frame="com",           # "com" (default) or "user"
     )
 
     # This optional diagnostic is displayed only in trajectories mode.
@@ -74,11 +88,27 @@ def main():
 
     result = run_simulation(params)
 
+    frame_name = result["display_frame"]
+    if frame_name == "com":
+        frame_note = (
+            "Display frame: COM (center-of-mass / center-of-momentum). "
+            "Plots subtract R_CM at each stored state; the integrator uses "
+            "the user-supplied inertial coordinates."
+        )
+    else:
+        frame_note = (
+            "Display frame: user (input inertial coordinates). "
+            "A large total linear momentum will drift the plot across the axes."
+        )
+
     print(
         f"Multiple {result['model_version']} (build {result['build_id']}) — "
         f"accepted steps: {result['accepted_steps']}; "
         f"simulated time: {result['final_time'] / 86400.0:.3f} days"
     )
+    print(frame_note)
+    print(_format_conservation_totals("Initial", result["initial_conservation"]))
+    print(_format_conservation_totals("Final", result["final_conservation"]))
     print(
         "Maximum conservation drift: "
         f"energy={result['max_fractional_energy_drift']:.3e}, "

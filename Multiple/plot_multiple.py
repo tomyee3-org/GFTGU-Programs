@@ -7,6 +7,8 @@ from typing import Dict, Any
 import matplotlib.pyplot as plt
 import numpy as np
 
+from physics_multiple import conservation_state, positions_in_display_frame
+
 
 _COLORS = ["red", "green", "blue", "orange", "purple", "brown"]
 
@@ -23,6 +25,36 @@ def _projection_indices(projection: str):
         return mapping[projection.lower()]
     except KeyError as exc:
         raise ValueError('projection must be "xy", "xz", or "yz".') from exc
+
+
+def _normalized_display_frame(value, default="com") -> str:
+    if value is None:
+        return default
+    if not isinstance(value, str):
+        raise ValueError('display_frame must be "com" or "user".')
+    frame = value.lower()
+    if frame not in ("com", "user"):
+        raise ValueError('display_frame must be "com" or "user".')
+    return frame
+
+
+def _frame_label(frame: str) -> str:
+    if frame == "com":
+        return "COM frame"
+    return "user frame"
+
+
+def _frame_note(frame: str) -> str:
+    if frame == "com":
+        return "Display frame: COM (center of mass)"
+    return "Display frame: user (input coordinates)"
+
+
+def _positions_for_display(result: Dict[str, Any], positions, frame: str):
+    masses = result.get("masses_solar")
+    if masses is None:
+        return np.asarray(positions, dtype=float)
+    return positions_in_display_frame(positions, masses, frame)
 
 
 def _fixed_limits(projected):
@@ -46,7 +78,8 @@ def plot_trajectories(
     if result.get("type") != "trajectories":
         raise ValueError("plot_trajectories requires a trajectories result.")
 
-    positions = result["positions"]
+    frame = _normalized_display_frame(result.get("display_frame"))
+    positions = _positions_for_display(result, result["positions"], frame)
     _, n_bodies, _ = positions.shape
     i1, i2, label1, label2 = _projection_indices(projection)
 
@@ -61,7 +94,21 @@ def plot_trajectories(
 
     ax.set_xlabel(f"{label1} (m)")
     ax.set_ylabel(f"{label2} (m)")
-    ax.set_title(f"Multiple trajectories ({projection.lower()} projection)")
+    ax.set_title(
+        f"Multiple trajectories ({projection.lower()} projection, "
+        f"{_frame_label(frame)})"
+    )
+    ax.text(
+        0.02,
+        0.02,
+        _frame_note(frame),
+        transform=ax.transAxes,
+        ha="left",
+        va="bottom",
+        family="monospace",
+        fontsize=9,
+        bbox={"boxstyle": "round,pad=0.25", "facecolor": "wheat", "alpha": 0.9},
+    )
     ax.legend()
     ax.set_aspect("equal", "box")
     plt.tight_layout()
@@ -163,6 +210,7 @@ def animate_multiple(result: Dict[str, Any]):
       Left arrow  go back one frame while paused
       Home        jump to first frame and pause
       End         jump to final frame and pause
+      f           toggle user / COM display frame
 
     Space resumes from the currently displayed frame. If the final frame is
     displayed, Space replays from the beginning.
@@ -171,9 +219,9 @@ def animate_multiple(result: Dict[str, Any]):
         raise ValueError("animate_multiple requires an animation result.")
 
     frame_times = np.asarray(result["frame_times"], dtype=float)
-    positions = np.asarray(result["frame_positions"], dtype=float)
+    source_positions = np.asarray(result["frame_positions"], dtype=float)
 
-    if frame_times.size == 0 or positions.shape[0] == 0:
+    if frame_times.size == 0 or source_positions.shape[0] == 0:
         raise ValueError("No animation frames are available.")
 
     mode = result["animation_mode"]
@@ -182,10 +230,14 @@ def animate_multiple(result: Dict[str, Any]):
     trail_time = float(result["trail_time"])
     projection = result["projection"]
     axis_mode = result["axis_mode"]
+    display_frame = _normalized_display_frame(result.get("display_frame"))
+    masses = result.get("masses_solar")
+    source_velocities = result.get("frame_velocities")
+    if source_velocities is not None:
+        source_velocities = np.asarray(source_velocities, dtype=float)
 
     i1, i2, label1, label2 = _projection_indices(projection)
-    projected = positions[:, :, [i1, i2]]
-    n_frames, n_bodies, _ = projected.shape
+    n_frames, n_bodies, _ = source_positions.shape
 
     fig, ax = plt.subplots()
 
@@ -211,30 +263,64 @@ def animate_multiple(result: Dict[str, Any]):
         ha="left", va="top",
         family="monospace",
     )
+    frame_note = ax.text(
+        0.02, 0.02, "",
+        transform=ax.transAxes,
+        ha="left", va="bottom",
+        family="monospace",
+        fontsize=9,
+        bbox={"boxstyle": "round,pad=0.25", "facecolor": "wheat", "alpha": 0.92},
+    )
 
     ax.set_xlabel(f"{label1} (m)")
     ax.set_ylabel(f"{label2} (m)")
-    ax.set_title(f"Multiple animation ({projection} projection)")
     ax.set_aspect("equal", adjustable="box")
     ax.legend(loc="upper right")
-
-    if axis_mode == "fixed":
-        xlim, ylim = _fixed_limits(projected)
-        ax.set_xlim(*xlim)
-        ax.set_ylim(*ylim)
 
     trail_frames = 0
     if mode == "trails" and trail_time > 0.0:
         trail_frames = max(1, int(np.ceil(trail_time / frame_time)))
 
-    state = {"paused": False, "index": 0, "finished": False}
+    state = {
+        "paused": False,
+        "index": 0,
+        "finished": False,
+        "display_frame": display_frame,
+        "projected": None,
+    }
+
+    def _projected_for_frame(frame_name):
+        displayed = _positions_for_display(result, source_positions, frame_name)
+        return displayed[:, :, [i1, i2]]
+
+    def _apply_fixed_limits():
+        if axis_mode != "fixed":
+            return
+        xlim, ylim = _fixed_limits(state["projected"])
+        ax.set_xlim(*xlim)
+        ax.set_ylim(*ylim)
+
+    def _set_frame(frame_name, announce=False):
+        state["display_frame"] = frame_name
+        state["projected"] = _projected_for_frame(frame_name)
+        ax.set_title(
+            f"Multiple animation ({projection} projection, "
+            f"{_frame_label(frame_name)})"
+        )
+        note = _frame_note(frame_name)
+        if announce:
+            note = "Switched — " + note
+        frame_note.set_text(note)
+        _apply_fixed_limits()
+
+    _set_frame(display_frame, announce=False)
 
     def _auto_limits(i):
         if axis_mode != "auto":
             return
 
         start = max(0, i - trail_frames) if mode == "trails" else i
-        visible = projected[start:i + 1]
+        visible = state["projected"][start:i + 1]
 
         x = visible[..., 0]
         y = visible[..., 1]
@@ -256,6 +342,7 @@ def animate_multiple(result: Dict[str, Any]):
         state["finished"] = (i >= n_frames - 1)
 
         start = max(0, i - trail_frames) if mode == "trails" else i
+        projected = state["projected"]
 
         for body in range(n_bodies):
             markers[body].set_data(
@@ -272,11 +359,24 @@ def animate_multiple(result: Dict[str, Any]):
                 lines[body].set_data([], [])
 
         _auto_limits(i)
+        totals_line = ""
+        if masses is not None and source_velocities is not None:
+            cons = conservation_state(
+                source_positions[i], source_velocities[i], masses
+            )
+            momentum = cons["momentum"]
+            angular = cons["angular_momentum"]
+            totals_line = (
+                f"\nE={cons['energy']:.4e} "
+                f"P=({momentum[0]:.3e}, {momentum[1]:.3e}, {momentum[2]:.3e}) "
+                f"L=({angular[0]:.3e}, {angular[1]:.3e}, {angular[2]:.3e})"
+            )
         time_text.set_text(
             f"t = {frame_times[i]:.4g} s\n"
             f"frame {i + 1} / {n_frames}"
+            f"{totals_line}"
         )
-        return [*lines, *markers, time_text]
+        return [*lines, *markers, time_text, frame_note]
 
     # Persistent canvas timer: remains valid after the last displayed frame.
     timer = fig.canvas.new_timer(interval=interval_ms)
@@ -321,6 +421,13 @@ def animate_multiple(result: Dict[str, Any]):
                 resume_from_displayed_frame()
             else:
                 pause()
+            fig.canvas.draw_idle()
+            return
+
+        if key in ("f", "F"):
+            next_frame = "user" if state["display_frame"] == "com" else "com"
+            _set_frame(next_frame, announce=True)
+            draw_frame(state["index"])
             fig.canvas.draw_idle()
             return
 

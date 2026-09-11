@@ -356,6 +356,37 @@ class TestConservationFunctions(unittest.TestCase):
                 [1.0e300, 1.0e300],
             )
 
+    def test_center_of_mass_of_known_pair(self):
+        positions = np.array([[-2.0, 0.0, 0.0], [4.0, 0.0, 0.0]])
+        masses = np.array([2.0, 1.0])
+        np.testing.assert_allclose(
+            phys.center_of_mass(positions, masses),
+            [0.0, 0.0, 0.0],
+            atol=1.0e-15,
+        )
+        velocities = np.array([[0.0, -1.0, 0.0], [0.0, 2.0, 3.0]])
+        np.testing.assert_allclose(
+            phys.center_of_mass_velocity(velocities, masses),
+            [0.0, 0.0, 1.0],
+            atol=1.0e-15,
+        )
+
+    def test_com_frame_positions_have_zero_mass_weighted_mean(self):
+        rng = np.random.default_rng(42)
+        positions = rng.normal(size=(5, 4, 3)) * 1.0e11
+        masses = rng.uniform(0.3, 4.0, size=4)
+        shifted = phys.positions_in_display_frame(positions, masses, "com")
+        com = phys.center_of_mass(shifted, masses)
+        np.testing.assert_allclose(com, np.zeros((5, 3)), atol=1.0e-3)
+        original = phys.positions_in_display_frame(positions, masses, "USER")
+        np.testing.assert_array_equal(original, positions)
+
+    def test_display_frame_rejects_unknown_names(self):
+        with self.assertRaisesRegex(ValueError, "com"):
+            phys.positions_in_display_frame(
+                [[0, 0, 0], [1, 0, 0]], [1, 1], "lab"
+            )
+
 
 class TestParameterValidation(unittest.TestCase):
     def assert_invalid(self, field, values):
@@ -420,6 +451,11 @@ class TestParameterValidation(unittest.TestCase):
     def test_projection_validation_and_case_acceptance(self):
         self.assert_invalid("projection", [None, 2, "xyz", " xy "])
         driver._validate_params(make_params(projection="YZ"))
+
+    def test_display_frame_validation_and_case_acceptance(self):
+        self.assert_invalid("display_frame", [None, 2, "lab", " com "])
+        driver._validate_params(make_params(display_frame="USER"))
+        driver._validate_params(make_params(display_frame="COM"))
 
     def test_animation_control_validation(self):
         base = {"output_type": "animation"}
@@ -723,6 +759,27 @@ class TestSimulation(unittest.TestCase):
         self.assertEqual(result["animation_mode"], "current positions")
         self.assertEqual(result["projection"], "xz")
         self.assertEqual(result["axis_mode"], "auto")
+        self.assertEqual(result["display_frame"], "com")
+        np.testing.assert_array_equal(result["masses_solar"], [1.0, 2.0])
+
+    def test_result_records_requested_display_frame(self):
+        result = driver.run_simulation(make_params(display_frame="user", max_steps=1))
+        self.assertEqual(result["display_frame"], "user")
+        defaulted = driver.run_simulation(make_params(max_steps=1))
+        self.assertEqual(defaulted["display_frame"], "com")
+
+    def test_com_display_removes_uniform_drift(self):
+        params = make_params(
+            velocities_init=[[1.0e6, -2.0e6, 3.0e5], [1.0e6, -2.0e6, 3.0e5]],
+            max_steps=20,
+            dt=200.0,
+        )
+        result = driver.run_simulation(params)
+        displayed = phys.positions_in_display_frame(
+            result["positions"], result["masses_solar"], "com"
+        )
+        com = phys.center_of_mass(displayed, result["masses_solar"])
+        np.testing.assert_allclose(com, np.zeros_like(com), atol=1.0e-6)
 
     def test_near_zero_initial_energy_uses_characteristic_scale(self):
         separation = 1.0e11
@@ -911,8 +968,13 @@ class TestBuildDocumentationAndCompatibility(unittest.TestCase):
             "'xy'",
             "'xz'",
             "'yz'",
+            "'com'",
+            "display_frame",
             "cubic-Hermite",
             "velocity increment",
+            "Introductory",
+            "Intermediate",
+            "Advanced",
         )
         for fragment in required_fragments:
             with self.subTest(fragment=fragment):
@@ -929,7 +991,7 @@ class TestBuildDocumentationAndCompatibility(unittest.TestCase):
             and node.func.id == "SimulationParams"
         ]
         self.assertEqual(len(calls), 1)
-        requested = {"max_steps", "eps1", "eps2"}
+        requested = {"max_steps", "eps1", "eps2", "display_frame"}
         values = {
             keyword.arg: ast.literal_eval(keyword.value)
             for keyword in calls[0].keywords
@@ -939,6 +1001,7 @@ class TestBuildDocumentationAndCompatibility(unittest.TestCase):
         self.assertEqual(values["max_steps"], 60000)
         self.assertEqual(values["eps1"], 0.005)
         self.assertEqual(values["eps2"], 1.0e-7)
+        self.assertEqual(values["display_frame"], "com")
 
     def test_help_defines_current_output_terminology(self):
         help_text = (MODULE_DIR / HELP_FILE).read_text(encoding="utf-8")

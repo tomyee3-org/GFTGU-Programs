@@ -39,6 +39,7 @@ class SimulationParams:
     trail_time: float = 6.0e5          # simulated seconds shown behind each body
     projection: str = "xy"             # "xy", "xz", or "yz"
     axis_mode: str = "fixed"           # "fixed" or "auto"
+    display_frame: str = "com"         # "com" or "user"
 
 
 def _validate_params(params: SimulationParams) -> None:
@@ -113,6 +114,13 @@ def _validate_params(params: SimulationParams) -> None:
         raise ValueError('projection must be "xy", "xz", or "yz".')
     if params.projection.lower() not in ("xy", "xz", "yz"):
         raise ValueError('projection must be "xy", "xz", or "yz".')
+
+    # Display frame applies to both output modes. Integration always uses the
+    # user-supplied inertial coordinates; "com" only recenters the plot.
+    if not isinstance(params.display_frame, str):
+        raise ValueError('display_frame must be "com" or "user".')
+    if params.display_frame.lower() not in ("com", "user"):
+        raise ValueError('display_frame must be "com" or "user".')
 
     # The remaining display controls matter only for animation.
     if params.output_type.lower() == "animation":
@@ -549,6 +557,8 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
         "build_id": phys.BUILD_ID,
         "accepted_steps": accepted_steps,
         "final_time": time,
+        "masses_solar": masses.copy(),
+        "display_frame": params.display_frame.lower(),
         "initial_conservation": initial_cons,
         "final_conservation": current_cons,
         "energy_drift_scale": energy_drift_scale,
