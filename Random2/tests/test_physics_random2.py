@@ -529,6 +529,15 @@ class TestPlotting(unittest.TestCase):
         with mock.patch.object(plot.plt, "show") as show:
             plot.plot_scaled_distance([2.0, 4.0], [1.5, 2.1])
         show.assert_called_once_with()
+        ax = plt.gca()
+        aspect = ax.get_aspect()
+        self.assertTrue(
+            aspect == "equal" or aspect == 1.0,
+            f"expected equal log-axis aspect, got {aspect!r}",
+        )
+        self.assertEqual(ax.get_adjustable(), "box")
+        self.assertEqual(ax.get_xscale(), "log")
+        self.assertEqual(ax.get_yscale(), "log")
 
     def test_scaled_plot_rejects_invalid_data(self):
         bad_pairs = (

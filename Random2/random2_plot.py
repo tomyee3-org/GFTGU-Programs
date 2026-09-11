@@ -52,11 +52,17 @@ def plot_scaled_distance(
     fig, ax = plt.subplots(figsize=(8, 6))
     ax.loglog(lengths, avg_dist, marker="o", linestyle="-")
 
+    # Equal log decades on both axes so a slope of 1/2 is readable by
+    # eye (one vertical decade over two horizontal decades) instead of
+    # being stretched by the output-panel aspect ratio.
+    ax.set_aspect("equal", adjustable="box")
+
     ax.set_xlabel("Number of Steps (log scale)")
     ax.set_ylabel("Scaled Distance (log scale)")
     ax.set_title("Random2: Scaled Distance vs Number of Steps")
     ax.grid(True, which="both", ls="--", alpha=0.5)
 
+    plt.tight_layout()
     plt.show()
 
 
