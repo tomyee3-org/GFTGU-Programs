@@ -51,10 +51,16 @@ def find_module_dir(start):
 
 
 MODULE_DIR = find_module_dir(Path(__file__))
+HELP_PATH = (
+    MODULE_DIR / HELP_FILE
+    if (MODULE_DIR / HELP_FILE).is_file()
+    else MODULE_DIR.parent / HELP_FILE
+)
 if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 
 import driver_cannon as driver  # noqa: E402
+import main as entrypoint  # noqa: E402
 import physics_cannon as physics  # noqa: E402
 import plot_cannon as plotting  # noqa: E402
 
@@ -162,18 +168,15 @@ def nodes_by_id(root, element_id):
 
 
 def main_trajectory_settings(directory):
-    """Extract constant keyword settings from main.py's trajectory call."""
-    tree = ast.parse((directory / "main.py").read_text(encoding="utf-8"))
-    calls = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "run_cannon_trajectory"
-    ]
-    if len(calls) != 1:
-        raise AssertionError("main.py must contain exactly one trajectory call")
-    return {keyword.arg: ast.literal_eval(keyword.value) for keyword in calls[0].keywords}
+    """Return the CLI defaults passed to the trajectory driver."""
+    if Path(directory).resolve() != MODULE_DIR:
+        raise AssertionError("settings must be read from the active module directory")
+    with mock.patch.object(sys, "argv", ["main.py"]):
+        args = entrypoint.parse_args()
+    return {
+        name: getattr(args, name)
+        for name in ("speed", "angle_deg", "dt", "max_steps", "method")
+    }
 
 
 class TestModuleDiscovery(unittest.TestCase):
@@ -196,8 +199,9 @@ class TestModuleDiscovery(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             flat_dir = Path(temporary)
-            for name in (*CORE_MODULE_FILES, HELP_FILE):
+            for name in CORE_MODULE_FILES:
                 shutil.copy2(MODULE_DIR / name, flat_dir / name)
+            shutil.copy2(HELP_PATH, flat_dir / HELP_FILE)
             flat_test = flat_dir / "test_physics_cannon.py"
             shutil.copy2(Path(__file__), flat_test)
 
@@ -219,7 +223,7 @@ class TestModuleDiscovery(unittest.TestCase):
 
 class TestMetadataAndCompatibility(unittest.TestCase):
     def test_model_version(self):
-        self.assertEqual(physics.MODEL_VERSION, "1.2.0")
+        self.assertEqual(physics.MODEL_VERSION, "1.3.0")
 
     def test_build_coverage_is_exactly_the_executable_core(self):
         self.assertEqual(tuple(physics.BUILD_ID_COVERS), CORE_MODULE_FILES)
@@ -409,11 +413,29 @@ class TestDriverNominalBehavior(unittest.TestCase):
     def test_driver_summary_helpers_match_default_printout_rounding(self):
         xs, hs = driver.run_cannon_trajectory()
         range_m = driver.interpolated_landing_range(xs, hs)
-        height_m = driver.maximum_height(hs)
+        height_m = driver.interpolated_maximum_height(hs)
+        flight_time_s = driver.interpolated_flight_time(hs, 0.1)
         self.assertAlmostEqual(range_m, interpolated_range(xs, hs), delta=1e-12)
-        self.assertEqual(f"{range_m:.1f}", "1019.7")
-        self.assertEqual(f"{height_m:.1f}", "254.9")
+        self.assertEqual(f"{range_m:.5g}", "1019.7")
+        self.assertEqual(f"{height_m:.5g}", "254.93")
+        self.assertEqual(f"{flight_time_s:.5g}", "14.421")
         self.assertGreaterEqual(height_m, max(0.0, float(hs[-2])))
+
+    def test_parabolic_maximum_recovers_quadratic_vertex(self):
+        hs = np.array([1.0, 3.0, 4.0, 4.5, 4.0, 3.0])
+        self.assertEqual(driver.interpolated_maximum_height(hs), 4.5)
+
+        offset_hs = np.array([-0.0625, 3.4375, 4.9375, 4.4375, 1.9375, -2.5625])
+        self.assertEqual(driver.interpolated_maximum_height(offset_hs), 5.0)
+
+    def test_interpolated_flight_time_handles_exact_and_between_sample_landings(self):
+        self.assertAlmostEqual(
+            driver.interpolated_flight_time([0.0, 0.5, -0.5], 0.2), 0.3
+        )
+        self.assertEqual(
+            driver.interpolated_flight_time([0.0, 1.0, 0.0, -1.0], 0.25),
+            0.5,
+        )
 
     def test_complementary_angles_have_same_interpolated_range(self):
         ranges = []
@@ -659,13 +681,56 @@ class TestPlottingAndMain(unittest.TestCase):
         self.assertIn(f"(build {physics.BUILD_ID})", result.stdout)
         self.assertIn("146 trajectory samples", result.stdout)
         self.assertIn("Range (interpolated ground crossing): 1019.7 m", result.stdout)
-        self.assertIn("Maximum height: 254.9 m", result.stdout)
+        self.assertIn(
+            "Maximum height (parabolic interpolation): 254.93 m", result.stdout
+        )
+        self.assertIn(
+            "Flight time (interpolated ground crossing): 14.421 s", result.stdout
+        )
+
+    def test_main_accepts_all_driver_parameters_at_command_line(self):
+        environment = os.environ.copy()
+        environment["MPLBACKEND"] = "Agg"
+        result = subprocess.run(
+            [
+                sys.executable, "main.py", "--speed", "50", "--angle_deg", "30",
+                "--dt", "0.2", "--max_steps", "10000", "--method", "euler",
+            ],
+            cwd=MODULE_DIR,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("28 trajectory samples", result.stdout)
+        self.assertIn("Range (interpolated ground crossing): 229.35 m", result.stdout)
+        self.assertIn("Maximum height (parabolic interpolation): 34.415 m", result.stdout)
+        self.assertIn("Flight time (interpolated ground crossing): 5.2967 s", result.stdout)
+
+    def test_command_help_describes_both_method_choices(self):
+        result = subprocess.run(
+            [sys.executable, "main.py", "--help"],
+            cwd=MODULE_DIR,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        normalized_help = " ".join(result.stdout.split())
+        for required in ("--speed", "--angle_deg", "--dt", "--max_steps",
+                         "--method", "first-order forward Euler",
+                         "second-order improved Euler"):
+            with self.subTest(required=required):
+                self.assertIn(required, normalized_help)
 
 
 class TestHelpFile(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.path = MODULE_DIR / HELP_FILE
+        cls.path = HELP_PATH
         cls.html = cls.path.read_text(encoding="utf-8")
         parser = HtmlTreeParser()
         parser.feed(cls.html)
@@ -706,19 +771,19 @@ class TestHelpFile(unittest.TestCase):
                 self.assertEqual(len(cells), 4)
                 rows[cells[0]] = cells[1:]
 
-        self.assertEqual(
-            set(rows), {"speed", "angle_deg", "dt", "max_steps", "method", "g"}
-        )
+        self.assertEqual(set(rows), {
+            "--speed", "--angle_deg", "--dt", "--max_steps", "--method", "g"
+        })
         signature = inspect.signature(driver.run_cannon_trajectory)
         defaults = {
             name: parameter.default
             for name, parameter in signature.parameters.items()
         }
-        self.assertEqual(float(rows["speed"][0]), defaults["speed"])
-        self.assertEqual(float(rows["angle_deg"][0]), defaults["angle_deg"])
-        self.assertEqual(float(rows["dt"][0]), defaults["dt"])
-        self.assertEqual(int(rows["max_steps"][0]), defaults["max_steps"])
-        self.assertEqual(rows["method"][0].strip('"'), defaults["method"])
+        self.assertEqual(float(rows["--speed"][0]), defaults["speed"])
+        self.assertEqual(float(rows["--angle_deg"][0]), defaults["angle_deg"])
+        self.assertEqual(float(rows["--dt"][0]), defaults["dt"])
+        self.assertEqual(int(rows["--max_steps"][0]), defaults["max_steps"])
+        self.assertEqual(rows["--method"][0], defaults["method"])
         self.assertEqual(float(rows["g"][0]), physics.g)
         self.assertEqual(
             main_trajectory_settings(MODULE_DIR),

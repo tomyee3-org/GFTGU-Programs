@@ -19,7 +19,7 @@ scalar timestep.  ``run_cannon_trajectory`` validates ordinary user settings.
 
 import numpy as np
 
-MODEL_VERSION = "1.2.0"
+MODEL_VERSION = "1.3.0"
 
 
 #: The exact source files this build identifier covers: a documentation-only

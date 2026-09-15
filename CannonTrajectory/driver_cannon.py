@@ -161,3 +161,55 @@ def maximum_height(hs):
     if not np.isfinite(hs).all():
         raise ValueError("height samples must be finite")
     return float(np.max(hs))
+
+
+def interpolated_maximum_height(hs):
+    """Return the maximum height from a local three-point parabola.
+
+    Samples are equally spaced in time.  When the largest stored height has
+    neighbours on both sides, a quadratic through those three samples locates
+    the vertex between samples.  A boundary maximum or a non-concave local
+    triple falls back to the largest stored height.
+    """
+    hs = np.asarray(hs, dtype=float)
+    if hs.ndim != 1 or hs.size == 0:
+        raise ValueError("hs must be a non-empty one-dimensional array")
+    if not np.isfinite(hs).all():
+        raise ValueError("height samples must be finite")
+
+    peak = int(np.argmax(hs))
+    sampled_maximum = float(hs[peak])
+    if peak == 0 or peak == hs.size - 1:
+        return sampled_maximum
+
+    before, centre, after = (float(value) for value in hs[peak - 1:peak + 2])
+    second_difference = before - 2.0 * centre + after
+    if second_difference >= 0.0:
+        return sampled_maximum
+
+    offset = (before - after) / (2.0 * second_difference)
+    if not -0.5 <= offset <= 0.5:
+        return sampled_maximum
+
+    vertex = centre - (after - before) ** 2 / (8.0 * second_difference)
+    return float(max(sampled_maximum, vertex))
+
+
+def interpolated_flight_time(hs, dt):
+    """Return flight time from linear interpolation at the ground crossing."""
+    hs = np.asarray(hs, dtype=float)
+    if hs.ndim != 1 or hs.size < 2:
+        raise ValueError("hs must be a one-dimensional array with at least two samples")
+    if not np.isfinite(hs[-2:]).all():
+        raise ValueError("landing samples must be finite")
+    if hs[-1] >= 0.0:
+        raise ValueError("trajectory does not include a below-ground sample")
+    if hs[-2] < 0.0:
+        raise ValueError("the sample before landing must be at or above ground")
+
+    dt = _require_real("dt", dt)
+    if dt <= 0.0:
+        raise ValueError("dt must be a finite positive number")
+
+    fraction = 0.0 if hs[-2] == 0.0 else hs[-2] / (hs[-2] - hs[-1])
+    return float((hs.size - 2 + fraction) * dt)
