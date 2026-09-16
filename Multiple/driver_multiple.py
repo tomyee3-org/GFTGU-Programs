@@ -351,6 +351,23 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
     max_momentum_drift = 0.0
     max_angular_momentum_drift = 0.0
 
+    # Keep only conservation quantities at accepted states. Animation frames
+    # are interpolated separately and need not coincide with these times.
+    total_mass = float(np.sum(masses))
+
+    def diagnostic_values(state):
+        p = np.asarray(state["momentum"], dtype=float)
+        angular = np.asarray(state["angular_momentum"], dtype=float)
+        internal = float(state["energy"]) - float(np.dot(p, p)) / (2 * total_mass)
+        values = np.array((state["energy"], internal, state["kinetic_energy"],
+                           *p, *angular), dtype=float)
+        if not np.all(np.isfinite(values)):
+            raise RuntimeError("Multiple produced a non-finite conservation diagnostic.")
+        return values
+
+    conservation_times = [0.0]
+    conservation_values = [diagnostic_values(initial_cons)]
+
     if output_type == "trajectories":
         output_times = [0.0]
         output_positions = [positions.copy()]
@@ -485,6 +502,8 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
                 "Multiple produced a non-finite conservation diagnostic. "
                 "Try a smaller dt or less extreme initial conditions."
             )
+        conservation_times.append(time)
+        conservation_values.append(diagnostic_values(current_cons))
 
         max_energy_drift = _checked_maximum_drift(
             max_energy_drift,
@@ -552,6 +571,48 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
         # Gradually recover after close encounters, never exceeding user dt.
         dt_work = min(dt_work * 1.1, params.dt)
 
+    history_times = np.asarray(conservation_times, dtype=float)
+    history_values = np.stack(conservation_values)
+    conservation_samples = []
+    for index in range(11):
+        target = time * index / 10.0
+        right = int(np.searchsorted(history_times, target, side="left"))
+        if right == 0:
+            values = history_values[0]
+        elif right == len(history_times):
+            values = history_values[-1]
+        elif history_times[right] == target:
+            values = history_values[right]
+        else:
+            left = right - 1
+            neighbours = [i for i in (left - 1, right + 1)
+                          if 0 <= i < len(history_times)]
+            if neighbours:
+                third = min(neighbours, key=lambda i: abs(history_times[i] - target))
+                indices = (left, right, third)
+                # Local offsets avoid products of large absolute times.
+                offsets = history_times[list(indices)] - target
+                values = np.zeros_like(history_values[0])
+                for k, node in enumerate(indices):
+                    others = [j for j in range(3) if j != k]
+                    numerator = offsets[others[0]] * offsets[others[1]]
+                    denominator = ((offsets[k] - offsets[others[0]]) *
+                                   (offsets[k] - offsets[others[1]]))
+                    values += (numerator / denominator) * history_values[node]
+            else:
+                # A one-step run supplies only two accepted states.
+                weight = ((target - history_times[left]) /
+                          (history_times[right] - history_times[left]))
+                values = history_values[left] + weight * (
+                    history_values[right] - history_values[left])
+        conservation_samples.append({
+            "fraction": index / 10.0, "time": target,
+            "energy": float(values[0]), "internal_energy": float(values[1]),
+            "kinetic_energy": float(values[2]),
+            "momentum": values[3:6].copy(),
+            "angular_momentum": values[6:9].copy(),
+        })
+
     common = {
         "model_version": phys.MODEL_VERSION,
         "build_id": phys.BUILD_ID,
@@ -561,6 +622,7 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
         "display_frame": params.display_frame.lower(),
         "initial_conservation": initial_cons,
         "final_conservation": current_cons,
+        "conservation_samples": conservation_samples,
         "energy_drift_scale": energy_drift_scale,
         "energy_drift_normalization": energy_drift_normalization,
         "momentum_drift_scale": momentum_drift_scale,

@@ -7,7 +7,9 @@ The locator intentionally supports both repository layouts used for review:
 """
 
 import ast
+import contextlib
 import hashlib
+import io
 import os
 from pathlib import Path
 import re
@@ -43,6 +45,9 @@ def find_module_dir(start) -> Path:
 
 
 MODULE_DIR = find_module_dir(Path(__file__))
+HELP_PATH = MODULE_DIR / HELP_FILE
+if not HELP_PATH.is_file():
+    HELP_PATH = MODULE_DIR.parent / "13-Multiple" / HELP_FILE
 if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 
@@ -950,10 +955,13 @@ class TestPlotting(unittest.TestCase):
         self.assertEqual(controls["state"]["display_frame"], "user")
         note = controls["frame_note"].get_text()
         self.assertTrue(note.startswith("Switched — Display frame: user"))
-        self.assertIn("interpolated-frame totals", note)
-        self.assertIn("\nE=", note)
-        self.assertIn("\nP=", note)
-        self.assertIn("\nL=", note)
+        self.assertNotIn("E=", note)
+        self.assertIsNone(controls["frame_note"].get_bbox_patch())
+        totals = controls["totals_note"].get_text()
+        self.assertIn("interpolated-frame totals", totals)
+        self.assertIn("E=", totals)
+        self.assertIn("\nP=", totals)
+        self.assertIn("\nL=", totals)
         event.key = "F"
         controls["on_key"](event)
         self.assertEqual(controls["state"]["display_frame"], "com")
@@ -984,6 +992,93 @@ class TestPlotting(unittest.TestCase):
         }
         with self.assertRaisesRegex(ValueError, "masses_solar"):
             plotting._resolve_display_frame(result)
+
+
+class TestCommandLineAndSamples(unittest.TestCase):
+    def test_all_driver_fields_have_a_cli_default(self):
+        import main as multiple_main
+
+        args = multiple_main.parse_args([])
+        for name in driver.SimulationParams.__dataclass_fields__:
+            self.assertTrue(hasattr(args, name), name)
+        self.assertEqual(args.animation_mode, "trails")
+
+    def test_cli_parses_matrix_and_normalized_selector(self):
+        import main as multiple_main
+
+        args = multiple_main.parse_args([
+            "--n_bodies", "2", "--masses_solar", "1,2",
+            "--positions_init", "1e10,0,0;-1e10,0,0",
+            "--velocities_init", "0,1000,0;0,-1000,0",
+            "--animation_mode", "current_positions", "--dt", "500",
+        ])
+        self.assertEqual(args.positions_init[1], [-1e10, 0, 0])
+        self.assertEqual(args.animation_mode, "current_positions")
+        self.assertEqual(args.dt, 500)
+        negative_first = multiple_main.parse_args([
+            "--n_bodies", "2", "--masses_solar", "1,1",
+            "--positions_init", "-1e10,0,0;1e10,0,0",
+            "--velocities_init", "0,0,0;0,0,0",
+        ])
+        self.assertEqual(negative_first.positions_init[0][0], -1e10)
+
+    def test_cli_rejects_mismatched_body_count_and_negative_exponent(self):
+        import main as multiple_main
+
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            multiple_main.parse_args(["--n_bodies", "2"])
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            multiple_main.parse_args(["--dt", "-1e2"])
+
+    def test_samples_cover_exact_endpoints_and_interpolate_accepted_steps(self):
+        for output_type in ("trajectories", "animation"):
+            with self.subTest(output_type=output_type):
+                result = driver.run_simulation(make_params(
+                    output_type=output_type, max_steps=2, frame_time=50,
+                ))
+                samples = result["conservation_samples"]
+                self.assertEqual(len(samples), 11)
+                self.assertEqual([s["fraction"] for s in samples],
+                                 [j / 10 for j in range(11)])
+                self.assertEqual(samples[0]["energy"],
+                                 result["initial_conservation"]["energy"])
+                self.assertEqual(samples[-1]["energy"],
+                                 result["final_conservation"]["energy"])
+                self.assertAlmostEqual(samples[5]["time"], result["final_time"] / 2)
+                if output_type == "trajectories":
+                    t = np.asarray(result["times"])
+                    fit = np.polynomial.polynomial.polyfit(
+                        t / t[-1], result["energies"], deg=2,
+                    )
+                    expected = np.polynomial.polynomial.polyval(.5, fit)
+                    self.assertAlmostEqual(samples[5]["energy"], expected,
+                                           delta=1e-9 * max(abs(expected), 1))
+
+    def test_one_step_samples_use_two_point_fallback(self):
+        result = driver.run_simulation(make_params(
+            output_type="animation", max_steps=1, frame_time=50,
+        ))
+        midpoint = result["conservation_samples"][5]
+        first = result["initial_conservation"]
+        last = result["final_conservation"]
+        for key, name in (("energy", "energy"),
+                          ("kinetic_energy", "kinetic_energy")):
+            self.assertAlmostEqual(midpoint[key],
+                                   (first[name] + last[name]) / 2,
+                                   delta=1e-10 * max(abs(midpoint[key]), 1))
+
+    @mock.patch.object(plotting.plt, "show")
+    def test_frame_labels_are_small_and_unboxed(self, show):
+        result = driver.run_simulation(make_params(
+            output_type="trajectories", max_steps=2,
+        ))
+        plotting.plot_trajectories(result)
+        notes = [text for text in plotting.plt.gca().texts
+                 if "Display frame:" in text.get_text()]
+        self.assertEqual(len(notes), 1)
+        self.assertLessEqual(notes[0].get_fontsize(), 8)
+        self.assertIsNone(notes[0].get_bbox_patch())
+        show.assert_called_once()
 
 
 class TestBuildDocumentationAndCompatibility(unittest.TestCase):
@@ -1022,7 +1117,7 @@ class TestBuildDocumentationAndCompatibility(unittest.TestCase):
         )
 
     def test_help_version_and_build_match_program(self):
-        help_text = (MODULE_DIR / HELP_FILE).read_text(encoding="utf-8")
+        help_text = HELP_PATH.read_text(encoding="utf-8")
         match = re.search(
             r'<p id="version_build"[^>]*>\s*Version\s+([0-9.]+)'
             r'(?:&nbsp;)+Build\s+([0-9a-f]+)\s*</p>',
@@ -1033,7 +1128,7 @@ class TestBuildDocumentationAndCompatibility(unittest.TestCase):
         self.assertEqual(match.group(2), phys.BUILD_ID)
 
     def test_help_describes_current_defaults_and_modes(self):
-        help_text = (MODULE_DIR / HELP_FILE).read_text(encoding="utf-8")
+        help_text = HELP_PATH.read_text(encoding="utf-8")
         required_fragments = (
             "60000",
             "0.005",
@@ -1061,30 +1156,18 @@ class TestBuildDocumentationAndCompatibility(unittest.TestCase):
                 self.assertIn(fragment, help_text)
 
     def test_main_executable_configuration_has_documented_defaults(self):
-        main_text = (MODULE_DIR / "main.py").read_text(encoding="utf-8")
-        tree = ast.parse(main_text, filename="main.py")
-        calls = [
-            node
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "SimulationParams"
-        ]
-        self.assertEqual(len(calls), 1)
-        requested = {"max_steps", "eps1", "eps2", "display_frame"}
-        values = {
-            keyword.arg: ast.literal_eval(keyword.value)
-            for keyword in calls[0].keywords
-            if keyword.arg in requested
-        }
-        self.assertEqual(set(values), requested)
-        self.assertEqual(values["max_steps"], 60000)
-        self.assertEqual(values["eps1"], 0.005)
-        self.assertEqual(values["eps2"], 1.0e-7)
-        self.assertEqual(values["display_frame"], "com")
+        import main as multiple_main
+
+        args = multiple_main.parse_args([])
+        for name in ("max_steps", "eps1", "eps2", "display_frame"):
+            self.assertEqual(getattr(args, name), multiple_main.DEFAULTS[name])
+        self.assertEqual(args.max_steps, 60000)
+        self.assertEqual(args.eps1, .005)
+        self.assertEqual(args.eps2, 1e-7)
+        self.assertEqual(args.display_frame, "com")
 
     def test_help_defines_current_output_terminology(self):
-        help_text = (MODULE_DIR / HELP_FILE).read_text(encoding="utf-8")
+        help_text = HELP_PATH.read_text(encoding="utf-8")
         self.assertIn(
             "not an <code>output_type</code> value",
             help_text,
@@ -1093,7 +1176,7 @@ class TestBuildDocumentationAndCompatibility(unittest.TestCase):
         self.assertNotIn("output_type='current positions'", help_text)
 
     def test_help_documents_build_id_coverage(self):
-        help_text = (MODULE_DIR / HELP_FILE).read_text(encoding="utf-8")
+        help_text = HELP_PATH.read_text(encoding="utf-8")
         self.assertIn(
             "Build identifier covers the four Python program modules",
             help_text,
@@ -1101,14 +1184,14 @@ class TestBuildDocumentationAndCompatibility(unittest.TestCase):
         self.assertIn("Help-only or test-only edits do not change it", help_text)
 
     def test_help_has_correct_energy_equation_without_malformed_residue(self):
-        help_text = (MODULE_DIR / HELP_FILE).read_text(encoding="utf-8")
+        help_text = HELP_PATH.read_text(encoding="utf-8")
         self.assertIn(r"\frac{Gm_A m_B}{r_{AB}}", help_text)
         for residue in (r'\]=""', 'div="">', "gm_am_b", "</b}"):
             with self.subTest(residue=residue):
                 self.assertNotIn(residue, help_text)
 
     def test_help_preserves_and_orders_key_exercises(self):
-        help_text = (MODULE_DIR / HELP_FILE).read_text(encoding="utf-8")
+        help_text = HELP_PATH.read_text(encoding="utf-8")
         titles = (
             "Two-body sanity check",
             "Default three-body encounter",
@@ -1124,7 +1207,7 @@ class TestBuildDocumentationAndCompatibility(unittest.TestCase):
         self.assertEqual(locations, sorted(locations))
 
     def test_development_history_is_confined_to_license_provenance(self):
-        help_text = (MODULE_DIR / HELP_FILE).read_text(encoding="utf-8")
+        help_text = HELP_PATH.read_text(encoding="utf-8")
         pre_license, license_and_after = help_text.split('<section id="license">', 1)
         for suspicious in ("Copilot", "Gemini", "Claude", "Audit", "legacy fix"):
             with self.subTest(suspicious=suspicious):
@@ -1133,7 +1216,7 @@ class TestBuildDocumentationAndCompatibility(unittest.TestCase):
         self.assertIn("Triana/Java", license_and_after)
 
     def test_help_scenario_cards_each_have_one_difficulty_badge(self):
-        help_text = (MODULE_DIR / HELP_FILE).read_text(encoding="utf-8")
+        help_text = HELP_PATH.read_text(encoding="utf-8")
         heads = re.findall(
             r'<div class="sc-head"><div class="sc-title">(.*?)</div>'
             r'<span class="diff diff-\w+">(.*?)</span></div>',
@@ -1180,7 +1263,7 @@ class TestBuildDocumentationAndCompatibility(unittest.TestCase):
         self.assertIn("L=", text)
         self.assertNotIn("KE=", text)
         energy = float(state["energy"])
-        self.assertIn(f"{energy:.6e}", text)
+        self.assertIn(f"{energy:.4e}", text)
 
 
 if __name__ == "__main__":

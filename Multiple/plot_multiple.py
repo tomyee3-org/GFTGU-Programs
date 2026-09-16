@@ -130,8 +130,8 @@ def plot_trajectories(
         ha="left",
         va="bottom",
         family="monospace",
-        fontsize=9,
-        bbox={"boxstyle": "round,pad=0.25", "facecolor": "wheat", "alpha": 0.9},
+        fontsize=7,
+        color="0.35",
     )
     ax.legend()
     ax.set_aspect("equal", "box")
@@ -292,8 +292,16 @@ def animate_multiple(result: Dict[str, Any]):
         transform=ax.transAxes,
         ha="left", va="bottom",
         family="monospace",
-        fontsize=8,
-        bbox={"boxstyle": "round,pad=0.25", "facecolor": "wheat", "alpha": 0.92},
+        fontsize=7,
+        color="0.35",
+    )
+    totals_note = ax.text(
+        0.02, 0.85, "",
+        transform=ax.transAxes,
+        ha="left", va="top",
+        family="monospace",
+        fontsize=7,
+        color="0.35",
     )
 
     ax.set_xlabel(f"{label1} (m)")
@@ -337,10 +345,10 @@ def animate_multiple(result: Dict[str, Any]):
             np.dot(momentum, momentum)
         ) / (2.0 * total_mass)
         return (
-            "\ninterpolated-frame totals (user coordinates):\n"
+            "interpolated-frame totals (user coordinates):\n"
             f"E={cons['energy']:.4e}  E_int={internal:.4e}\n"
-            f"P=({momentum[0]:.3e}, {momentum[1]:.3e}, {momentum[2]:.3e})\n"
-            f"L=({angular[0]:.3e}, {angular[1]:.3e}, {angular[2]:.3e})"
+            f"P=({momentum[0]:.4e}, {momentum[1]:.4e}, {momentum[2]:.4e})\n"
+            f"L=({angular[0]:.4e}, {angular[1]:.4e}, {angular[2]:.4e})"
         )
 
     def _set_frame(frame_name, announce=False, index=None):
@@ -355,7 +363,8 @@ def animate_multiple(result: Dict[str, Any]):
             note = "Switched — " + note
         if index is None:
             index = state["index"]
-        frame_note.set_text(note + _interpolated_totals_text(index))
+        frame_note.set_text(note)
+        totals_note.set_text(_interpolated_totals_text(index))
         _apply_fixed_limits()
 
     _set_frame(display_frame, announce=False)
@@ -405,14 +414,15 @@ def animate_multiple(result: Dict[str, Any]):
 
         _auto_limits(i)
         time_text.set_text(
-            f"t = {frame_times[i]:.4g} s\n"
+            f"t = {frame_times[i]:.4e} s\n"
             f"frame {i + 1} / {n_frames}"
         )
         header = _frame_note(state["display_frame"])
         if "Switched — " in frame_note.get_text():
             header = "Switched — " + header
-        frame_note.set_text(header + _interpolated_totals_text(i))
-        return [*lines, *markers, time_text, frame_note]
+        frame_note.set_text(header)
+        totals_note.set_text(_interpolated_totals_text(i))
+        return [*lines, *markers, time_text, frame_note, totals_note]
 
     # Persistent canvas timer: remains valid after the last displayed frame.
     timer = fig.canvas.new_timer(interval=interval_ms)
@@ -496,5 +506,6 @@ def animate_multiple(result: Dict[str, Any]):
         "state": state,
         "figure": fig,
         "frame_note": frame_note,
+        "totals_note": totals_note,
         "on_key": on_key,
     }
