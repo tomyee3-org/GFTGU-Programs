@@ -32,6 +32,7 @@ class BinaryResult:
     E: List[float]
     completed_orbit: bool
     accepted_steps: int
+    total_angle_rad: float = 0.0
     model_version: str = phys.MODEL_VERSION
     build_id: str = phys.BUILD_ID
 
@@ -324,6 +325,7 @@ def integrate_binary(
         U=U_list, K=K_list, E=E_list,
         completed_orbit=completed_orbit,
         accepted_steps=accepted_steps,
+        total_angle_rad=accumulated_angle,
         model_version=phys.MODEL_VERSION,
         build_id=phys.BUILD_ID,
     )

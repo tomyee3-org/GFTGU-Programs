@@ -7,8 +7,10 @@ review upload in which this file is flattened beside the four core modules.
 from __future__ import annotations
 
 import ast
+from contextlib import redirect_stdout, redirect_stderr
 import hashlib
 from html.parser import HTMLParser
+import io
 import math
 import os
 from pathlib import Path
@@ -44,6 +46,8 @@ def find_module_dir(start: Path) -> Path:
 
 MODULE_DIR = find_module_dir(Path(__file__))
 HELP_FILE = MODULE_DIR / "Binary.html"
+if not HELP_FILE.is_file():
+    HELP_FILE = MODULE_DIR.parent / "13-Binary" / "Binary.html"
 if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 os.environ.setdefault("MPLBACKEND", "Agg")
@@ -51,6 +55,7 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 import driver_binary as driver  # noqa: E402
 import physics_binary as physics  # noqa: E402
 import plot_binary as plotting  # noqa: E402
+import main as entry  # noqa: E402
 
 
 DEFAULTS = {
@@ -1188,6 +1193,93 @@ class HelpContractParser(HTMLParser):
             self.section = None
 
 
+class TestCommandLineAndSummary(unittest.TestCase):
+    def test_all_driver_defaults_exposed(self):
+        args = entry.parse_args([])
+        self.assertEqual({name: getattr(args, name) for name in DEFAULTS}, DEFAULTS)
+        self.assertEqual(args.output_type, "orbits")
+
+    def test_custom_driver_inputs_and_plot_selector(self):
+        sample = integrate(max_steps=2)
+        with mock.patch.object(entry, "integrate_binary", return_value=sample) as run, \
+             mock.patch.object(entry, "plot_binary") as plot, \
+             redirect_stdout(io.StringIO()) as printed:
+            entry.main(["--MB", "1e30", "--xInitA", "3e10", "--uInitB", "-9000",
+                        "--max_steps", "2", "--no-stop_after_one_orbit",
+                        "--output_type", "velocity_space"])
+        self.assertEqual(run.call_args.kwargs["MB"], 1e30)
+        self.assertEqual(run.call_args.kwargs["xInitA"], 3e10)
+        self.assertEqual(run.call_args.kwargs["uInitB"], -9000)
+        self.assertFalse(run.call_args.kwargs["stop_after_one_orbit"])
+        self.assertEqual(plot.call_args.args[1], "velocity space")
+        self.assertIn("Energy at fractions", printed.getvalue())
+
+    def test_invalid_inputs_and_selector(self):
+        for args in (["--MA", "0"], ["--dt", "nan"], ["--eps1", "1"],
+                     ["--max_steps", "1.5"], ["--output_type", "velocity space"]):
+            with self.subTest(args=args), redirect_stderr(io.StringIO()), \
+                 self.assertRaises(SystemExit) as raised:
+                entry.parse_args(args)
+            self.assertEqual(raised.exception.code, 2)
+
+    def test_negative_exponent_form_is_accepted_as_separate_option_value(self):
+        args = entry.parse_args(["--xInitB", "-4.2e10", "--uInitB", "-1.3e4"])
+        self.assertEqual(args.xInitB, -4.2e10)
+        self.assertEqual(args.uInitB, -13000.)
+
+    def test_orbital_elements_circular_two_to_one_mass_ratio_and_boost(self):
+        params = dict(unequal_moving_case())
+        state = [params[k] for k in ("MA", "MB", "xInitA", "yInitA", "vInitA",
+                                     "uInitA", "xInitB", "yInitB", "vInitB", "uInitB")]
+        elements = physics.orbital_elements(*state)
+        r = math.hypot(params["xInitA"] - params["xInitB"],
+                       params["yInitA"] - params["yInitB"])
+        self.assertEqual(elements.kind, "elliptic")
+        self.assertLess(elements.eccentricity, 1e-12)
+        self.assertAlmostEqual(elements.relative_semimajor / r, 1, places=12)
+        self.assertAlmostEqual(elements.relative_periapsis / r, 1, places=12)
+        self.assertAlmostEqual(elements.relative_apoapsis / r, 1, places=12)
+        self.assertAlmostEqual(elements.period / (2 * math.pi * math.sqrt(
+            r ** 3 / (physics.G * (params["MA"] + params["MB"])))), 1, places=12)
+        state[4] += 12345
+        state[8] += 12345
+        self.assertAlmostEqual(physics.orbital_elements(*state).relative_semimajor / r,
+                               1, places=12)
+
+    def test_open_and_radial_elements_do_not_claim_nonexistent_apsides(self):
+        params = dict(DEFAULTS)
+        params.update(uInitA=60000., uInitB=-60000.)
+        keys = ("MA", "MB", "xInitA", "yInitA", "vInitA", "uInitA",
+                "xInitB", "yInitB", "vInitB", "uInitB")
+        value = physics.orbital_elements(*(params[k] for k in keys))
+        self.assertEqual(value.kind, "hyperbolic")
+        self.assertLess(value.relative_semimajor, 0)
+        self.assertGreater(value.relative_periapsis, 0)
+        self.assertIsNone(value.period)
+        self.assertIsNone(value.relative_apoapsis)
+        params.update(uInitA=0., uInitB=0.)
+        value = physics.orbital_elements(*(params[k] for k in keys))
+        self.assertEqual(value.kind, "radial")
+        self.assertIsNone(value.relative_speed_periapsis)
+
+    def test_energy_table_has_interpolated_midpoint_and_zero_energy_policy(self):
+        result = integrate(max_steps=1)
+        output = io.StringIO()
+        with redirect_stdout(output):
+            entry.print_summary(result, DEFAULTS)
+        rows = [line.split() for line in output.getvalue().splitlines()
+                if re.match(r"\s*[01]\.\d\s", line)]
+        self.assertEqual(len(rows), 11)
+        self.assertEqual(rows[0][0], "0.0")
+        self.assertEqual(rows[-1][0], "1.0")
+        self.assertAlmostEqual(float(rows[5][2]) / ((result.U[0] + result.U[1]) / 2),
+                               1, places=4)
+        result.E[0] = 0.
+        with redirect_stdout(io.StringIO()) as output:
+            entry.print_summary(result, DEFAULTS)
+        self.assertIn("fractional energy departure is undefined", output.getvalue().lower())
+
+
 class TestHelpFile(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -1209,6 +1301,18 @@ class TestHelpFile(unittest.TestCase):
         self.assertEqual(match.group(1), physics.MODEL_VERSION)
         self.assertEqual(match.group(2), physics.BUILD_ID)
 
+    def test_release_and_sample_output_metadata_and_commands(self):
+        docs = MODULE_DIR.parent / "13-Binary"
+        for path in (docs / "Binary-ReleaseNotes.html",
+                     docs / "SampleOutputs" / "Binary-SampleOutputs_Guide.html"):
+            with self.subTest(path=path):
+                page = path.read_text(encoding="utf-8")
+                self.assertIn(physics.MODEL_VERSION, page)
+                self.assertIn(physics.BUILD_ID, page)
+                self.assertIn("python main.py", page)
+        self.assertIn("--uInitB -31101", (docs / "SampleOutputs" /
+                      "Binary-SampleOutputs_Guide.html").read_text())
+
     def test_core_module_card_names_are_exact(self):
         self.assertEqual(
             tuple(self.contract.module_names),
@@ -1217,47 +1321,30 @@ class TestHelpFile(unittest.TestCase):
 
     def test_output_tags_exactly_match_output_type_contract(self):
         self.assertEqual(
-            tuple(tag.strip('"') for tag in self.contract.output_tags),
-            TestPlotting.OUTPUT_TYPES,
+            tuple(self.contract.output_tags), tuple(entry.OUTPUT_TYPES),
         )
 
     def test_parameter_table_has_exact_documented_variables_and_defaults(self):
         rows = self.contract.parameter_rows
         self.assertEqual(
-            rows[0], ("Variable", "Default", "Unit", "Description")
+            rows[0], ("Option", "Default", "Unit", "Description")
         )
         self.assertEqual(
             tuple(row[0] for row in rows[1:]),
             (
-                "MA, MB",
-                "xInitA",
-                "xInitB",
-                "yInitA, yInitB",
-                "vInitA, vInitB",
-                "uInitA",
-                "uInitB",
-                "dt",
-                "max_steps",
-                "eps1",
-                "eps2",
-                "stop_after_one_orbit",
+                "--MA, --MB", "--xInitA, --xInitB", "--yInitA, --yInitB",
+                "--vInitA, --vInitB", "--uInitA, --uInitB", "--dt",
+                "--max_steps", "--eps1", "--eps2",
+                "--stop_after_one_orbit, --no-stop_after_one_orbit",
+                "--output_type",
             ),
         )
         self.assertEqual(
             tuple(row[1] for row in rows[1:]),
             (
-                r"\(2.0\times10^{30}\)",
-                r"\(+4.6\times10^{10}\)",
-                r"\(-4.6\times10^{10}\)",
-                r"\(0\)",
-                r"\(0\)",
-                r"\(+1.3\times10^4\)",
-                r"\(-1.3\times10^4\)",
-                r"\(2000\)",
-                r"\(10000\)",
-                r"\(0.05\)",
-                r"\(10^{-4}\)",
-                "True",
+                "2e30 each", "+4.6e10, -4.6e10", "0, 0", "0, 0",
+                "+13000, -13000", "2000", "10000", "0.05", "1e-4",
+                "stop", "orbits",
             ),
         )
 
@@ -1288,7 +1375,7 @@ class TestHelpFile(unittest.TestCase):
 
     def test_plot_count_distinguishes_designs_from_selector_alias(self):
         self.assertIn(
-            "seven distinct plots through eight accepted selector strings",
+            "seven distinct plots through seven command-line selectors",
             self.prose,
         )
 

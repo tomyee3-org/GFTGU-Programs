@@ -3,10 +3,10 @@ Newtonian two-body physics for Binary.
 """
 
 from dataclasses import dataclass
-from math import frexp, fsum, hypot, isfinite, ldexp
+from math import frexp, fsum, hypot, isfinite, ldexp, pi, sqrt
 from numbers import Real
 
-MODEL_VERSION = "1.1.4"
+MODEL_VERSION = "1.2.0"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -70,6 +70,78 @@ class BinaryState:
     yB: float
     vB: float
     uB: float
+
+
+@dataclass(frozen=True)
+class OrbitalElements:
+    """Initial Keplerian elements in the centre-of-mass frame (SI units)."""
+
+    kind: str
+    eccentricity: float
+    relative_semimajor: float | None
+    period: float | None
+    relative_periapsis: float | None
+    relative_apoapsis: float | None
+    relative_speed_periapsis: float | None
+    relative_speed_apoapsis: float | None
+
+
+def orbital_elements(MA: float, MB: float, xA: float, yA: float,
+                     vA: float, uA: float, xB: float, yB: float,
+                     vB: float, uB: float) -> OrbitalElements:
+    """Compute two-body conic elements from an initial relative state.
+
+    The returned lengths and speeds concern the relative orbit. Multiply by
+    the other body's mass fraction for either centre-of-mass orbit. Undefined
+    apsides and periods on open trajectories are returned as None.
+    """
+    _positive_mass("MA", MA)
+    _positive_mass("MB", MB)
+    for name, value in (("vA", vA), ("uA", uA), ("vB", vB), ("uB", uB)):
+        _finite_real(name, value)
+    rx, ry, r = relative_displacement(xA, yA, xB, yB)
+    vx, vy = vA - vB, uA - uB
+    mu = G * (MA + MB)
+    if not all(isfinite(z) for z in (vx, vy, mu)) or mu <= 0:
+        raise ValueError("Orbital elements are outside the numerical range.")
+    v2 = vx * vx + vy * vy
+    rv = rx * vx + ry * vy
+    h = rx * vy - ry * vx
+    specific_energy = 0.5 * v2 - mu / r
+    if not all(isfinite(z) for z in (v2, rv, h, specific_energy)):
+        raise ValueError("Orbital elements are outside the numerical range.")
+    ex = ((v2 - mu / r) * rx - rv * vx) / mu
+    ey = ((v2 - mu / r) * ry - rv * vy) / mu
+    eccentricity = hypot(ex, ey)
+    if not isfinite(eccentricity):
+        raise ValueError("Orbital elements are outside the numerical range.")
+    if h == 0:
+        # A radial collision has no nonzero periapsis or apsidal speed.
+        return OrbitalElements("radial", eccentricity, None, None,
+                               None, None, None, None)
+    # Treat roundoff at escape energy as a parabola.
+    energy_tolerance = 1e-12 * mu / r
+    if abs(specific_energy) <= energy_tolerance:
+        kind = "parabolic"
+        eccentricity = 1.0
+        semi = period = apo = speed_apo = None
+    elif specific_energy < 0:
+        kind = "elliptic"
+        semi = -mu / (2 * specific_energy)
+        eccentricity = min(eccentricity, 1.0)
+        period = 2 * pi * sqrt(semi ** 3 / mu)
+        apo = semi * (1 + eccentricity)
+        speed_apo = abs(h) / apo
+    else:
+        kind = "hyperbolic"
+        semi = -mu / (2 * specific_energy)  # Signed conic semimajor axis.
+        period = apo = speed_apo = None
+    peri = h * h / (mu * (1 + eccentricity))
+    speed_peri = abs(h) / peri
+    if not all(isfinite(z) for z in (eccentricity, peri, speed_peri)):
+        raise ValueError("Orbital elements are outside the numerical range.")
+    return OrbitalElements(kind, eccentricity, semi, period,
+                           peri, apo, speed_peri, speed_apo)
 
 
 def _finite_real(name: str, value: float) -> None:
