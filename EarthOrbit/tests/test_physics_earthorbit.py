@@ -12,6 +12,7 @@ import ast
 import hashlib
 from html import unescape
 from html.parser import HTMLParser
+import inspect
 import math
 import os
 from pathlib import Path
@@ -55,11 +56,17 @@ if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 
 import driver_earthorbit as driver
+import main as entrypoint
 import physics_earthorbit as physics
 import plot_earthorbit as plotter
 
 
-HELP_FILE = MODULE_DIR / "EarthOrbit.html"
+DOCUMENTATION_DIR = MODULE_DIR.parent / "04-EarthOrbit"
+HELP_FILE = DOCUMENTATION_DIR / "EarthOrbit.html"
+RELEASE_NOTES_FILE = DOCUMENTATION_DIR / "EarthOrbit-ReleaseNotes.html"
+SAMPLE_OUTPUTS_FILE = (
+    DOCUMENTATION_DIR / "SampleOutputs" / "EarthOrbit-SampleOutputs_Guide.html"
+)
 
 
 class _IdCollector(HTMLParser):
@@ -146,6 +153,7 @@ class VersionAndBuildTests(unittest.TestCase):
 
     def test_version_is_semantic(self):
         self.assertRegex(physics.MODEL_VERSION, r"^\d+\.\d+\.\d+$")
+        self.assertEqual(physics.MODEL_VERSION, "1.2.0")
 
     def test_build_coverage_is_exactly_the_four_core_modules(self):
         self.assertEqual(physics.BUILD_ID_COVERS, CORE_MODULE_FILENAMES)
@@ -601,6 +609,101 @@ class DriverBehaviorTests(unittest.TestCase):
                     self.assertLess(order, 1.2)
 
 
+class TrajectorySummaryTests(unittest.TestCase):
+    """Interpolated event, revolution, and orbital-element reporting."""
+
+    @staticmethod
+    def run_and_analyze(**kwargs):
+        result = driver.run_earth_orbit(return_diagnostics=True, **kwargs)
+        xs, ys, _, _, ts, us, vs = result
+        summary = driver.analyze_earth_orbit(
+            xs, ys, ts, us, vs,
+            force_law=kwargs.get("force_law", "simplified"),
+            max_steps=kwargs.get("maxSteps", 15000),
+        )
+        return result, summary
+
+    def test_five_significant_digit_formatter(self):
+        expected = {
+            1019.708: "1019.7",
+            254.929: "254.93",
+            14.42085: "14.421",
+            300.0: "300.00",
+            0.0: "0.0000",
+            1_583_500.0: "1.5835e+06",
+        }
+        for value, formatted in expected.items():
+            with self.subTest(value=value):
+                self.assertEqual(driver._five_significant(value), formatted)
+
+    def test_default_impact_summary_interpolates_to_surface(self):
+        result, summary = self.run_and_analyze()
+        xs, ys, _, _, ts, _, _ = result
+        self.assertTrue(summary["impact"])
+        self.assertFalse(summary["reached_orbit"])
+        self.assertGreater(summary["impact_fraction"], 0.0)
+        self.assertLess(summary["impact_fraction"], 1.0)
+        self.assertLess(summary["total_time"], ts[-1])
+        self.assertAlmostEqual(summary["maximum_altitude"], 300.0, places=6)
+        self.assertGreater(summary["total_distance"], 0.0)
+        self.assertIn("Surface impact before one revolution", summary["outcome"])
+        self.assertTrue(any("interpolated to impact" in line for line in summary["lines"]))
+        self.assertLess(math.hypot(xs[-1], ys[-1]), physics.R_EARTH)
+
+    def test_completed_orbit_reports_each_revolution(self):
+        h0 = 300_000.0
+        speed = math.sqrt(physics.MU_EARTH / (physics.R_EARTH + h0))
+        _, summary = self.run_and_analyze(
+            h0=h0,
+            uInit=speed,
+            dt=1.0,
+            maxSteps=7000,
+            force_law="inverse_square",
+        )
+        self.assertTrue(summary["reached_orbit"])
+        self.assertEqual(summary["completed_revolutions"], 1)
+        self.assertEqual(len(summary["revolution_data"]), 1)
+        revolution = summary["revolution_data"][0]
+        self.assertGreater(revolution["time"], 5000.0)
+        self.assertTrue(math.isfinite(revolution["minimum_altitude"]))
+        self.assertTrue(math.isfinite(revolution["maximum_altitude"]))
+        self.assertLessEqual(
+            revolution["minimum_altitude"], revolution["maximum_altitude"]
+        )
+        self.assertTrue(any(line.startswith("Revolution 1:") for line in summary["lines"]))
+
+    def test_exact_circular_initial_state_has_circular_osculating_elements(self):
+        h0 = 300_000.0
+        speed = math.sqrt(physics.MU_EARTH / (physics.R_EARTH + h0))
+        _, summary = self.run_and_analyze(
+            h0=h0,
+            uInit=speed,
+            dt=1.0,
+            maxSteps=2,
+            force_law="inverse_square",
+        )
+        elements = summary["elements"]
+        self.assertAlmostEqual(elements["eccentricity"], 0.0, delta=2.0e-8)
+        self.assertAlmostEqual(elements["perigee_altitude"], h0, delta=0.2)
+        self.assertAlmostEqual(elements["apogee_altitude"], h0, delta=0.2)
+
+    def test_escape_summary_prints_final_altitude_without_apogee(self):
+        _, summary = self.run_and_analyze(
+            h0=300_000.0,
+            uInit=11_500.0,
+            dt=2.0,
+            maxSteps=3001,
+            force_law="inverse_square",
+        )
+        self.assertTrue(summary["escape"])
+        self.assertFalse(summary["reached_orbit"])
+        self.assertIsNone(summary["elements"]["apogee_altitude"])
+        self.assertTrue(
+            any("Final/maximum altitude at maxSteps" in line for line in summary["lines"])
+        )
+        self.assertFalse(any("apogee" in line.lower() for line in summary["lines"]))
+
+
 class PlotTests(unittest.TestCase):
     """Presentation-contract tests for the documented matplotlib output."""
 
@@ -687,7 +790,67 @@ class MainProgramTests(unittest.TestCase):
         self.assertIn(
             f"{expected_samples:,} trajectory samples", result.stdout
         )
+        for required in (
+            "Surface impact before one revolution",
+            "Fraction of a revolution:",
+            "Total flight time:",
+            "Total angular travel:",
+            "Maximum altitude (interpolated):",
+            "Total distance traveled (interpolated to impact):",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, result.stdout)
         self.assertEqual(result.stderr, "")
+
+    def test_command_line_defaults_match_driver_defaults(self):
+        with mock.patch.object(sys, "argv", ["main.py"]):
+            args = entrypoint.parse_args()
+        signature = inspect.signature(driver.run_earth_orbit)
+        for name in ("h0", "uInit", "vInit", "dt", "maxSteps", "force_law"):
+            with self.subTest(name=name):
+                self.assertEqual(getattr(args, name), signature.parameters[name].default)
+        self.assertNotIn("return_diagnostics", vars(args))
+        main_source = (MODULE_DIR / "main.py").read_text(encoding="utf-8")
+        self.assertIn("return_diagnostics=True", main_source)
+
+    def test_help_describes_all_cli_inputs_and_both_force_laws(self):
+        result = subprocess.run(
+            [sys.executable, "main.py", "--help"],
+            cwd=MODULE_DIR,
+            text=True,
+            capture_output=True,
+            timeout=20,
+            check=True,
+        )
+        normalized = " ".join(result.stdout.split())
+        for required in (
+            "--h0", "--uInit", "--vInit", "--dt", "--maxSteps",
+            "--force_law", "simplified keeps", "inverse_square uses",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, normalized)
+
+    def test_custom_escape_cli_prints_elements_and_final_altitude(self):
+        environment = os.environ.copy()
+        environment["MPLBACKEND"] = "Agg"
+        result = subprocess.run(
+            [
+                sys.executable, "main.py", "--h0", "300000",
+                "--uInit", "11500", "--vInit", "0", "--dt", "2",
+                "--maxSteps", "3001", "--force_law", "inverse_square",
+            ],
+            cwd=MODULE_DIR,
+            env=environment,
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=True,
+        )
+        self.assertIn("Escape trajectory; maxSteps reached", result.stdout)
+        self.assertIn("Osculating eccentricity:", result.stdout)
+        self.assertIn("Osculating perigee altitude:", result.stdout)
+        self.assertIn("Final/maximum altitude at maxSteps:", result.stdout)
+        self.assertNotIn("Osculating apogee altitude:", result.stdout)
 
 
 class HelpFileTests(unittest.TestCase):
@@ -718,12 +881,18 @@ class HelpFileTests(unittest.TestCase):
 
     def test_help_describes_core_defaults_and_interfaces(self):
         required_text = (
-            "h0=300.0",
-            "uInit=7900.0",
-            "vInit=0.0",
-            "dt=0.4",
-            "maxSteps=15000",
-            'force_law="simplified"',
+            '<td class="pname">--h0</td>',
+            '<td class="pdefault">300.0</td>',
+            '<td class="pname">--uInit</td>',
+            '<td class="pdefault">7900.0</td>',
+            '<td class="pname">--vInit</td>',
+            '<td class="pdefault">0.0</td>',
+            '<td class="pname">--dt</td>',
+            '<td class="pdefault">0.4</td>',
+            '<td class="pname">--maxSteps</td>',
+            '<td class="pdefault">15000</td>',
+            '<td class="pname">--force_law</td>',
+            '<td class="pdefault">simplified</td>',
             "return_diagnostics=True",
             "MU_EARTH",
             "3.986_004_355_07e14",
@@ -839,6 +1008,53 @@ class HelpFileTests(unittest.TestCase):
         for name in CORE_MODULE_FILENAMES:
             with self.subTest(module=name):
                 self.assertIn(name, self.html)
+
+
+class DocumentationSetTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.release_notes = RELEASE_NOTES_FILE.read_text(encoding="utf-8")
+        cls.samples = SAMPLE_OUTPUTS_FILE.read_text(encoding="utf-8")
+
+    def test_documentation_files_exist(self):
+        self.assertTrue(RELEASE_NOTES_FILE.is_file())
+        self.assertTrue(SAMPLE_OUTPUTS_FILE.is_file())
+
+    def test_release_notes_match_current_version_and_build(self):
+        self.assertIn(f"Version {physics.MODEL_VERSION}", self.release_notes)
+        self.assertIn(f"<b>Build:</b> {physics.BUILD_ID}", self.release_notes)
+        self.assertIn("command-line", self.release_notes)
+        self.assertIn("five significant digits", self.release_notes)
+
+    def test_sample_outputs_match_current_version_and_build(self):
+        self.assertIn(f"Version {physics.MODEL_VERSION}", self.samples)
+        self.assertIn(f"Build {physics.BUILD_ID}", self.samples)
+        self.assertNotIn("Version 1.1.1", self.samples)
+        self.assertNotIn("Build 77b768d3a136", self.samples)
+
+    def test_sample_outputs_demonstrate_every_cli_parameter(self):
+        for option in ("--h0", "--uInit", "--vInit", "--dt", "--maxSteps", "--force_law"):
+            with self.subTest(option=option):
+                self.assertIn(option, self.samples)
+
+    def test_sample_outputs_cover_requested_result_classes(self):
+        required_text = (
+            "Surface impact before one revolution",
+            "Fraction of a revolution",
+            "Total distance traveled (interpolated to impact)",
+            "Completed revolutions",
+            "Revolution 1: time",
+            "minimum altitude",
+            "maximum altitude",
+            "Osculating eccentricity",
+            "Osculating perigee altitude",
+            "Osculating apogee altitude",
+            "Escape trajectory",
+            "Final/maximum altitude at maxSteps",
+        )
+        for text in required_text:
+            with self.subTest(text=text):
+                self.assertIn(text, self.samples)
 
 
 if __name__ == "__main__":

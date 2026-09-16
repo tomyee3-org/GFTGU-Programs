@@ -32,7 +32,7 @@ import math
 import numbers
 from typing import Literal
 
-MODEL_VERSION = "1.1.1"
+MODEL_VERSION = "1.2.0"
 
 
 #: The exact source files this build identifier covers: a documentation-only
