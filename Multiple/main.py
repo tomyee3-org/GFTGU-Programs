@@ -78,8 +78,8 @@ def main():
         eps1=0.005,
         eps2=1.0e-7,
 
-        # Output: "trajectories" or "animation"
-        output_type="animation",
+        # Output: "animation" or "animation"
+        output_type="trajectories",
 
         # Animation controls
         animation_mode="trails",       # "current positions" or "trails"
@@ -88,7 +88,7 @@ def main():
         trail_time=6.0e5,              # simulated seconds of recent trail
         projection="xy",               # "xy", "xz", or "yz"
         axis_mode="fixed",             # "fixed" or "auto"
-        display_frame="com",           # "com" (default) or "user"
+        display_frame="user",           # "com" (default) or "user"
     )
 
     # This optional diagnostic is displayed only in trajectories mode.

@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import ast
 import base64
+from contextlib import redirect_stderr, redirect_stdout
 import hashlib
 from html.parser import HTMLParser
+import io
 import math
 import os
 from pathlib import Path
@@ -47,6 +49,9 @@ def find_module_dir(start: Path) -> Path:
 
 
 MODULE_DIR = find_module_dir(Path(__file__))
+HELP_FILE = MODULE_DIR / HELP_FILENAME
+if not HELP_FILE.is_file():
+    HELP_FILE = MODULE_DIR.parent / "13-MercPert" / HELP_FILENAME
 if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 
@@ -58,6 +63,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import driver_mercpert as driver  # noqa: E402
 import physics_mercpert as physics  # noqa: E402
 import plot_mercpert as plots  # noqa: E402
+import main as entry  # noqa: E402
 
 
 def default_binary() -> physics.BinarySystemParams:
@@ -157,11 +163,11 @@ class MetadataAndCompatibilityTests(unittest.TestCase):
             except SyntaxError as exc:  # pragma: no cover - assertion detail
                 self.fail(f"{name} is not Python 3.10 syntax: {exc}")
 
-    def test_help_file_exists_beside_modules(self) -> None:
-        self.assertTrue((MODULE_DIR / HELP_FILENAME).is_file())
+    def test_help_file_exists_in_packaged_documentation(self) -> None:
+        self.assertTrue(HELP_FILE.is_file())
 
     def test_help_version_and_build_match_program(self) -> None:
-        help_text = (MODULE_DIR / HELP_FILENAME).read_text(encoding="utf-8")
+        help_text = HELP_FILE.read_text(encoding="utf-8")
         match = re.search(
             r'<p\s+id="version_build"[^>]*>\s*'
             r'Version\s+([0-9]+\.[0-9]+\.[0-9]+)'
@@ -174,8 +180,24 @@ class MetadataAndCompatibilityTests(unittest.TestCase):
         self.assertEqual(match.group(1), physics.MODEL_VERSION)
         self.assertEqual(match.group(2), physics.BUILD_ID)
 
+    def test_release_and_sample_identify_this_build_and_show_commands(self) -> None:
+        root = MODULE_DIR.parent / "13-MercPert"
+        for path in (root / "MercPert-ReleaseNotes.html",
+                     root / "SampleOutputs" / "MercPert-SampleOutputs_Guide.html"):
+            with self.subTest(path=path):
+                page = path.read_text(encoding="utf-8")
+                self.assertIn(physics.MODEL_VERSION, page)
+                self.assertIn(physics.BUILD_ID, page)
+                self.assertIn("python main.py", page)
+        help_text = HELP_FILE.read_text(encoding="utf-8")
+        for name in entry.DEFAULTS:
+            self.assertIn("--" + name, help_text)
+        for flag in ("--binary_separation_au", "--x_init_au", "--y_init_au",
+                     "--no-show_jacobi_diagnostic"):
+            self.assertIn(flag, help_text)
+
     def test_help_contains_required_scientific_sections(self) -> None:
-        help_text = (MODULE_DIR / HELP_FILENAME).read_text(encoding="utf-8")
+        help_text = HELP_FILE.read_text(encoding="utf-8")
         inspector = _HelpInspector()
         inspector.feed(help_text)
         for section_id in (
@@ -200,7 +222,7 @@ class MetadataAndCompatibilityTests(unittest.TestCase):
         self.assertIn("barycentric", section("output"))
 
     def test_student_help_has_no_development_history(self) -> None:
-        help_text = (MODULE_DIR / HELP_FILENAME).read_text(
+        help_text = HELP_FILE.read_text(
             encoding="utf-8"
         ).lower()
         for phrase in (
@@ -216,7 +238,7 @@ class MetadataAndCompatibilityTests(unittest.TestCase):
     def test_help_internal_links_and_ids_are_consistent(self) -> None:
         inspector = _HelpInspector()
         inspector.feed(
-            (MODULE_DIR / HELP_FILENAME).read_text(encoding="utf-8")
+            HELP_FILE.read_text(encoding="utf-8")
         )
         self.assertEqual(len(inspector.ids), len(set(inspector.ids)))
         self.assertTrue(set(inspector.fragment_links).issubset(inspector.ids))
@@ -224,7 +246,7 @@ class MetadataAndCompatibilityTests(unittest.TestCase):
     def test_help_contains_six_valid_embedded_gallery_images(self) -> None:
         inspector = _HelpInspector()
         inspector.feed(
-            (MODULE_DIR / HELP_FILENAME).read_text(encoding="utf-8")
+            HELP_FILE.read_text(encoding="utf-8")
         )
         self.assertEqual(len(inspector.images), 6)
         for attributes in inspector.images:
@@ -236,7 +258,7 @@ class MetadataAndCompatibilityTests(unittest.TestCase):
             self.assertTrue(decoded.startswith(b"\x89PNG\r\n\x1a\n"))
 
     def test_exercises_are_ranked_in_approximate_difficulty_order(self) -> None:
-        help_text = (MODULE_DIR / HELP_FILENAME).read_text(encoding="utf-8")
+        help_text = HELP_FILE.read_text(encoding="utf-8")
         suggestions = re.search(
             r'<section id="suggestions">(.*?)</section>',
             help_text,
@@ -255,7 +277,7 @@ class MetadataAndCompatibilityTests(unittest.TestCase):
             self.assertIn(label, levels)
 
     def test_help_omits_obsolete_java_listing(self) -> None:
-        help_text = (MODULE_DIR / HELP_FILENAME).read_text(
+        help_text = HELP_FILE.read_text(
             encoding="utf-8"
         ).lower()
         self.assertNotIn("listing of the java code", help_text)
@@ -745,6 +767,82 @@ class PlotTests(unittest.TestCase):
 
 
 class CommandLineTests(unittest.TestCase):
+    def test_all_model_and_plot_defaults_are_exposed(self) -> None:
+        args = entry.parse_args([])
+        for name, value in entry.DEFAULTS.items():
+            with self.subTest(name=name):
+                self.assertEqual(getattr(args, name), value)
+
+    def test_au_conversion_negative_exponents_and_selectors(self) -> None:
+        args = entry.parse_args([
+            "--binary_separation_au", "1.2", "--x_init_au", "-0.3",
+            "--y_init", "-1.5e10", "--vx_init", "-2.0e4",
+            "--position_unit", "m", "--annotation_corner", "lower_right",
+            "--show_jacobi_diagnostic",
+        ])
+        self.assertAlmostEqual(args.binary_separation, 1.2 * physics.AU)
+        self.assertAlmostEqual(args.x_init, -0.3 * physics.AU)
+        self.assertEqual(args.y_init, -1.5e10)
+        self.assertEqual(args.vx_init, -20000.)
+        self.assertTrue(args.show_jacobi_diagnostic)
+
+    def test_bad_parameter_combinations_are_reported_by_parser(self) -> None:
+        for args in (["--m_planet_solar", "0"], ["--dt", "inf"],
+                     ["--max_steps", "1.5"], ["--eps1", "0.001", "--eps2", "0.01"],
+                     ["--binary_separation_au", "0.1", "--sun_collision_radius", "2e10"],
+                     ["--x_init", "1", "--x_init_au", "0.1"],
+                     ["--annotation_corner", "upper left"]):
+            with self.subTest(args=args), redirect_stderr(io.StringIO()), \
+                 self.assertRaises(SystemExit) as failure:
+                entry.parse_args(args)
+            self.assertEqual(failure.exception.code, 2)
+
+    def test_custom_inputs_are_routed_to_run_and_plots(self) -> None:
+        output = short_run(2)
+        with mock.patch.object(entry, "run_mercpert", return_value=output) as run, \
+             mock.patch.object(entry, "plot_orbits") as orbit, \
+             mock.patch.object(entry, "plot_jacobi_drift") as diagnostic, \
+             redirect_stdout(io.StringIO()):
+            entry.main(["--m_planet_solar", "0.001", "--x_init_au", "0.31",
+                        "--max_steps", "2", "--eps1", "0.02", "--eps2", "1e-5",
+                        "--companion_collision_radius", "1000",
+                        "--position_unit", "m", "--annotation_corner", "lower_left",
+                        "--show_jacobi_diagnostic"])
+        binary, initial, settings = run.call_args.args
+        self.assertEqual(binary.m_planet_solar, .001)
+        self.assertAlmostEqual(initial.x_init, .31 * physics.AU)
+        self.assertEqual(settings.max_steps, 2)
+        self.assertEqual(settings.eps1, .02)
+        self.assertEqual(settings.eps2, 1e-5)
+        self.assertEqual(settings.companion_collision_radius, 1000)
+        self.assertEqual(orbit.call_args.kwargs["corner"], "lower left")
+        self.assertEqual(orbit.call_args.kwargs["position_unit"], "m")
+        diagnostic.assert_called_once_with(output)
+
+    def test_controller_range_excludes_collision_truncation_and_empty_run(self) -> None:
+        binary = physics.BinarySystemParams(1., 1e-10, 100 * physics.AU)
+        initial = physics.MercuryInitialConditions(2 * physics.R_SUN, 0., -20000., 0.)
+        run = driver.MercPertRunParams(2000., 500, .02, 1e-5, physics.R_SUN, 0.)
+        output = driver.run_mercpert(binary, initial, run)
+        self.assertEqual(output.collision_body, "Sun")
+        self.assertGreater(output.min_working_dt, output.dt_used[-1])
+        self.assertGreaterEqual(output.max_working_dt, output.min_working_dt)
+        immediate = driver.run_mercpert(default_binary(),
+                  physics.MercuryInitialConditions(.5 * physics.R_SUN, 0, 0, 0),
+                  driver.MercPertRunParams(1, 5, .05, 1e-4, physics.R_SUN, 0))
+        self.assertIsNone(immediate.min_working_dt)
+        self.assertIsNone(immediate.max_working_dt)
+        with redirect_stdout(io.StringIO()) as text:
+            entry.print_summary(immediate, default_binary())
+        self.assertIn("none (no accepted steps)", text.getvalue())
+
+    def test_zero_initial_jacobi_drift_is_undefined(self) -> None:
+        output = short_run(2)
+        output.jacobi[0] = 0.
+        with redirect_stdout(io.StringIO()) as text:
+            entry.print_summary(output, default_binary())
+        self.assertIn("undefined (initial Jacobi constant is zero)", text.getvalue())
+
     def test_version_command_reports_synchronized_metadata(self) -> None:
         completed = subprocess.run(
             [sys.executable, "main.py", "--version"],

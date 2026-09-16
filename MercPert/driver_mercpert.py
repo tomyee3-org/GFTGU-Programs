@@ -50,6 +50,8 @@ class MercPertOutput:
     accepted_steps: int
     termination_reason: str
     collision_body: Optional[str] = None
+    min_working_dt: Optional[float] = None
+    max_working_dt: Optional[float] = None
     model_version: str = phys.MODEL_VERSION
     build_id: str = phys.BUILD_ID
 
@@ -253,6 +255,8 @@ def run_mercpert(
     accepted_steps = 0
     termination_reason = "max_steps reached"
     collision_body: Optional[str] = None
+    min_working_dt: Optional[float] = None
+    max_working_dt: Optional[float] = None
 
     while accepted_steps < run_params.max_steps:
         ax0, ay0 = mercury_acceleration(
@@ -350,6 +354,13 @@ def run_mercpert(
                    if last_retry_error else "")
             )
 
+        # Store accepted controller steps before collision interpolation clips
+        # a final step at a boundary. Rejected trial steps are excluded.
+        min_working_dt = (dt_work if min_working_dt is None
+                          else min(min_working_dt, dt_work))
+        max_working_dt = (dt_work if max_working_dt is None
+                          else max(max_working_dt, dt_work))
+
         # Before committing the accepted endpoint, test the entire accepted
         # segment against each moving finite-radius primary.  Endpoint-only
         # testing can miss a fast crossing that begins and ends outside a star.
@@ -420,6 +431,8 @@ def run_mercpert(
         accepted_steps=accepted_steps,
         termination_reason=termination_reason,
         collision_body=collision_body,
+        min_working_dt=min_working_dt,
+        max_working_dt=max_working_dt,
         model_version=phys.MODEL_VERSION,
         build_id=phys.BUILD_ID,
     )
