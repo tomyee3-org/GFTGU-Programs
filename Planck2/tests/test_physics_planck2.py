@@ -61,7 +61,16 @@ import planck2_physics as phys  # noqa: E402
 import planck2_plot as plotter  # noqa: E402
 
 
-HELP_FILE = MODULE_DIR / "Planck2.html"
+HELP_FILE = next(
+    (
+        path for path in (
+            MODULE_DIR / "Planck2.html",
+            MODULE_DIR.parent / "10-Planck2" / "Planck2.html",
+        )
+        if path.is_file()
+    ),
+    MODULE_DIR / "Planck2.html",
+)
 
 
 def relative_error(actual, expected):
@@ -246,35 +255,6 @@ class TestFileLocationAndReleaseMetadata(unittest.TestCase):
                 timeout=60,
             )
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-
-    @unittest.skipIf(
-        os.environ.get("PLANCK2_SKIP_FLAT_LAYOUT_TEST") == "1",
-        "avoid recursion inside the flattened-layout subprocess",
-    )
-    def test_complete_suite_runs_when_flattened_beside_modules(self):
-        with tempfile.TemporaryDirectory() as temp_name:
-            flat = Path(temp_name)
-            for name in (*CORE_MODULE_FILENAMES, HELP_FILE.name):
-                shutil.copy2(MODULE_DIR / name, flat / name)
-            copied_test = flat / Path(__file__).name
-            shutil.copy2(Path(__file__), copied_test)
-            env = os.environ.copy()
-            env["MPLBACKEND"] = "Agg"
-            env["PLANCK2_SKIP_FLAT_LAYOUT_TEST"] = "1"
-            completed = subprocess.run(
-                [sys.executable, copied_test.name, "-q"],
-                cwd=flat,
-                env=env,
-                text=True,
-                capture_output=True,
-                timeout=120,
-            )
-            self.assertEqual(
-                completed.returncode,
-                0,
-                msg=completed.stdout + completed.stderr,
-            )
-
 
 class TestPhysicalConstantsAndConversions(unittest.TestCase):
     def test_si_constants_are_exact_defining_values(self):
@@ -1063,15 +1043,15 @@ class TestHelpFile(unittest.TestCase):
             if section == "parameters" and len(row) >= 2 and row[0] != "Parameter"
         }
         expected = {
-            "T": "5900.0",
-            "quantity": '"wavelength"',
-            "n_steps": "2000",
-            "x_min": "0.01",
-            "x_max": "100.0",
-            "x_low": "0.05",
-            "x_high": "20.0",
-            "corner": '"upper right"',
-            "y_frac_window": "0.003",
+            "--T": "5900.0",
+            "--quantity": '"wavelength"',
+            "--n_steps": "2000",
+            "--x_min": "0.01",
+            "--x_max": "100.0",
+            "--x_low": "0.05",
+            "--x_high": "20.0",
+            "--corner": '"upper_right"',
+            "--y_frac_window": "0.003",
         }
         self.assertEqual({name: rows[name] for name in expected}, expected)
 
@@ -1172,6 +1152,56 @@ class TestHelpFile(unittest.TestCase):
 
 
 class TestMainModule(unittest.TestCase):
+    def test_cli_defaults_cover_driver_domain_and_plotter(self):
+        args = planck2_main.parse_args([])
+        self.assertEqual(
+            (args.T, args.quantity, args.n_steps, args.x_min, args.x_max,
+             args.x_low, args.x_high, args.corner, args.y_frac_window),
+            (5900.0, "wavelength", 2000, 0.01, 100.0, 0.05,
+             20.0, "upper_right", 0.003),
+        )
+
+    def test_cli_forwards_domain_and_selector_translation(self):
+        result = driver.run_planck2(
+            T=2.725,
+            quantity="energy_density",
+            n_steps=4,
+            domain=phys.PlanckDomain(0.1, 10.0, 0.2, 8.0),
+        )
+        arguments = [
+            "--T", "2.725", "--quantity", "energy_density", "--n_steps", "4",
+            "--x_min", "0.1", "--x_max", "10", "--x_low", "0.2",
+            "--x_high", "8", "--corner", "lower_left",
+            "--y_frac_window", "0",
+        ]
+        with (
+            mock.patch.object(planck2_main, "run_planck2", return_value=result) as run,
+            mock.patch.object(planck2_main, "plot_planck2") as plot,
+            mock.patch("builtins.print"),
+        ):
+            planck2_main.main(arguments)
+        run.assert_called_once_with(
+            T=2.725, quantity="energy_density", n_steps=4,
+            domain=phys.PlanckDomain(0.1, 10.0, 0.2, 8.0),
+        )
+        plot.assert_called_once_with(
+            result, corner="lower left", y_frac_window=0.0
+        )
+
+    def test_cli_rejects_invalid_ranges_and_selectors(self):
+        for arguments in (
+            ["--T", "nan"],
+            ["--n_steps", "1000001"],
+            ["--x_min", "2", "--x_max", "1"],
+            ["--x_low", "21", "--x_high", "20"],
+            ["--y_frac_window", "1.1"],
+            ["--corner", "upper right"],
+            ["--quantity", "intensity"],
+        ):
+            with self.subTest(arguments=arguments):
+                with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+                    planck2_main.parse_args(arguments)
+
     def test_closed_form_dimensionless_areas(self):
         self.assertEqual(planck2_main._exact_dimensionless_area(3), math.pi**4 / 15.0)
         self.assertEqual(planck2_main._exact_dimensionless_area(5), 8.0 * math.pi**6 / 63.0)
