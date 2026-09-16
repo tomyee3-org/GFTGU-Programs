@@ -6,9 +6,11 @@ file is placed beside the four core modules.
 """
 
 import ast
+from contextlib import redirect_stdout
 import hashlib
 from html.parser import HTMLParser
 import inspect
+import io
 import math
 import os
 from pathlib import Path
@@ -58,7 +60,20 @@ import physics_spheregravity as physics
 import plot_spheregravity as plotting
 
 
-HELP_FILE = MODULE_DIR / "SphereGravity.html"
+
+def find_help_file(module_dir):
+    """Find Help in either a flattened upload or the packaged docs folder."""
+    candidates = (
+        module_dir / "SphereGravity.html",
+        module_dir.parent / "04-SphereGravity" / "SphereGravity.html",
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError("Could not find SphereGravity.html beside the program or docs.")
+
+
+HELP_FILE = find_help_file(MODULE_DIR)
 
 
 class HelpHTMLParser(HTMLParser):
@@ -227,6 +242,7 @@ class TestInputValidation(unittest.TestCase):
             for implementation in (
                 physics.compute_acceleration_profile_textbook,
                 physics.compute_acceleration_profile_optimized,
+                lambda n_div: physics.compute_acceleration_at_radii(n_div, [0.5]),
             ):
                 with self.subTest(value=value, function=implementation.__name__):
                     with self.assertRaisesRegex(ValueError, "positive integer"):
@@ -275,10 +291,28 @@ class TestInputValidation(unittest.TestCase):
             for implementation in (
                 physics.compute_acceleration_profile_textbook,
                 physics.compute_acceleration_profile_optimized,
+                lambda n_div, epsilon: physics.compute_acceleration_at_radii(
+                    n_div, [0.5], epsilon
+                ),
             ):
                 with self.subTest(value=value, function=implementation.__name__):
                     with self.assertRaisesRegex(ValueError, "positive finite"):
                         implementation(8, epsilon=value)
+
+    def test_arbitrary_radius_input_is_validated(self):
+        invalid_values = (
+            [],
+            [[0.5]],
+            [float("nan")],
+            [float("inf")],
+            [-0.5],
+            [physics.SHELL_RADIUS],
+            ["radius"],
+        )
+        for value in invalid_values:
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "radii|surface"):
+                    physics.compute_acceleration_at_radii(8, value)
 
     def test_invalid_output_type_is_rejected(self):
         for value in ("relative_difference", "", None, 1):
@@ -312,7 +346,7 @@ class TestShellMass(unittest.TestCase):
         self.assertAlmostEqual(mass_2 / mass_1, 7.0, places=12)
 
     def test_mass_converges_quadratically_to_continuum_value(self):
-        exact_mass = 4.0 * math.pi * physics.DEFAULT_EPSILON
+        exact_mass = physics.compute_continuum_shell_mass()
         errors = [
             abs(physics.compute_shell_mass(n_div) - exact_mass)
             for n_div in (10, 100, 1000)
@@ -321,6 +355,13 @@ class TestShellMass(unittest.TestCase):
         self.assertLess(errors[0] / errors[1], 105.0)
         self.assertGreater(errors[1] / errors[2], 95.0)
         self.assertLess(errors[1] / errors[2], 105.0)
+
+    def test_continuum_mass_scales_with_epsilon(self):
+        self.assertAlmostEqual(
+            physics.compute_continuum_shell_mass(0.007),
+            4.0 * math.pi * 0.007 * physics.SHELL_RADIUS**2,
+            places=15,
+        )
 
 
 class TestAccelerationPhysics(unittest.TestCase):
@@ -402,6 +443,21 @@ class TestAccelerationPhysics(unittest.TestCase):
                 self.assertEqual(radius[radial_index], radial_index * 0.005)
                 self.assertAlmostEqual(
                     acceleration[radial_index],
+                    reference_acceleration(12, radial_index),
+                    places=14,
+                )
+
+    def test_requested_report_radii_match_independent_reference(self):
+        requested_indices = (100, 199, 201, 400, 600, 800, 1000)
+        requested_radii = [index * physics.RADIUS_STEP for index in requested_indices]
+        radius, acceleration = physics.compute_acceleration_at_radii(
+            12, requested_radii
+        )
+        np.testing.assert_array_equal(radius, requested_radii)
+        for observed, radial_index in zip(acceleration, requested_indices):
+            with self.subTest(radius=radial_index * physics.RADIUS_STEP):
+                self.assertAlmostEqual(
+                    observed,
                     reference_acceleration(12, radial_index),
                     places=14,
                 )
@@ -543,7 +599,52 @@ class TestDriverAndEntryPoint(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         expected = f"SphereGravity {physics.MODEL_VERSION} (build {physics.BUILD_ID})"
-        self.assertEqual(completed.stdout.strip(), expected)
+        self.assertTrue(completed.stdout.startswith(expected))
+        self.assertIn("Shell mass comparison", completed.stdout)
+        self.assertIn("Acceleration comparison", completed.stdout)
+        for radius in entry_point.REPORT_RADII:
+            self.assertIn(entry_point._format_value(radius), completed.stdout)
+
+    def test_command_line_defaults_cover_all_driver_parameters(self):
+        args = entry_point.parse_args([])
+        signature = inspect.signature(driver.run_spheregravity)
+        self.assertEqual(args.nDiv, signature.parameters["nDiv"].default)
+        self.assertEqual(
+            entry_point.CLI_OUTPUT_TYPES[args.outputType],
+            "relative difference",
+        )
+        self.assertEqual(args.epsilon, signature.parameters["epsilon"].default)
+
+    def test_command_line_accepts_all_custom_parameters(self):
+        args = entry_point.parse_args(
+            [
+                "--nDiv",
+                "250",
+                "--outputType",
+                "acceleration",
+                "--epsilon",
+                "0.004",
+            ]
+        )
+        self.assertEqual(args.nDiv, 250)
+        self.assertEqual(args.outputType, "acceleration")
+        self.assertEqual(args.epsilon, 0.004)
+
+    def test_command_line_rejects_legacy_spaced_selector(self):
+        with self.assertRaises(SystemExit):
+            entry_point.parse_args(["--outputType", "relative difference"])
+
+    def test_comparison_prints_all_requested_quantities(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            entry_point.print_comparison(100, physics.DEFAULT_EPSILON)
+        text = output.getvalue()
+        self.assertIn("numerical midpoint mass", text)
+        self.assertIn("continuum mass", text)
+        self.assertIn("relative difference", text)
+        self.assertIn("undefined; g/M=", text)
+        for radius in entry_point.REPORT_RADII:
+            self.assertIn(entry_point._format_value(radius), text)
 
     def test_main_uses_documented_user_settings(self):
         fake_radius = np.array([0.0, 0.5])
@@ -554,15 +655,27 @@ class TestDriverAndEntryPoint(unittest.TestCase):
             return_value=(fake_radius, fake_acceleration),
         ) as run_mock, mock.patch.object(
             entry_point, "plot_spheregravity"
-        ) as plot_mock, mock.patch("builtins.print"):
-            entry_point.main([])
+        ) as plot_mock, mock.patch.object(
+            entry_point, "print_comparison"
+        ) as comparison_mock, mock.patch("builtins.print"):
+            entry_point.main(
+                [
+                    "--nDiv",
+                    "16",
+                    "--outputType",
+                    "acceleration",
+                    "--epsilon",
+                    "0.003",
+                ]
+            )
 
         run_mock.assert_called_once_with(
-            nDiv=entry_point.nDiv, outputType=entry_point.outputType
+            nDiv=16, outputType="acceleration", epsilon=0.003
         )
         plot_mock.assert_called_once_with(
-            fake_radius, fake_acceleration, outputType=entry_point.outputType
+            fake_radius, fake_acceleration, outputType="acceleration"
         )
+        comparison_mock.assert_called_once_with(16, 0.003)
 
 
 class TestPlotting(unittest.TestCase):
@@ -670,14 +783,24 @@ class TestHelpContent(unittest.TestCase):
         self.assertIn("plot leaves a gap", self.help_text)
 
     def test_help_documents_both_output_modes(self):
-        self.assertIn("outputType = 'acceleration'", self.help_text)
-        self.assertIn("outputType = 'relative difference'", self.help_text)
+        self.assertIn("--outputType acceleration", self.help_text)
+        self.assertIn("--outputType relative_difference", self.help_text)
 
     def test_help_documents_driver_epsilon_parameter(self):
         self.assertRegex(
             self.help_text,
             r"run_spheregravity\(nDiv=100,\s*outputType='acceleration',\s*epsilon=0\.001\)",
         )
+
+    def test_help_documents_every_command_line_parameter(self):
+        for option in ("--nDiv", "--outputType", "--epsilon", "--version"):
+            with self.subTest(option=option):
+                self.assertIn(option, self.help_text)
+
+    def test_help_documents_printed_comparison_radii(self):
+        for radius in ("0.5", "0.995", "1.005", "2", "3", "4", "5"):
+            with self.subTest(radius=radius):
+                self.assertIn(radius, self.help_text)
 
     def test_help_documents_interchangeable_implementations(self):
         self.assertIn(

@@ -16,7 +16,7 @@ import numpy as np
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.2.0"
+MODEL_VERSION = "1.3.0"
 BUILD_ID_COVERS = (
     "physics_spheregravity.py",
     "driver_spheregravity.py",
@@ -129,6 +129,69 @@ def compute_shell_mass(nDiv, epsilon=DEFAULT_EPSILON):
         theta += dTheta
 
     return mass
+
+
+def compute_continuum_shell_mass(epsilon=DEFAULT_EPSILON):
+    """Return the exact continuum mass of the dimensionless thin shell."""
+    _validate_epsilon(epsilon)
+    return 4.0 * np.pi * epsilon * SHELL_RADIUS**2
+
+
+def _validate_sample_radii(radii):
+    """Return validated one-dimensional radii away from the shell surface."""
+    try:
+        values = np.asarray(radii, dtype=float)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("radii must be a one-dimensional sequence of numbers.") from exc
+    if values.ndim != 1 or values.size == 0:
+        raise ValueError("radii must be a nonempty one-dimensional sequence.")
+    if not np.all(np.isfinite(values)):
+        raise ValueError("radii must contain only finite values.")
+    if np.any(values < 0.0):
+        raise ValueError("radii must be nonnegative.")
+    if np.any(values == SHELL_RADIUS):
+        raise ValueError("radii must not include the discontinuous shell surface r = 1.")
+    return values
+
+
+def compute_acceleration_at_radii(nDiv, radii, epsilon=DEFAULT_EPSILON):
+    """Compute raw shell acceleration at arbitrary nonsurface radii.
+
+    This direct midpoint sum uses the same transparent latitude-ring loop as
+    the normal profile calculation.  It supports the printed comparison table,
+    including r = 5, which lies just beyond the standard plot grid.
+    """
+    _validate_nDiv(nDiv)
+    _validate_epsilon(epsilon)
+    radius = _validate_sample_radii(radii)
+
+    dPhi = 2.0 * np.pi / nDiv
+    dTheta = 0.5 * dPhi
+    acceleration = np.empty(radius.size, dtype=float)
+
+    for j, r in enumerate(radius):
+        accel = 0.0
+        theta = 0.5 * dTheta - 0.5 * np.pi
+        for _ in range(nDiv):
+            sin_theta = np.sin(theta)
+            distance = np.sqrt(
+                SHELL_RADIUS**2
+                + r * r
+                + 2.0 * r * SHELL_RADIUS * sin_theta
+            )
+            dm = (
+                dTheta
+                * dPhi
+                * np.cos(theta)
+                * epsilon
+                * SHELL_RADIUS**2
+            )
+            axial_separation = r + SHELL_RADIUS * sin_theta
+            accel += dm * axial_separation / distance**3 * nDiv
+            theta += dTheta
+        acceleration[j] = accel
+
+    return radius.copy(), acceleration
 
 
 def _validate_profile_inputs(nDiv, outputType, epsilon):
