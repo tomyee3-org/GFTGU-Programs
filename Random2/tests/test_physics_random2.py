@@ -60,6 +60,7 @@ import numpy as np
 import random2_driver as driver
 import random2_physics as physics
 import random2_plot as plot
+import main as cli
 
 
 class _HelpSemanticParser(HTMLParser):
@@ -104,7 +105,17 @@ class _HelpSemanticParser(HTMLParser):
 
 def parse_help_file() -> _HelpSemanticParser:
     parser = _HelpSemanticParser()
-    parser.feed((MODULE_DIR / HELP_FILENAME).read_text(encoding="utf-8"))
+    candidates = (
+        MODULE_DIR / HELP_FILENAME,
+        MODULE_DIR.parent / "08-Random2" / HELP_FILENAME,
+    )
+    help_path = next((path for path in candidates if path.is_file()), None)
+    if help_path is None:
+        raise FileNotFoundError(
+            "Could not find Random2.html beside the modules or in the sibling "
+            "08-Random2 documentation directory."
+        )
+    parser.feed(help_path.read_text(encoding="utf-8"))
     parser.close()
     return parser
 
@@ -189,30 +200,32 @@ class TestReleaseMetadataAndCompatibility(unittest.TestCase):
         }
         self.assertEqual(
             {name: defaults.get(name) for name in (
-                "maxSteps",
-                "nTrials",
-                "step_distribution",
-                "reference_steps",
-                "n_walks",
-                "mean_free_path",
-                "radius_factor",
-                "radius",
-                "ray_length_factor",
-                "step_cap",
-                "corner",
+                "--display",
+                "--max_steps",
+                "--n_trials",
+                "--step_distribution",
+                "--reference_steps",
+                "--n_walks",
+                "--mean_free_path",
+                "--radius_factor",
+                "--radius",
+                "--ray_length_factor",
+                "--step_cap",
+                "--corner",
             )},
             {
-                "maxSteps": "4096",
-                "nTrials": "100",
-                "step_distribution": '"uniform"',
-                "reference_steps": "2000",
-                "n_walks": "4",
-                "mean_free_path": "1.0",
-                "radius_factor": "2.0",
-                "radius": "None",
-                "ray_length_factor": "0.6",
-                "step_cap": "200000",
-                "corner": '"upper right"',
+                "--display": "scaled_distance",
+                "--max_steps": "4096",
+                "--n_trials": "100",
+                "--step_distribution": "uniform",
+                "--reference_steps": "2000",
+                "--n_walks": "4",
+                "--mean_free_path": "1.0",
+                "--radius_factor": "2.0",
+                "--radius": "omitted",
+                "--ray_length_factor": "0.6",
+                "--step_cap": "200000",
+                "--corner": "upper_right",
             },
         )
 
@@ -237,6 +250,104 @@ class TestReleaseMetadataAndCompatibility(unittest.TestCase):
         )
         expected = f"Random2 {physics.MODEL_VERSION} (build {physics.BUILD_ID})"
         self.assertEqual(completed.stdout.strip(), expected)
+
+
+class TestCommandLine(unittest.TestCase):
+    def test_defaults_cover_driver_and_plot_inputs(self):
+        args = cli.parse_args([])
+        self.assertEqual(args.display, "scaled_distance")
+        self.assertEqual(args.max_steps, 4096)
+        self.assertEqual(args.n_trials, 100)
+        self.assertEqual(args.step_distribution, "uniform")
+        self.assertEqual(args.reference_steps, 2000)
+        self.assertEqual(args.n_walks, 4)
+        self.assertEqual(args.mean_free_path, 1.0)
+        self.assertEqual(args.radius_factor, 2.0)
+        self.assertIsNone(args.radius)
+        self.assertEqual(args.ray_length_factor, 0.6)
+        self.assertEqual(args.step_cap, 200_000)
+        self.assertEqual(args.corner, "upper_right")
+
+    def test_selector_choices_and_numeric_values_parse(self):
+        args = cli.parse_args([
+            "--display", "walk2d",
+            "--step_distribution", "gaussian",
+            "--reference_steps", "64",
+            "--n_walks", "6",
+            "--mean_free_path", "0.5",
+            "--radius_factor", "3",
+            "--radius", "20",
+            "--ray_length_factor", "0",
+            "--step_cap", "900",
+            "--corner", "lower_left",
+        ])
+        self.assertEqual(args.display, "walk2d")
+        self.assertEqual(args.step_distribution, "gaussian")
+        self.assertEqual(args.reference_steps, 64)
+        self.assertEqual(args.n_walks, 6)
+        self.assertEqual(args.mean_free_path, 0.5)
+        self.assertEqual(args.radius_factor, 3.0)
+        self.assertEqual(args.radius, 20.0)
+        self.assertEqual(args.ray_length_factor, 0.0)
+        self.assertEqual(args.step_cap, 900)
+        self.assertEqual(args.corner, "lower_left")
+
+    def test_scaled_distance_arguments_are_forwarded(self):
+        with (
+            mock.patch.object(
+                cli,
+                "run_scaled_distance_experiment",
+                return_value=([2.0], [1.0]),
+            ) as run,
+            mock.patch.object(cli, "plot_scaled_distance") as draw,
+        ):
+            cli.main([
+                "--display", "scaled_distance",
+                "--max_steps", "32",
+                "--n_trials", "7",
+                "--step_distribution", "gaussian",
+            ])
+        run.assert_called_once_with(32, 7, step_distribution="gaussian")
+        draw.assert_called_once_with([2.0], [1.0])
+
+    def test_walk_arguments_and_corner_are_forwarded(self):
+        result = object()
+        with (
+            mock.patch.object(cli, "run_walk2d", return_value=result) as run,
+            mock.patch.object(cli, "plot_walk2d") as draw,
+        ):
+            cli.main([
+                "--display", "walk2d",
+                "--reference_steps", "20",
+                "--n_walks", "3",
+                "--mean_free_path", "2",
+                "--radius_factor", "4",
+                "--radius", "12",
+                "--ray_length_factor", "0.25",
+                "--step_cap", "99",
+                "--corner", "lower_right",
+            ])
+        run.assert_called_once_with(
+            reference_steps=20,
+            n_walks=3,
+            radius=12.0,
+            mean_free_path=2.0,
+            radius_factor=4.0,
+            ray_length_factor=0.25,
+            step_cap=99,
+        )
+        draw.assert_called_once_with(result, corner="lower right")
+
+    def test_invalid_command_line_values_are_rejected(self):
+        for arguments in (
+            ["--max_steps", "0"],
+            ["--radius", "nan"],
+            ["--ray_length_factor", "-1"],
+            ["--step_distribution", "normal"],
+            ["--corner", "upper right"],
+        ):
+            with self.subTest(arguments=arguments), self.assertRaises(SystemExit):
+                cli.parse_args(arguments)
 
 
 class TestPhysicsValidation(unittest.TestCase):
