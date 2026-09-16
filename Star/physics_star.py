@@ -13,7 +13,7 @@ from numbers import Real
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.0.3"
+MODEL_VERSION = "1.1.0"
 BUILD_ID_COVERS = (
     "physics_star.py",
     "driver_star.py",

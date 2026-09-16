@@ -8,7 +8,8 @@ adaptive integrator.
 """
 
 from dataclasses import dataclass
-from typing import get_args, List, Literal
+from bisect import bisect_left
+from typing import get_args, List, Literal, Sequence
 from math import isfinite, pi
 from numbers import Real
 
@@ -46,6 +47,89 @@ class StarResult:
     def last_index(self) -> int:
         """Backward-compatible alias for the surface array index."""
         return self.surface_index
+
+
+@dataclass(frozen=True)
+class ProfileCheckpoint:
+    """Linearly interpolated stellar quantities at one radius fraction."""
+    radius_fraction: float
+    radius: float
+    pressure: float
+    density: float
+    temperature: float
+    mass: float
+
+
+DEFAULT_CHECKPOINT_FRACTIONS = (0.0, 0.25, 0.50, 0.75, 0.90)
+
+
+def interpolate_profile_checkpoints(
+    result: StarResult,
+    fractions: Sequence[float] = DEFAULT_CHECKPOINT_FRACTIONS,
+) -> List[ProfileCheckpoint]:
+    """Return linearly interpolated profiles at fractions of surface radius."""
+    arrays = (
+        result.radius,
+        result.pressure,
+        result.density,
+        result.temperature,
+        result.mass,
+    )
+    if not result.radius or any(len(values) != len(result.radius) for values in arrays):
+        raise ValueError("result profiles must be nonempty and have equal lengths.")
+    if any(
+        not isfinite(value)
+        for values in arrays
+        for value in values
+    ):
+        raise ValueError("result profiles must contain only finite values.")
+    if result.radius[0] != 0.0 or any(
+        right <= left for left, right in zip(result.radius, result.radius[1:])
+    ):
+        raise ValueError("result.radius must start at zero and strictly increase.")
+
+    surface_radius = result.radius[-1]
+    checkpoints = []
+    for fraction in fractions:
+        _validate_finite_real("radius fraction", fraction)
+        fraction = float(fraction)
+        if not 0.0 <= fraction <= 1.0:
+            raise ValueError("radius fractions must lie between zero and one.")
+
+        target = fraction * surface_radius
+        upper = bisect_left(result.radius, target)
+        if upper == 0:
+            lower = upper
+            weight = 0.0
+        elif upper == len(result.radius):
+            lower = upper = len(result.radius) - 1
+            weight = 0.0
+        elif result.radius[upper] == target:
+            lower = upper
+            weight = 0.0
+        else:
+            lower = upper - 1
+            weight = (
+                (target - result.radius[lower])
+                / (result.radius[upper] - result.radius[lower])
+            )
+
+        def interpolate(values):
+            if lower == upper:
+                return float(values[lower])
+            return float(values[lower] + weight * (values[upper] - values[lower]))
+
+        checkpoints.append(
+            ProfileCheckpoint(
+                radius_fraction=fraction,
+                radius=target,
+                pressure=interpolate(result.pressure),
+                density=interpolate(result.density),
+                temperature=interpolate(result.temperature),
+                mass=interpolate(result.mass),
+            )
+        )
+    return checkpoints
 
 
 def _validate_finite_real(name, value):

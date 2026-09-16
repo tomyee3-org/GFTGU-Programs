@@ -49,7 +49,11 @@ def find_module_dir(start):
 
 MODULE_DIR = find_module_dir(Path(__file__).resolve().parent)
 TEST_FILE = Path(__file__).resolve()
-HELP_FILE = MODULE_DIR / "Star.html"
+HELP_CANDIDATES = (
+    MODULE_DIR / "Star.html",
+    MODULE_DIR.parent / "08-Star" / "Star.html",
+)
+HELP_FILE = next((path for path in HELP_CANDIDATES if path.is_file()), HELP_CANDIDATES[0])
 if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 
@@ -72,42 +76,6 @@ DEFAULT_PARAMETER_NAMES = (
     "output_type",
     "log_y",
 )
-
-
-def extract_main_defaults(path):
-    """Extract the intentional direct-literal interface in main()."""
-    tree = ast.parse(Path(path).read_text(encoding="utf-8"), filename=str(path))
-    main_functions = [
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == "main"
-    ]
-    if len(main_functions) != 1:
-        raise AssertionError("main.py must define exactly one main() function.")
-    main_function = main_functions[0]
-    defaults = {}
-    for statement in main_function.body:
-        if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
-            target = statement.targets[0]
-            value = statement.value
-        elif isinstance(statement, ast.AnnAssign):
-            target = statement.target
-            value = statement.value
-        else:
-            continue
-        if isinstance(target, ast.Name) and target.id in DEFAULT_PARAMETER_NAMES:
-            try:
-                defaults[target.id] = ast.literal_eval(value)
-            except (TypeError, ValueError) as error:
-                raise AssertionError(
-                    f"main() setting {target.id} must be a direct literal assignment."
-                ) from error
-    missing = set(DEFAULT_PARAMETER_NAMES) - set(defaults)
-    if missing:
-        raise AssertionError(
-            "main() is missing direct literal settings: " + ", ".join(sorted(missing))
-        )
-    return defaults
 
 
 class InputParameterTableParser(HTMLParser):
@@ -145,8 +113,12 @@ class InputParameterTableParser(HTMLParser):
             self.row.append("".join(self.cell_text).strip())
             self.in_cell = False
         elif self.in_parameters and tag == "tr":
-            if len(self.row) >= 2 and self.row[0] in DEFAULT_PARAMETER_NAMES:
-                self.defaults[self.row[0]] = ast.literal_eval(self.row[1])
+            if len(self.row) >= 2:
+                name = self.row[0]
+                if name.startswith("--"):
+                    name = name[2:]
+                if name in DEFAULT_PARAMETER_NAMES:
+                    self.defaults[name] = ast.literal_eval(self.row[1])
         elif self.in_parameters and tag == "section":
             self.section_depth -= 1
             if self.section_depth == 0:
@@ -160,7 +132,7 @@ def extract_help_defaults(html_text):
     return parser.defaults
 
 
-MAIN_DEFAULTS = extract_main_defaults(MODULE_DIR / "main.py")
+MAIN_DEFAULTS = vars(star_main.parse_args([]))
 DEFAULTS = {
     name: MAIN_DEFAULTS[name]
     for name in DEFAULT_PARAMETER_NAMES
@@ -335,21 +307,6 @@ class TestLocationAndReleaseMetadata(unittest.TestCase):
         for name in CORE_MODULE_FILENAMES:
             source = (MODULE_DIR / name).read_text(encoding="utf-8")
             ast.parse(source, filename=name, feature_version=(3, 10))
-
-    def test_main_default_extractor_reports_missing_main(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "main.py"
-            path.write_text("value = 1\n", encoding="utf-8")
-            with self.assertRaisesRegex(AssertionError, "exactly one main"):
-                extract_main_defaults(path)
-
-    def test_main_default_extractor_reports_nonliteral_setting(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "main.py"
-            path.write_text("def main():\n    p_c = 1 * 2\n", encoding="utf-8")
-            with self.assertRaisesRegex(AssertionError, "p_c must be a direct literal"):
-                extract_main_defaults(path)
-
 
 class TestPhysicsRelations(unittest.TestCase):
     def test_constants_retain_educational_model_values(self):
@@ -801,6 +758,57 @@ class TestIntegratedStar(unittest.TestCase):
         self.assertGreater(errors[1], errors[2])
 
 
+class TestProfileCheckpoints(unittest.TestCase):
+    def test_default_fractions_and_target_radii(self):
+        result = integrate()
+        checkpoints = driver_star.interpolate_profile_checkpoints(result)
+        self.assertEqual(
+            [sample.radius_fraction for sample in checkpoints],
+            [0.0, 0.25, 0.50, 0.75, 0.90],
+        )
+        for sample in checkpoints:
+            self.assertAlmostEqual(
+                sample.radius,
+                sample.radius_fraction * result.radius[-1],
+                places=7,
+            )
+        self.assertEqual(checkpoints[0].pressure, result.pressure[0])
+        self.assertEqual(checkpoints[0].density, result.density[0])
+        self.assertEqual(checkpoints[0].temperature, result.temperature[0])
+        self.assertEqual(checkpoints[0].mass, 0.0)
+
+    def test_interpolation_is_linear_between_stored_points(self):
+        result = SimpleNamespace(
+            radius=[0.0, 10.0, 20.0],
+            pressure=[100.0, 60.0, 0.0],
+            density=[10.0, 6.0, 0.0],
+            temperature=[1000.0, 600.0, 0.0],
+            mass=[0.0, 20.0, 40.0],
+        )
+        sample = driver_star.interpolate_profile_checkpoints(result, [0.25])[0]
+        self.assertEqual(sample.radius, 5.0)
+        self.assertEqual(sample.pressure, 80.0)
+        self.assertEqual(sample.density, 8.0)
+        self.assertEqual(sample.temperature, 800.0)
+        self.assertEqual(sample.mass, 10.0)
+
+    def test_checkpoint_validation(self):
+        result = integrate()
+        for fraction in (-0.1, 1.1, math.nan, math.inf, True, "0.5"):
+            with self.subTest(fraction=fraction), self.assertRaises(ValueError):
+                driver_star.interpolate_profile_checkpoints(result, [fraction])
+
+        malformed = SimpleNamespace(
+            radius=[0.0, 1.0],
+            pressure=[1.0],
+            density=[1.0, 0.0],
+            temperature=[1.0, 0.0],
+            mass=[0.0, 1.0],
+        )
+        with self.assertRaisesRegex(ValueError, "equal lengths"):
+            driver_star.interpolate_profile_checkpoints(malformed)
+
+
 class TestPlottingAndEntryPoint(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -869,14 +877,71 @@ class TestPlottingAndEntryPoint(unittest.TestCase):
             build_id=phys.BUILD_ID,
         )
         with (
-            mock.patch.object(star_main, "parse_args"),
             mock.patch.object(star_main, "integrate_star", return_value=sentinel) as call,
+            mock.patch.object(star_main, "print_structure_summary") as summary,
             mock.patch.object(star_main, "plot_star_structure") as plot,
             mock.patch("builtins.print"),
         ):
-            star_main.main()
+            star_main.main([])
         call.assert_called_once_with(**DEFAULTS)
+        summary.assert_called_once_with(sentinel)
         plot.assert_called_once_with(sentinel, log_y=False)
+
+    def test_command_line_values_are_forwarded(self):
+        sentinel = SimpleNamespace(
+            model_version=phys.MODEL_VERSION,
+            build_id=phys.BUILD_ID,
+        )
+        with (
+            mock.patch.object(star_main, "integrate_star", return_value=sentinel) as call,
+            mock.patch.object(star_main, "print_structure_summary"),
+            mock.patch.object(star_main, "plot_star_structure") as plot,
+            mock.patch("builtins.print"),
+        ):
+            star_main.main([
+                "--p_c", "8e15",
+                "--T_c", "2e7",
+                "--mu", "1.1",
+                "--gamma", "1.5",
+                "--max_points", "3000",
+                "--steps_per_scale", "600",
+                "--output_type", "temperature",
+                "--log_y",
+            ])
+        call.assert_called_once_with(
+            p_c=8e15,
+            T_c=2e7,
+            mu=1.1,
+            gamma=1.5,
+            max_points=3000,
+            steps_per_scale=600,
+            output_type="temperature",
+        )
+        plot.assert_called_once_with(sentinel, log_y=True)
+
+    def test_cli_rejects_bad_values_and_log_mass(self):
+        for arguments in (
+            ["--p_c", "0"],
+            ["--T_c", "nan"],
+            ["--gamma", "1.2"],
+            ["--max_points", "2"],
+            ["--steps_per_scale", "0"],
+            ["--output_type", "luminosity"],
+        ):
+            with self.subTest(arguments=arguments), self.assertRaises(SystemExit):
+                star_main.parse_args(arguments)
+        with self.assertRaisesRegex(SystemExit, "cannot be used"):
+            star_main.main(["--output_type", "mass", "--log_y"])
+
+    def test_structure_summary_uses_requested_checkpoints_and_five_figures(self):
+        result = integrate()
+        with mock.patch("builtins.print") as printer:
+            star_main.print_structure_summary(result)
+        text = "\n".join(" ".join(str(item) for item in call.args) for call in printer.call_args_list)
+        self.assertIn("Radius (m):     6.9674e+08", text)
+        self.assertIn("Total mass (kg): 1.9825e+30", text)
+        for label in ("0%", "25%", "50%", "75%", "90%"):
+            self.assertRegex(text, rf"(?m)^\s*{label}\s")
 
     def test_version_command_from_module_directory(self):
         completed = subprocess.run(
