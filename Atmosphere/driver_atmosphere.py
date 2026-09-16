@@ -6,6 +6,7 @@ in altitude, hydrostatic equilibrium, ideal gas law, and temperature.
 """
 
 from dataclasses import dataclass
+from bisect import bisect_left
 import math
 from numbers import Real
 from typing import List, Literal
@@ -60,6 +61,15 @@ class CurveData:
     x_label: str
     y_label: str
     title: str
+
+
+@dataclass(frozen=True)
+class CheckpointData:
+    """Pressure diagnostics at one supplied temperature-profile checkpoint."""
+    altitude: float
+    pressure: float | None
+    pressure_over_temperature: float | None
+    temperature: float
 
 
 class AtmosphereModel:
@@ -217,3 +227,64 @@ def extract_output(result: AtmosphereResult) -> CurveData:
         y_label=f"{result.output_type} ({unit})",
         title=f"{result.planet_name} atmosphere: {result.output_type}",
     )
+
+
+def extract_checkpoints(
+    result: AtmosphereResult,
+    h_points: List[float],
+    T_points: List[float],
+) -> List[CheckpointData]:
+    """Interpolate pressure at every supplied temperature checkpoint.
+
+    The checkpoint temperatures are the defining profile values themselves.
+    Pressure is linearly interpolated between adjacent integration samples.
+    A checkpoint outside the stored positive-pressure domain remains in the
+    returned table with unavailable pressure diagnostics.
+    """
+    TemperatureProfile(h=h_points, T=T_points).validate()
+    arrays = (
+        result.altitudes,
+        result.pressures,
+        result.temperatures,
+        result.densities,
+    )
+    if not result.altitudes or any(len(values) != len(result.altitudes) for values in arrays):
+        raise ValueError("AtmosphereResult arrays must be nonempty and co-indexed.")
+    if any(
+        result.altitudes[index + 1] <= result.altitudes[index]
+        for index in range(len(result.altitudes) - 1)
+    ):
+        raise ValueError("AtmosphereResult altitudes must be strictly increasing.")
+
+    checkpoints = []
+    first_altitude = result.altitudes[0]
+    last_altitude = result.altitudes[-1]
+    for altitude, temperature in zip(h_points, T_points):
+        if altitude < first_altitude or altitude > last_altitude:
+            checkpoints.append(
+                CheckpointData(altitude, None, None, temperature)
+            )
+            continue
+
+        upper = bisect_left(result.altitudes, altitude)
+        if upper < len(result.altitudes) and result.altitudes[upper] == altitude:
+            pressure = result.pressures[upper]
+        else:
+            lower = upper - 1
+            fraction = (
+                (altitude - result.altitudes[lower])
+                / (result.altitudes[upper] - result.altitudes[lower])
+            )
+            pressure = result.pressures[lower] + fraction * (
+                result.pressures[upper] - result.pressures[lower]
+            )
+
+        checkpoints.append(
+            CheckpointData(
+                altitude=altitude,
+                pressure=pressure,
+                pressure_over_temperature=pressure / temperature,
+                temperature=temperature,
+            )
+        )
+    return checkpoints

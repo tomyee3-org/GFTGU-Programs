@@ -51,11 +51,13 @@ if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 
 import driver_atmosphere as driver  # noqa: E402
+import main as entry_point  # noqa: E402
 import physics_atmosphere as phys  # noqa: E402
 from driver_atmosphere import (  # noqa: E402
     AtmosphereModel,
     AtmosphereParameters,
     AtmosphereResult,
+    extract_checkpoints,
     extract_output,
 )
 from physics_atmosphere import (  # noqa: E402
@@ -93,6 +95,21 @@ def make_params(**overrides):
 
 def closest_index(values, target):
     return min(range(len(values)), key=lambda index: abs(values[index] - target))
+
+
+def find_help_file(module_dir: Path) -> Path:
+    """Find Help in a flattened upload or the packaged documentation folder."""
+    candidates = (
+        module_dir / "Atmosphere.html",
+        module_dir.parent / "07-Atmosphere" / "Atmosphere.html",
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError("Could not find Atmosphere.html beside the program or docs.")
+
+
+HELP_FILE = find_help_file(MODULE_DIR)
 
 
 def exact_piecewise_pressure(p0, g_accel, mu, h_points, T_points, target):
@@ -679,7 +696,103 @@ class OutputExtractionTests(unittest.TestCase):
             extract_output(self.result)
 
 
+class CheckpointExtractionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.result = AtmosphereModel(make_params()).run()
+
+    def test_default_profile_returns_every_checkpoint(self):
+        rows = extract_checkpoints(self.result, DEFAULT_H, DEFAULT_T)
+        self.assertEqual(len(rows), len(DEFAULT_H))
+        self.assertEqual([row.altitude for row in rows], DEFAULT_H)
+        self.assertEqual([row.temperature for row in rows], DEFAULT_T)
+        self.assertTrue(all(row.pressure is not None for row in rows))
+        self.assertTrue(all(row.pressure_over_temperature is not None for row in rows))
+
+    def test_surface_checkpoint_uses_exact_initial_pressure(self):
+        row = extract_checkpoints(self.result, DEFAULT_H, DEFAULT_T)[0]
+        self.assertEqual(row.pressure, 1.013e5)
+        self.assertAlmostEqual(
+            row.pressure_over_temperature,
+            row.pressure / row.temperature,
+        )
+
+    def test_pressure_is_linearly_interpolated(self):
+        result = AtmosphereResult(
+            altitudes=[0.0, 10.0],
+            pressures=[100.0, 80.0],
+            densities=[1.0, 0.8],
+            temperatures=[200.0, 300.0],
+            output_type="Pressure",
+            planet_name="Test",
+        )
+        row = extract_checkpoints(result, [5.0, 8.0], [250.0, 280.0])[0]
+        self.assertEqual(row.pressure, 90.0)
+        self.assertEqual(row.pressure_over_temperature, 90.0 / 250.0)
+        self.assertEqual(row.temperature, 250.0)
+
+    def test_out_of_domain_checkpoint_is_retained_as_unavailable(self):
+        result = AtmosphereResult(
+            altitudes=[0.0, 10.0],
+            pressures=[100.0, 80.0],
+            densities=[1.0, 0.8],
+            temperatures=[200.0, 190.0],
+            output_type="Pressure",
+            planet_name="Test",
+        )
+        rows = extract_checkpoints(result, [-5.0, 20.0], [220.0, 180.0])
+        for row in rows:
+            self.assertIsNone(row.pressure)
+            self.assertIsNone(row.pressure_over_temperature)
+
+    def test_malformed_result_arrays_are_rejected(self):
+        result = AtmosphereResult(
+            altitudes=[0.0, 10.0],
+            pressures=[100.0],
+            densities=[1.0, 0.8],
+            temperatures=[200.0, 190.0],
+            output_type="Pressure",
+            planet_name="Test",
+        )
+        with self.assertRaisesRegex(ValueError, "co-indexed"):
+            extract_checkpoints(result, [0.0, 10.0], [200.0, 190.0])
+
+
 class CommandLineHelpAndPlotTests(unittest.TestCase):
+    def test_command_line_defaults_cover_all_model_inputs(self):
+        args = entry_point.parse_args([])
+        self.assertEqual(args.planet_name, "Earth")
+        self.assertEqual(args.g_accel, 9.81)
+        self.assertEqual(args.mu, 28.97)
+        self.assertEqual(args.p0, 1.013e5)
+        self.assertEqual(args.h_points, list(entry_point.DEFAULT_H_POINTS))
+        self.assertEqual(args.T_points, list(entry_point.DEFAULT_T_POINTS))
+        self.assertEqual(args.output_type, "pressure")
+
+    def test_command_line_accepts_every_custom_model_input(self):
+        args = entry_point.parse_args(
+            [
+                "--planet_name", "Mars",
+                "--g_accel", "3.71",
+                "--mu", "44",
+                "--p0", "610",
+                "--h_points", "0,10000,20000",
+                "--T_points", "210,180,160",
+                "--output_type", "density",
+            ]
+        )
+        self.assertEqual(args.planet_name, "Mars")
+        self.assertEqual(args.g_accel, 3.71)
+        self.assertEqual(args.mu, 44.0)
+        self.assertEqual(args.p0, 610.0)
+        self.assertEqual(args.h_points, [0.0, 10_000.0, 20_000.0])
+        self.assertEqual(args.T_points, [210.0, 180.0, 160.0])
+        self.assertEqual(args.output_type, "density")
+
+    def test_command_line_rejects_capitalized_selector(self):
+        with self.assertRaises(SystemExit):
+            entry_point.parse_args(["--output_type", "Pressure"])
+
     def test_version_command_matches_runtime_metadata(self):
         completed = subprocess.run(
             [sys.executable, str(MODULE_DIR / "main.py"), "--version"],
@@ -710,11 +823,17 @@ class CommandLineHelpAndPlotTests(unittest.TestCase):
             f"Atmosphere {phys.MODEL_VERSION} (build {phys.BUILD_ID})",
             completed.stdout,
         )
+        self.assertIn("Atmospheric checkpoints", completed.stdout)
+        self.assertIn("pressure (Pa)", completed.stdout)
+        self.assertIn("p/T (Pa/K)", completed.stdout)
+        self.assertIn("temperature (K)", completed.stdout)
+        for altitude in entry_point.DEFAULT_H_POINTS:
+            self.assertIn(entry_point._format_altitude(altitude), completed.stdout)
 
     def test_help_version_build_matches_runtime_and_html_parses(self):
         from html.parser import HTMLParser
 
-        html = (MODULE_DIR / "Atmosphere.html").read_text(encoding="utf-8")
+        html = HELP_FILE.read_text(encoding="utf-8")
         parser = HTMLParser()
         parser.feed(html)
         version_block = re.search(
@@ -727,6 +846,21 @@ class CommandLineHelpAndPlotTests(unittest.TestCase):
             visible,
             f"Version {phys.MODEL_VERSION} Build {phys.BUILD_ID}",
         )
+
+    def test_help_documents_every_command_line_parameter(self):
+        html = HELP_FILE.read_text(encoding="utf-8")
+        for option in (
+            "--planet_name", "--g_accel", "--mu", "--p0", "--h_points",
+            "--T_points", "--output_type", "--version",
+        ):
+            with self.subTest(option=option):
+                self.assertIn(option, html)
+
+    def test_help_documents_checkpoint_report(self):
+        html = HELP_FILE.read_text(encoding="utf-8")
+        for text in ("pressure", "p/T", "temperature", "checkpoint"):
+            with self.subTest(text=text):
+                self.assertIn(text, html)
 
     def test_plotter_uses_curve_labels_and_calls_show(self):
         import matplotlib
