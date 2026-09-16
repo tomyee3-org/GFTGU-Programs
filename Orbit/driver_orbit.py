@@ -60,6 +60,7 @@ class OrbitResult:
     accepted_steps: int
     final_time: float
     revolutions_completed: float
+    orbital_elements: phys.KeplerianElements
 
     max_fractional_energy_drift: float | None
     max_absolute_specific_energy_drift: float
@@ -249,6 +250,7 @@ def run_orbit(
         raise ValueError("The initial speed is outside floating-point range.")
     energy0 = specific_energy(x, y, vx, vy, k)
     h0 = specific_angular_momentum(x, y, vx, vy)
+    elements = phys.keplerian_elements(x, y, vx, vy, k)
 
     # Scale-relative numerical guard only, not a physical stellar radius.  The
     # ulp term keeps the threshold representable without imposing an SI length
@@ -594,6 +596,7 @@ def run_orbit(
         accepted_steps=accepted_steps,
         final_time=t,
         revolutions_completed=revolutions,
+        orbital_elements=elements,
         max_fractional_energy_drift=max_energy_drift,
         max_absolute_specific_energy_drift=max_absolute_energy_drift,
         max_fractional_angular_momentum_drift=max_h_drift,

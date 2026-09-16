@@ -19,11 +19,12 @@ from __future__ import annotations
 
 import math
 from numbers import Real
+from typing import NamedTuple
 
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.3.1"
+MODEL_VERSION = "1.4.0"
 BUILD_ID_COVERS = (
     "physics_orbit.py",
     "driver_orbit.py",
@@ -62,6 +63,22 @@ BUILD_ID = _compute_build_id()
 
 # IAU 2015 nominal solar mass parameter (m^3 s^-2).
 GM_SUN = 1.3271244e20
+
+
+class KeplerianElements(NamedTuple):
+    """Planar osculating elements derived from one position/velocity state."""
+
+    classification: str
+    specific_energy: float
+    specific_angular_momentum: float
+    eccentricity: float
+    semimajor_axis: float | None
+    semilatus_rectum: float
+    periapsis_radius: float
+    apoapsis_radius: float | None
+    orbital_period: float | None
+    periapsis_longitude_degrees: float | None
+    initial_true_anomaly_degrees: float | None
 
 
 def _require_finite_real(name: str, value: float) -> None:
@@ -149,3 +166,106 @@ def specific_angular_momentum(
     if not math.isfinite(angular_momentum):
         raise ValueError("Specific angular momentum is not representable as a finite number.")
     return angular_momentum
+
+
+def keplerian_elements(
+    x: float,
+    y: float,
+    vx: float,
+    vy: float,
+    mu: float,
+) -> KeplerianElements:
+    """Return meaningful planar Keplerian elements for an initial state.
+
+    Inclination and longitude of the ascending node are not represented by
+    this two-dimensional model.  For a circular orbit, periapsis direction
+    and true anomaly are undefined and are returned as ``None``.
+    """
+    energy = specific_energy(x, y, vx, vy, mu)
+    angular_momentum = specific_angular_momentum(x, y, vx, vy)
+    radius = math.hypot(x, y)
+    speed = math.hypot(vx, vy)
+    speed_squared = speed * speed
+    radial_velocity_product = x * vx + y * vy
+
+    eccentricity_x = (
+        (speed_squared - mu / radius) * x
+        - radial_velocity_product * vx
+    ) / mu
+    eccentricity_y = (
+        (speed_squared - mu / radius) * y
+        - radial_velocity_product * vy
+    ) / mu
+    eccentricity = math.hypot(eccentricity_x, eccentricity_y)
+    semilatus_rectum = angular_momentum * (angular_momentum / mu)
+
+    derived = (
+        speed_squared,
+        radial_velocity_product,
+        eccentricity_x,
+        eccentricity_y,
+        eccentricity,
+        semilatus_rectum,
+    )
+    if not all(math.isfinite(value) for value in derived):
+        raise ValueError("The Keplerian elements are outside floating-point range.")
+
+    energy_scale = max(0.5 * speed_squared, mu / radius)
+    energy_tolerance = 1.0e-12 * energy_scale
+    if energy < -energy_tolerance:
+        classification = "elliptic"
+        semimajor_axis = -mu / (2.0 * energy)
+        apoapsis_radius = semimajor_axis * (1.0 + eccentricity)
+        orbital_period = 2.0 * math.pi * math.sqrt(
+            semimajor_axis * semimajor_axis * semimajor_axis / mu
+        )
+    elif energy > energy_tolerance:
+        classification = "hyperbolic"
+        semimajor_axis = -mu / (2.0 * energy)
+        apoapsis_radius = None
+        orbital_period = None
+    else:
+        classification = "parabolic"
+        semimajor_axis = None
+        apoapsis_radius = None
+        orbital_period = None
+
+    periapsis_radius = semilatus_rectum / (1.0 + eccentricity)
+    if eccentricity <= 1.0e-12:
+        periapsis_longitude = None
+        initial_true_anomaly = None
+    else:
+        periapsis_longitude = math.degrees(
+            math.atan2(eccentricity_y, eccentricity_x)
+        ) % 360.0
+        dot_product = eccentricity_x * x + eccentricity_y * y
+        cross_product = eccentricity_x * y - eccentricity_y * x
+        initial_true_anomaly = math.degrees(
+            math.atan2(cross_product, dot_product)
+        ) % 360.0
+
+    final_values = (
+        semimajor_axis,
+        semilatus_rectum,
+        periapsis_radius,
+        apoapsis_radius,
+        orbital_period,
+        periapsis_longitude,
+        initial_true_anomaly,
+    )
+    if not all(value is None or math.isfinite(value) for value in final_values):
+        raise ValueError("The Keplerian elements are outside floating-point range.")
+
+    return KeplerianElements(
+        classification=classification,
+        specific_energy=energy,
+        specific_angular_momentum=angular_momentum,
+        eccentricity=eccentricity,
+        semimajor_axis=semimajor_axis,
+        semilatus_rectum=semilatus_rectum,
+        periapsis_radius=periapsis_radius,
+        apoapsis_radius=apoapsis_radius,
+        orbital_period=orbital_period,
+        periapsis_longitude_degrees=periapsis_longitude,
+        initial_true_anomaly_degrees=initial_true_anomaly,
+    )

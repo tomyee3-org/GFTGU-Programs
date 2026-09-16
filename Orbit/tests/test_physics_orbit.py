@@ -59,7 +59,12 @@ import physics_orbit as physics  # noqa: E402
 import plot_orbit as plotting  # noqa: E402
 
 
-HELP_PATH = MODULE_DIR / "Orbit.html"
+DOCUMENTATION_DIR = MODULE_DIR.parent / "04-Orbit"
+HELP_PATH = DOCUMENTATION_DIR / "Orbit.html"
+RELEASE_NOTES_PATH = DOCUMENTATION_DIR / "Orbit-ReleaseNotes.html"
+SAMPLE_OUTPUTS_PATH = (
+    DOCUMENTATION_DIR / "SampleOutputs" / "Orbit-SampleOutputs_Guide.html"
+)
 
 
 def expected_build_id(directory: Path = MODULE_DIR) -> str:
@@ -290,6 +295,45 @@ class PhysicsFunctionTests(unittest.TestCase):
                 with self.subTest(index=index, bad=bad), self.assertRaises(ValueError):
                     physics.specific_angular_momentum(*arguments)
 
+    def test_keplerian_elements_for_circular_elliptic_parabolic_and_hyperbolic_states(self) -> None:
+        circular = physics.keplerian_elements(1.0, 0.0, 0.0, 1.0, 1.0)
+        self.assertEqual(circular.classification, "elliptic")
+        self.assertAlmostEqual(circular.eccentricity, 0.0, places=14)
+        self.assertAlmostEqual(circular.semimajor_axis, 1.0)
+        self.assertAlmostEqual(circular.periapsis_radius, 1.0)
+        self.assertAlmostEqual(circular.apoapsis_radius, 1.0)
+        self.assertAlmostEqual(circular.orbital_period, 2.0 * math.pi)
+        self.assertIsNone(circular.periapsis_longitude_degrees)
+        self.assertIsNone(circular.initial_true_anomaly_degrees)
+
+        elliptic = physics.keplerian_elements(1.0, 0.0, 0.0, 0.8, 1.0)
+        self.assertEqual(elliptic.classification, "elliptic")
+        self.assertAlmostEqual(elliptic.eccentricity, 0.36)
+        self.assertAlmostEqual(elliptic.apoapsis_radius, 1.0)
+        self.assertAlmostEqual(elliptic.periapsis_longitude_degrees, 180.0)
+        self.assertAlmostEqual(elliptic.initial_true_anomaly_degrees, 180.0)
+
+        parabolic = physics.keplerian_elements(
+            1.0, 0.0, 0.0, math.sqrt(2.0), 1.0
+        )
+        self.assertEqual(parabolic.classification, "parabolic")
+        self.assertAlmostEqual(parabolic.eccentricity, 1.0)
+        self.assertIsNone(parabolic.semimajor_axis)
+        self.assertIsNone(parabolic.apoapsis_radius)
+        self.assertIsNone(parabolic.orbital_period)
+
+        hyperbolic = physics.keplerian_elements(1.0, 0.0, 0.0, 2.0, 1.0)
+        self.assertEqual(hyperbolic.classification, "hyperbolic")
+        self.assertGreater(hyperbolic.eccentricity, 1.0)
+        self.assertLess(hyperbolic.semimajor_axis, 0.0)
+        self.assertIsNone(hyperbolic.apoapsis_radius)
+
+    def test_keplerian_orientation_rotates_with_initial_state(self) -> None:
+        elements = physics.keplerian_elements(0.0, 1.0, -1.2, 0.0, 1.0)
+        self.assertEqual(elements.classification, "elliptic")
+        self.assertAlmostEqual(elements.periapsis_longitude_degrees, 90.0)
+        self.assertAlmostEqual(elements.initial_true_anomaly_degrees, 0.0)
+
 
 class DriverValidationTests(unittest.TestCase):
     BASE = dict(
@@ -366,18 +410,13 @@ class DriverHelperAndFailureTests(unittest.TestCase):
 
     def test_main_presents_value_and_runtime_errors_without_tracebacks(self) -> None:
         for exception in (ValueError("bad input"), RuntimeError("no convergence")):
-            output = io.StringIO()
             with self.subTest(exception=type(exception).__name__):
                 with (
                     mock.patch.object(orbit_main, "run_orbit", side_effect=exception),
                     mock.patch.object(sys, "argv", ["main.py"]),
-                    contextlib.redirect_stdout(output),
                 ):
-                    orbit_main.main()
-                self.assertIn("Orbit could not run:", output.getvalue())
-                self.assertNotIn("Traceback", output.getvalue())
-                output.seek(0)
-                output.truncate(0)
+                    with self.assertRaisesRegex(SystemExit, f"Orbit: {exception}"):
+                        orbit_main.main()
 
     def test_main_displays_safeguard_and_event_refinement_diagnostics(self) -> None:
         result = circular_result(maxOrbits=0.1)
@@ -398,6 +437,123 @@ class DriverHelperAndFailureTests(unittest.TestCase):
             f"endpoint refinement trials: {result.event_refinement_trials}",
             summary,
         )
+
+
+class CommandLineAndSummaryTests(unittest.TestCase):
+    def test_command_line_defaults_match_main_and_driver_configuration(self) -> None:
+        args = orbit_main.parse_args([])
+        self.assertEqual(args.xInit, 4.6e10)
+        self.assertEqual(args.yInit, 0.0)
+        self.assertEqual(args.vxInit, 0.0)
+        self.assertEqual(args.vyInit, 58_980.0)
+        self.assertEqual(args.k, physics.GM_SUN)
+        self.assertEqual(args.dt0, 1.0e4)
+        self.assertEqual(args.maxSteps, 20_000)
+        self.assertEqual(args.eps1, 0.05)
+        self.assertEqual(args.eps2, 1.0e-4)
+        self.assertEqual(args.maxOrbits, 1.0)
+        self.assertEqual(args.output, "orbit")
+
+    def test_all_command_line_values_are_forwarded(self) -> None:
+        result = circular_result(maxOrbits=0.1)
+        argv = [
+            "main.py", "--xInit", "2", "--yInit", "3",
+            "--vxInit", "4", "--vyInit", "5", "--k", "6",
+            "--dt0", "0.2", "--maxSteps", "7", "--eps1", "0.3",
+            "--eps2", "0.004", "--maxOrbits", "0.5",
+            "--output", "velocity",
+        ]
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(orbit_main, "run_orbit", return_value=result) as run,
+            mock.patch.object(orbit_main, "plot_orbit") as plot,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            orbit_main.main()
+        run.assert_called_once_with(
+            xInit=2.0, yInit=3.0, vxInit=4.0, vyInit=5.0, k=6.0,
+            dt0=0.2, maxSteps=7, eps1=0.3, eps2=0.004, maxOrbits=0.5,
+        )
+        plot.assert_called_once_with(result, output="velocity")
+
+    def test_help_names_every_input_and_describes_output_choices(self) -> None:
+        completed = subprocess.run(
+            [sys.executable, str(MODULE_DIR / "main.py"), "--help"],
+            cwd=MODULE_DIR,
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        for option in (
+            "--xInit", "--yInit", "--vxInit", "--vyInit", "--k",
+            "--dt0", "--maxSteps", "--eps1", "--eps2", "--maxOrbits",
+            "--output",
+        ):
+            with self.subTest(option=option):
+                self.assertIn(option, completed.stdout)
+        for choice in orbit_main.OUTPUT_CHOICES:
+            with self.subTest(choice=choice):
+                self.assertIn(choice, completed.stdout)
+
+    def test_five_significant_digit_formatter(self) -> None:
+        expected = {
+            0.0: "0.0000",
+            1.0: "1.0000",
+            12.3456: "12.346",
+            0.000123456: "0.00012346",
+            12345.6: "12346",
+            123456.0: "1.2346e+05",
+        }
+        for value, text in expected.items():
+            with self.subTest(value=value):
+                self.assertEqual(orbit_main._five_significant(value), text)
+
+    def test_default_summary_contains_requested_diagnostics_and_elements(self) -> None:
+        result = driver.run_orbit(
+            xInit=4.6e10, yInit=0.0, vxInit=0.0, vyInit=58_980.0,
+            k=physics.GM_SUN, dt0=1.0e4, maxSteps=20_000,
+            eps1=0.05, eps2=1.0e-4, maxOrbits=1.0,
+        )
+        summary = "\n".join(orbit_main._summary_lines(result))
+        for text in (
+            "termination", "accepted steps", "elapsed simulated time",
+            "azimuthal revolutions", "angular-step rejections",
+            "endpoint refinement trials", "max fractional energy drift",
+            "max absolute specific-energy drift",
+            "max fractional angular-momentum drift",
+            "max absolute specific-angular-momentum drift",
+            "closure radius residual", "closure velocity residual",
+            "conic classification       : elliptic", "eccentricity",
+            "semimajor axis", "semilatus rectum", "periapsis radius",
+            "apoapsis radius", "Keplerian period", "periapsis longitude",
+            "initial true anomaly",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(text, summary)
+
+    def test_hyperbolic_step_limit_summary_reports_final_radius_and_speed(self) -> None:
+        result = driver.run_orbit(
+            xInit=4.6e10, yInit=0.0, vxInit=0.0, vyInit=85_000.0,
+            k=physics.GM_SUN, dt0=1.0e4, maxSteps=30,
+            eps1=0.05, eps2=1.0e-4, maxOrbits=1.0,
+        )
+        summary = "\n".join(orbit_main._summary_lines(result))
+        self.assertEqual(result.termination_reason, "max_steps")
+        self.assertIn("conic classification       : hyperbolic", summary)
+        self.assertIn("apoapsis radius            : n/a (unbound)", summary)
+        self.assertIn("final radius", summary)
+        self.assertIn("final speed", summary)
+
+    def test_hyperbolic_revolution_limit_summary_reports_final_radius_and_speed(self) -> None:
+        result = driver.run_orbit(
+            xInit=4.6e10, yInit=0.0, vxInit=0.0, vyInit=85_000.0,
+            k=physics.GM_SUN, dt0=1.0e4, maxSteps=600,
+            eps1=0.05, eps2=1.0e-4, maxOrbits=0.05,
+        )
+        summary = "\n".join(orbit_main._summary_lines(result))
+        self.assertEqual(result.termination_reason, "max_orbits")
+        self.assertIn("final radius", summary)
+        self.assertIn("final speed", summary)
 
 
 class OrbitIntegrationTests(unittest.TestCase):
@@ -611,11 +767,19 @@ class HelpFileTests(unittest.TestCase):
 
     def test_help_matches_python_parameters_and_outputs(self) -> None:
         for text in (
-            "xInit",
-            "vyInit",
+            "--xInit",
+            "--yInit",
+            "--vxInit",
+            "--vyInit",
+            "--k",
+            "--dt0",
+            "--maxSteps",
+            "--eps1",
+            "--eps2",
+            "--maxOrbits",
+            "--output",
             "58980.0",
             "1.3271244e20",
-            "maxOrbits",
             '"orbit"',
             '"velocity"',
             '"position_time"',
@@ -624,6 +788,35 @@ class HelpFileTests(unittest.TestCase):
         ):
             with self.subTest(text=text):
                 self.assertIn(text, self.html)
+
+    def test_help_documents_planar_keplerian_elements_and_precision(self) -> None:
+        normalized_html = " ".join(self.html.split())
+        for text in (
+            "Planar Keplerian Elements",
+            "eccentricity",
+            "semimajor axis",
+            "semilatus rectum",
+            "periapsis radius",
+            "apoapsis radius",
+            "longitude of periapsis",
+            "initial true anomaly",
+            "inclination and longitude of the ascending node",
+            "five significant digits",
+            "final radius and speed",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(text, normalized_html)
+
+    def test_parameter_only_exercises_use_command_line_examples(self) -> None:
+        for number in range(1, 14):
+            if number == 11:
+                continue
+            marker = f'<div class="ec-num">EXP-{number} ·'
+            fragment = self.html.split(marker, 1)[1].split(
+                '<div class="exp-card">', 1
+            )[0]
+            with self.subTest(experiment=number):
+                self.assertIn("python main.py", fragment)
 
     def test_help_states_gm_specific_energy_and_fixed_center_limitations(self) -> None:
         self.assertIn("gravitational parameter", self.html)
@@ -678,6 +871,51 @@ class HelpFileTests(unittest.TestCase):
         self.assertIn("result.xs", self.html)
         self.assertIn("result.ys", self.html)
         self.assertIn("result.ts", self.html)
+
+
+class DocumentationSetTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.release_notes = RELEASE_NOTES_PATH.read_text(encoding="utf-8")
+        cls.samples = SAMPLE_OUTPUTS_PATH.read_text(encoding="utf-8")
+
+    def test_documentation_files_exist(self) -> None:
+        self.assertTrue(RELEASE_NOTES_PATH.is_file())
+        self.assertTrue(SAMPLE_OUTPUTS_PATH.is_file())
+
+    def test_release_notes_match_current_version_and_build(self) -> None:
+        self.assertIn(f"Version {physics.MODEL_VERSION}", self.release_notes)
+        self.assertIn(f"<b>Build:</b> {physics.BUILD_ID}", self.release_notes)
+        self.assertIn("command-line", self.release_notes)
+        self.assertIn("five significant digits", self.release_notes)
+        self.assertIn("Keplerian Elements", self.release_notes)
+
+    def test_sample_outputs_match_current_version_and_build(self) -> None:
+        self.assertIn(f"Version {physics.MODEL_VERSION}", self.samples)
+        self.assertIn(f"Build {physics.BUILD_ID}", self.samples)
+        self.assertNotIn("Version 1.3.1", self.samples)
+        self.assertNotIn("Build 93380f960f8e", self.samples)
+
+    def test_sample_outputs_demonstrate_cli_and_requested_summary(self) -> None:
+        for text in (
+            "python main.py",
+            "--vyInit 85000",
+            "--maxSteps 600",
+            "--output velocity",
+            "--output energy",
+            "Keplerian elements at initial state",
+            "conic classification",
+            "eccentricity",
+            "semimajor axis",
+            "semilatus rectum",
+            "periapsis radius",
+            "apoapsis radius",
+            "Keplerian period",
+            "final radius",
+            "final speed",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(text, self.samples)
 
 
 if __name__ == "__main__":
