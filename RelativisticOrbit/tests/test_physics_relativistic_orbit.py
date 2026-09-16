@@ -58,6 +58,8 @@ def find_module_dir(start: str | os.PathLike[str]) -> Path:
 
 MODULE_DIR = find_module_dir(Path(__file__).resolve().parent)
 HELP_FILE = MODULE_DIR / HELP_FILENAME
+if not HELP_FILE.is_file():
+    HELP_FILE = MODULE_DIR.parent / "21-RelativisticOrbit" / HELP_FILENAME
 if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 
@@ -754,6 +756,73 @@ class TestMainAndPlotIntegration(unittest.TestCase):
             plot_relativistic_orbit(newtonian, show_isco=True)
         self.assertEqual(len(plt.gcf().axes[0].patches), 0)
         plt.close("all")
+
+
+class TestCommandLineOptions(unittest.TestCase):
+    def test_all_driver_inputs_and_plot_switches_have_defaults(self):
+        main_module = importlib.import_module("main")
+        options = main_module.parse_args([])
+        for field in fields(RelativisticOrbitParams):
+            self.assertEqual(getattr(options, field.name),
+                             getattr(main_module.params, field.name))
+        self.assertEqual(options.show_isco, main_module.show_isco)
+        self.assertEqual(options.show_periapsides, main_module.show_periapsides)
+
+    def test_selector_flags_signed_velocity_and_numerical_controls(self):
+        main_module = importlib.import_module("main")
+        options = main_module.parse_args([
+            "--model", "newtonian", "--u_init", "-2.5e8",
+            "--x_init", "10000", "--dt", "1e-7", "--max_steps", "99",
+            "--max_orbits", "3", "--eps1", "0.01", "--eps2", "1e-6",
+            "--no-show_isco", "--show_periapsides",
+        ])
+        self.assertEqual(options.u_init, -2.5e8)
+        self.assertEqual(options.model, "newtonian")
+        self.assertEqual(options.max_steps, 99)
+        self.assertFalse(options.show_isco)
+        self.assertTrue(options.show_periapsides)
+
+    def test_invalid_cli_values_report_errors(self):
+        main_module = importlib.import_module("main")
+        for argv in (["--model", "unknown"], ["--x_init", "1000"],
+                     ["--dt", "0"], ["--eps1", "0.01", "--eps2", "0.02"],
+                     ["--max_orbits", "0"]):
+            with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    main_module.parse_args(argv)
+
+    def test_options_are_forwarded_to_driver_and_plot(self):
+        main_module = importlib.import_module("main")
+        real_solver = main_module.integrate_relativistic_orbit
+        with mock.patch.object(main_module, "integrate_relativistic_orbit",
+                               wraps=real_solver) as solve, \
+             mock.patch.object(main_module, "plot_relativistic_orbit") as plot, \
+             contextlib.redirect_stdout(io.StringIO()):
+            result = main_module.main([
+                "--model", "newtonian", "--u_init", "-1e8",
+                "--max_steps", "2", "--no-show_isco", "--show_periapsides",
+            ])
+        self.assertEqual(result.final_step, 2)
+        self.assertEqual(solve.call_args.args[0].u_init, -1e8)
+        self.assertEqual(solve.call_args.args[0].model, "newtonian")
+        plot.assert_called_once_with(result, show_isco=False,
+                                     show_periapsides=True)
+
+    def test_documented_inside_isco_example_returns_outward(self):
+        main_module = importlib.import_module("main")
+        options = main_module.parse_args([
+            "--x_init", "20000", "--u_init", "8e7",
+            "--max_steps", "8000", "--show_periapsides",
+        ])
+        example = RelativisticOrbitParams(**{
+            field.name: getattr(options, field.name)
+            for field in fields(RelativisticOrbitParams)
+        })
+        result = integrate_relativistic_orbit(example)
+        self.assertNotEqual(result.termination_reason, "horizon")
+        self.assertTrue(result.periapsis_radius)
+        self.assertLess(min(result.periapsis_radius), physics.ISCO_RADIUS)
+        self.assertGreater(min(result.periapsis_radius), physics.HORIZON_RADIUS)
 
 
 if __name__ == "__main__":
