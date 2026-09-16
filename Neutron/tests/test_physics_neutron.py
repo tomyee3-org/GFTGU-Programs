@@ -177,7 +177,10 @@ def _independent_build_id() -> str:
 
 
 def _help_text() -> str:
-    return (MODULE_DIR / HELP_FILENAME).read_text(encoding="utf-8")
+    path = MODULE_DIR / HELP_FILENAME
+    if not path.is_file():
+        path = MODULE_DIR.parent / "20-Neutron" / HELP_FILENAME
+    return path.read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------

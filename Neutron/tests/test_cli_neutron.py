@@ -1,0 +1,90 @@
+"""Command-line regression checks; runnable with standard-library unittest."""
+import contextlib
+import io
+from pathlib import Path
+import subprocess
+import sys
+import unittest
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+import main
+import physics_neutron as physics
+from driver_neutron import compute_neutron_star
+
+
+class CommandLineTests(unittest.TestCase):
+    def test_driver_defaults_are_exposed(self):
+        args = main.parse_args([])
+        for name, expected in main.DEFAULTS.items():
+            self.assertEqual(getattr(args, name), expected)
+        self.assertEqual(args.steps_per_scale, 400)
+        self.assertEqual(args.max_steps, 200_000)
+
+    def test_selectors_and_optional_log_axis(self):
+        args = main.parse_args(['--output_type', ' DENSITY ', '--log_y'])
+        self.assertEqual(args.output_type, 'density')
+        self.assertTrue(args.log_y)
+        self.assertFalse(main.parse_args(['--no-log_y']).log_y)
+        self.assertEqual(main.parse_args(['--output_type', 'mass']).output_type, 'mass')
+
+    def test_numeric_inputs_and_limits(self):
+        args = main.parse_args(['--gamma', '1.8', '--pC', '1e34', '--K', '100',
+                                '--steps_per_scale', '800', '--max_steps', '10000'])
+        self.assertEqual((args.gamma,args.pC,args.K,args.steps_per_scale,args.max_steps),
+                         (1.8,1e34,100.0,800,10000))
+        for invalid in (['--gamma', '1'], ['--K', 'nan'],
+                        ['--steps_per_scale', '49'], ['--max_steps', '99'],
+                        ['--output_type', 'temperature']):
+            with self.subTest(invalid=invalid), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    main.parse_args(invalid)
+
+    def test_arguments_reach_solver_and_plotter(self):
+        with mock.patch.object(main, 'compute_neutron_star', return_value={
+            'model_version': physics.MODEL_VERSION, 'build_id': physics.BUILD_ID,
+        }) as solve, mock.patch.object(main,'print_model_summary'), \
+             mock.patch.object(main,'plot_neutron') as plot, \
+             contextlib.redirect_stdout(io.StringIO()):
+            main.main(['--gamma','1.8','--pC','1e34','--K','20',
+                       '--steps_per_scale','800','--max_steps','1000',
+                       '--output_type','density','--log_y'])
+        solve.assert_called_once_with(1.8,1e34,20.,steps_per_scale=800,max_steps=1000)
+        plot.assert_called_once_with(solve.return_value,'density',log_y=True)
+
+    def test_version_and_cli_smoke(self):
+        result = subprocess.run([sys.executable,'main.py','--version'],cwd=ROOT,
+                                capture_output=True,text=True)
+        self.assertEqual(result.stdout.strip(),
+                         f'Neutron {physics.MODEL_VERSION} (build {physics.BUILD_ID})')
+        import os
+        env={**os.environ,'MPLBACKEND':'Agg'}
+        result = subprocess.run([sys.executable,'main.py','--output_type','mass',
+                                 '--steps_per_scale','400'],cwd=ROOT,env=env,
+                                capture_output=True,text=True,timeout=60)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('Neutron-star model summary',result.stdout)
+        self.assertIn('total mass',result.stdout)
+
+    def test_docs_build_metadata(self):
+        parent = ROOT.parent/'20-Neutron'
+        for f in (parent/'Neutron.html',parent/'Neutron-ReleaseNotes.html',
+                  parent/'SampleOutputs/Neutron-SampleOutputs_Guide.html'):
+            self.assertIn(physics.BUILD_ID,f.read_text(encoding='utf-8'))
+
+    def test_default_solver_matches_independent_reference_and_low_pressure_case(self):
+        model = compute_neutron_star(1.666667,1.26e35,5.3802e3)
+        # Independent fine-grid reference from the supplied physical tests.
+        self.assertAlmostEqual(model['surface_radius_m'],7802.758706219183,
+                               delta=2.0)
+        self.assertAlmostEqual(model['total_mass_kg'],1.9140826174028036e30,
+                               delta=2e-4*1.9140826174028036e30)
+        low = compute_neutron_star(1.666667,1e27,5.3802e3)
+        self.assertLess(low['total_mass_solar'],.02)
+        self.assertTrue(low['causality_satisfied'])
+
+
+if __name__ == '__main__':
+    unittest.main()
