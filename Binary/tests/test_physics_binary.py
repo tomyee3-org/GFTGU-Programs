@@ -44,10 +44,33 @@ def find_module_dir(start: Path) -> Path:
     )
 
 
+def find_help_file(module_dir: Path) -> Path:
+    """Find Help in a flattened upload or the GFTGU-Documentation tree.
+
+    Documentation folders no longer use chapter-number prefixes, and the
+    Help files live under the sibling ``GFTGU-Documentation`` repository
+    rather than beside the program modules inside ``GFTGU-Programs``.
+    """
+    help_filename = "Binary.html"
+    program_name = "Binary"
+    candidates = [module_dir / help_filename]
+    for ancestor in (module_dir, *module_dir.parents):
+        candidates.append(
+            ancestor / "GFTGU-Documentation" / program_name / help_filename
+        )
+        if ancestor.name != program_name:
+            candidates.append(ancestor / program_name / help_filename)
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(
+        "Could not find Binary.html beside the program or in "
+        "GFTGU-Documentation/Binary/."
+    )
+
+
 MODULE_DIR = find_module_dir(Path(__file__))
-HELP_FILE = MODULE_DIR / "Binary.html"
-if not HELP_FILE.is_file():
-    HELP_FILE = MODULE_DIR.parent / "13-Binary" / "Binary.html"
+HELP_FILE = find_help_file(MODULE_DIR)
 if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 os.environ.setdefault("MPLBACKEND", "Agg")
@@ -1302,7 +1325,7 @@ class TestHelpFile(unittest.TestCase):
         self.assertEqual(match.group(2), physics.BUILD_ID)
 
     def test_release_and_sample_output_metadata_and_commands(self):
-        docs = MODULE_DIR.parent / "13-Binary"
+        docs = HELP_FILE.parent
         for path in (docs / "Binary-ReleaseNotes.html",
                      docs / "SampleOutputs" / "Binary-SampleOutputs_Guide.html"):
             with self.subTest(path=path):

@@ -56,10 +56,32 @@ def find_module_dir(start: str | os.PathLike[str]) -> Path:
     )
 
 
+def find_help_file(module_dir: Path) -> Path:
+    """Find Help in a flattened upload or the GFTGU-Documentation tree.
+
+    Documentation folders no longer use chapter-number prefixes, and the
+    Help files live under the sibling ``GFTGU-Documentation`` repository
+    rather than beside the program modules inside ``GFTGU-Programs``.
+    """
+    program_name = Path(HELP_FILENAME).stem
+    candidates = [module_dir / HELP_FILENAME]
+    for ancestor in (module_dir, *module_dir.parents):
+        candidates.append(
+            ancestor / "GFTGU-Documentation" / program_name / HELP_FILENAME
+        )
+        if ancestor.name != program_name:
+            candidates.append(ancestor / program_name / HELP_FILENAME)
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(
+        f"Could not find {HELP_FILENAME} beside the program or in "
+        f"GFTGU-Documentation/{program_name}/."
+    )
+
+
 MODULE_DIR = find_module_dir(Path(__file__).resolve().parent)
-HELP_FILE = MODULE_DIR / HELP_FILENAME
-if not HELP_FILE.is_file():
-    HELP_FILE = MODULE_DIR.parent / "21-RelativisticOrbit" / HELP_FILENAME
+HELP_FILE = find_help_file(MODULE_DIR)
 if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 

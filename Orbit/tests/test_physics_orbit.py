@@ -59,8 +59,33 @@ import physics_orbit as physics  # noqa: E402
 import plot_orbit as plotting  # noqa: E402
 
 
-DOCUMENTATION_DIR = MODULE_DIR.parent / "04-Orbit"
-HELP_PATH = DOCUMENTATION_DIR / "Orbit.html"
+def find_help_file(module_dir: Path) -> Path:
+    """Find Help in a flattened upload or the GFTGU-Documentation tree.
+
+    Documentation folders no longer use chapter-number prefixes, and the
+    Help files live under the sibling ``GFTGU-Documentation`` repository
+    rather than beside the program modules inside ``GFTGU-Programs``.
+    """
+    help_filename = "Orbit.html"
+    program_name = "Orbit"
+    candidates = [module_dir / help_filename]
+    for ancestor in (module_dir, *module_dir.parents):
+        candidates.append(
+            ancestor / "GFTGU-Documentation" / program_name / help_filename
+        )
+        if ancestor.name != program_name:
+            candidates.append(ancestor / program_name / help_filename)
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(
+        "Could not find Orbit.html beside the program or in "
+        "GFTGU-Documentation/Orbit/."
+    )
+
+
+HELP_PATH = find_help_file(MODULE_DIR)
+DOCUMENTATION_DIR = HELP_PATH.parent
 RELEASE_NOTES_PATH = DOCUMENTATION_DIR / "Orbit-ReleaseNotes.html"
 SAMPLE_OUTPUTS_PATH = (
     DOCUMENTATION_DIR / "SampleOutputs" / "Orbit-SampleOutputs_Guide.html"

@@ -98,15 +98,28 @@ def closest_index(values, target):
 
 
 def find_help_file(module_dir: Path) -> Path:
-    """Find Help in a flattened upload or the packaged documentation folder."""
-    candidates = (
-        module_dir / "Atmosphere.html",
-        module_dir.parent / "07-Atmosphere" / "Atmosphere.html",
-    )
+    """Find Help in a flattened upload or the GFTGU-Documentation tree.
+
+    Documentation folders no longer use chapter-number prefixes, and the
+    Help files live under the sibling ``GFTGU-Documentation`` repository
+    rather than beside the program modules inside ``GFTGU-Programs``.
+    """
+    help_filename = "Atmosphere.html"
+    program_name = "Atmosphere"
+    candidates = [module_dir / help_filename]
+    for ancestor in (module_dir, *module_dir.parents):
+        candidates.append(
+            ancestor / "GFTGU-Documentation" / program_name / help_filename
+        )
+        if ancestor.name != program_name:
+            candidates.append(ancestor / program_name / help_filename)
     for candidate in candidates:
         if candidate.is_file():
             return candidate
-    raise FileNotFoundError("Could not find Atmosphere.html beside the program or docs.")
+    raise FileNotFoundError(
+        "Could not find Atmosphere.html beside the program or in "
+        "GFTGU-Documentation/Atmosphere/."
+    )
 
 
 HELP_FILE = find_help_file(MODULE_DIR)

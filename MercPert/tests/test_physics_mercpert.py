@@ -48,10 +48,32 @@ def find_module_dir(start: Path) -> Path:
     )
 
 
+def find_help_file(module_dir: Path) -> Path:
+    """Find Help in a flattened upload or the GFTGU-Documentation tree.
+
+    Documentation folders no longer use chapter-number prefixes, and the
+    Help files live under the sibling ``GFTGU-Documentation`` repository
+    rather than beside the program modules inside ``GFTGU-Programs``.
+    """
+    program_name = Path(HELP_FILENAME).stem
+    candidates = [module_dir / HELP_FILENAME]
+    for ancestor in (module_dir, *module_dir.parents):
+        candidates.append(
+            ancestor / "GFTGU-Documentation" / program_name / HELP_FILENAME
+        )
+        if ancestor.name != program_name:
+            candidates.append(ancestor / program_name / HELP_FILENAME)
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(
+        f"Could not find {HELP_FILENAME} beside the program or in "
+        f"GFTGU-Documentation/{program_name}/."
+    )
+
+
 MODULE_DIR = find_module_dir(Path(__file__))
-HELP_FILE = MODULE_DIR / HELP_FILENAME
-if not HELP_FILE.is_file():
-    HELP_FILE = MODULE_DIR.parent / "13-MercPert" / HELP_FILENAME
+HELP_FILE = find_help_file(MODULE_DIR)
 if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 
@@ -181,7 +203,7 @@ class MetadataAndCompatibilityTests(unittest.TestCase):
         self.assertEqual(match.group(2), physics.BUILD_ID)
 
     def test_release_and_sample_identify_this_build_and_show_commands(self) -> None:
-        root = MODULE_DIR.parent / "13-MercPert"
+        root = HELP_FILE.parent
         for path in (root / "MercPert-ReleaseNotes.html",
                      root / "SampleOutputs" / "MercPert-SampleOutputs_Guide.html"):
             with self.subTest(path=path):

@@ -105,15 +105,19 @@ class _HelpSemanticParser(HTMLParser):
 
 def parse_help_file() -> _HelpSemanticParser:
     parser = _HelpSemanticParser()
-    candidates = (
-        MODULE_DIR / HELP_FILENAME,
-        MODULE_DIR.parent / "08-Random2" / HELP_FILENAME,
-    )
+    program_name = Path(HELP_FILENAME).stem
+    candidates = [MODULE_DIR / HELP_FILENAME]
+    for ancestor in (MODULE_DIR, *MODULE_DIR.parents):
+        candidates.append(
+            ancestor / "GFTGU-Documentation" / program_name / HELP_FILENAME
+        )
+        if ancestor.name != program_name:
+            candidates.append(ancestor / program_name / HELP_FILENAME)
     help_path = next((path for path in candidates if path.is_file()), None)
     if help_path is None:
         raise FileNotFoundError(
-            "Could not find Random2.html beside the modules or in the sibling "
-            "08-Random2 documentation directory."
+            "Could not find Random2.html beside the modules or in "
+            "GFTGU-Documentation/Random2/."
         )
     parser.feed(help_path.read_text(encoding="utf-8"))
     parser.close()

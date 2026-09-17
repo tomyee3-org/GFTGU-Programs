@@ -61,16 +61,32 @@ import planck2_physics as phys  # noqa: E402
 import planck2_plot as plotter  # noqa: E402
 
 
-HELP_FILE = next(
-    (
-        path for path in (
-            MODULE_DIR / "Planck2.html",
-            MODULE_DIR.parent / "10-Planck2" / "Planck2.html",
+def find_help_file(module_dir: Path) -> Path:
+    """Find Help in a flattened upload or the GFTGU-Documentation tree.
+
+    Documentation folders no longer use chapter-number prefixes, and the
+    Help files live under the sibling ``GFTGU-Documentation`` repository
+    rather than beside the program modules inside ``GFTGU-Programs``.
+    """
+    help_filename = "Planck2.html"
+    program_name = "Planck2"
+    candidates = [module_dir / help_filename]
+    for ancestor in (module_dir, *module_dir.parents):
+        candidates.append(
+            ancestor / "GFTGU-Documentation" / program_name / help_filename
         )
-        if path.is_file()
-    ),
-    MODULE_DIR / "Planck2.html",
-)
+        if ancestor.name != program_name:
+            candidates.append(ancestor / program_name / help_filename)
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(
+        "Could not find Planck2.html beside the program or in "
+        "GFTGU-Documentation/Planck2/."
+    )
+
+
+HELP_FILE = find_help_file(MODULE_DIR)
 
 
 def relative_error(actual, expected):
@@ -1122,7 +1138,7 @@ class TestHelpFile(unittest.TestCase):
 
     def test_related_program_links_are_module_relative_html_links(self):
         related = [href for section, href in self.parser.hrefs if section == "related"]
-        self.assertEqual(related, ["../08-Star/Star.html", "../08-Random2/Random2.html"])
+        self.assertEqual(related, ["../Star/Star.html", "../Random2/Random2.html"])
 
     def test_student_content_contains_no_ai_or_review_history(self):
         student_text = self.text.split('<section id="license">', 1)[0]

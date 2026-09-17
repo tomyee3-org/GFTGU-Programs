@@ -61,8 +61,33 @@ import physics_earthorbit as physics
 import plot_earthorbit as plotter
 
 
-DOCUMENTATION_DIR = MODULE_DIR.parent / "04-EarthOrbit"
-HELP_FILE = DOCUMENTATION_DIR / "EarthOrbit.html"
+def find_help_file(module_dir):
+    """Find Help in a flattened upload or the GFTGU-Documentation tree.
+
+    Documentation folders no longer use chapter-number prefixes, and the
+    Help files live under the sibling ``GFTGU-Documentation`` repository
+    rather than beside the program modules inside ``GFTGU-Programs``.
+    """
+    help_filename = "EarthOrbit.html"
+    program_name = "EarthOrbit"
+    candidates = [module_dir / help_filename]
+    for ancestor in (module_dir, *module_dir.parents):
+        candidates.append(
+            ancestor / "GFTGU-Documentation" / program_name / help_filename
+        )
+        if ancestor.name != program_name:
+            candidates.append(ancestor / program_name / help_filename)
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(
+        "Could not find EarthOrbit.html beside the program or in "
+        "GFTGU-Documentation/EarthOrbit/."
+    )
+
+
+HELP_FILE = find_help_file(MODULE_DIR)
+DOCUMENTATION_DIR = HELP_FILE.parent
 RELEASE_NOTES_FILE = DOCUMENTATION_DIR / "EarthOrbit-ReleaseNotes.html"
 SAMPLE_OUTPUTS_FILE = (
     DOCUMENTATION_DIR / "SampleOutputs" / "EarthOrbit-SampleOutputs_Guide.html"

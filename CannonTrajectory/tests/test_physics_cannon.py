@@ -50,12 +50,34 @@ def find_module_dir(start):
     )
 
 
+def find_help_file(module_dir):
+    """Find Help in a flattened upload or the GFTGU-Documentation tree.
+
+    Documentation folders no longer use chapter-number prefixes, and the
+    Help files live under the sibling ``GFTGU-Documentation`` repository
+    rather than beside the program modules inside ``GFTGU-Programs``.
+    The previous fallback ``module_dir.parent / HELP_FILE`` pointed at
+    ``GFTGU-Programs/CannonTrajectory.html``, which is not a real layout.
+    """
+    program_name = Path(HELP_FILE).stem
+    candidates = [module_dir / HELP_FILE]
+    for ancestor in (module_dir, *module_dir.parents):
+        candidates.append(
+            ancestor / "GFTGU-Documentation" / program_name / HELP_FILE
+        )
+        if ancestor.name != program_name:
+            candidates.append(ancestor / program_name / HELP_FILE)
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(
+        f"Could not find {HELP_FILE} beside the program or in "
+        f"GFTGU-Documentation/{program_name}/."
+    )
+
+
 MODULE_DIR = find_module_dir(Path(__file__))
-HELP_PATH = (
-    MODULE_DIR / HELP_FILE
-    if (MODULE_DIR / HELP_FILE).is_file()
-    else MODULE_DIR.parent / HELP_FILE
-)
+HELP_PATH = find_help_file(MODULE_DIR)
 if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 

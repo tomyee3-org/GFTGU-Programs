@@ -62,15 +62,28 @@ import plot_spheregravity as plotting
 
 
 def find_help_file(module_dir):
-    """Find Help in either a flattened upload or the packaged docs folder."""
-    candidates = (
-        module_dir / "SphereGravity.html",
-        module_dir.parent / "04-SphereGravity" / "SphereGravity.html",
-    )
+    """Find Help in a flattened upload or the GFTGU-Documentation tree.
+
+    Documentation folders no longer use chapter-number prefixes, and the
+    Help files live under the sibling ``GFTGU-Documentation`` repository
+    rather than beside the program modules inside ``GFTGU-Programs``.
+    """
+    help_filename = "SphereGravity.html"
+    program_name = "SphereGravity"
+    candidates = [module_dir / help_filename]
+    for ancestor in (module_dir, *module_dir.parents):
+        candidates.append(
+            ancestor / "GFTGU-Documentation" / program_name / help_filename
+        )
+        if ancestor.name != program_name:
+            candidates.append(ancestor / program_name / help_filename)
     for candidate in candidates:
         if candidate.is_file():
             return candidate
-    raise FileNotFoundError("Could not find SphereGravity.html beside the program or docs.")
+    raise FileNotFoundError(
+        "Could not find SphereGravity.html beside the program or in "
+        "GFTGU-Documentation/SphereGravity/."
+    )
 
 
 HELP_FILE = find_help_file(MODULE_DIR)

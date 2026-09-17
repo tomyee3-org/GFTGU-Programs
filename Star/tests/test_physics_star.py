@@ -49,11 +49,32 @@ def find_module_dir(start):
 
 MODULE_DIR = find_module_dir(Path(__file__).resolve().parent)
 TEST_FILE = Path(__file__).resolve()
-HELP_CANDIDATES = (
-    MODULE_DIR / "Star.html",
-    MODULE_DIR.parent / "08-Star" / "Star.html",
-)
-HELP_FILE = next((path for path in HELP_CANDIDATES if path.is_file()), HELP_CANDIDATES[0])
+def find_help_file(module_dir):
+    """Find Help in a flattened upload or the GFTGU-Documentation tree.
+
+    Documentation folders no longer use chapter-number prefixes, and the
+    Help files live under the sibling ``GFTGU-Documentation`` repository
+    rather than beside the program modules inside ``GFTGU-Programs``.
+    """
+    help_filename = "Star.html"
+    program_name = "Star"
+    candidates = [module_dir / help_filename]
+    for ancestor in (module_dir, *module_dir.parents):
+        candidates.append(
+            ancestor / "GFTGU-Documentation" / program_name / help_filename
+        )
+        if ancestor.name != program_name:
+            candidates.append(ancestor / program_name / help_filename)
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(
+        "Could not find Star.html beside the program or in "
+        "GFTGU-Documentation/Star/."
+    )
+
+
+HELP_FILE = find_help_file(MODULE_DIR)
 if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 
