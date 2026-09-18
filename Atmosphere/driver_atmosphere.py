@@ -47,6 +47,7 @@ class AtmosphereResult:
     planet_name: str
     model_version: str = phys.MODEL_VERSION
     build_id: str = phys.BUILD_ID
+    mu: float | None = None
 
 
 @dataclass
@@ -65,11 +66,12 @@ class CurveData:
 
 @dataclass(frozen=True)
 class CheckpointData:
-    """Pressure diagnostics at one supplied temperature-profile checkpoint."""
+    """Atmospheric quantities at one supplied temperature-profile checkpoint."""
     altitude: float
     pressure: float | None
     pressure_over_temperature: float | None
     temperature: float
+    density: float | None = None
 
 
 class AtmosphereModel:
@@ -198,6 +200,7 @@ class AtmosphereModel:
             planet_name=self.params.planet_name,
             model_version=phys.MODEL_VERSION,
             build_id=phys.BUILD_ID,
+            mu=mu,
         )
 
 
@@ -234,12 +237,16 @@ def extract_checkpoints(
     h_points: List[float],
     T_points: List[float],
 ) -> List[CheckpointData]:
-    """Interpolate pressure at every supplied temperature checkpoint.
+    """Interpolate pressure and density at every supplied temperature checkpoint.
 
     The checkpoint temperatures are the defining profile values themselves.
     Pressure is linearly interpolated between adjacent integration samples.
+    For model results, density follows the ideal-gas law using that pressure,
+    the model's molecular weight, and the supplied checkpoint temperature.
+    Manually constructed results without molecular weight use interpolated
+    stored density instead. The ratio p/T uses the same pressure and temperature.
     A checkpoint outside the stored positive-pressure domain remains in the
-    returned table with unavailable pressure diagnostics.
+    returned table with unavailable pressure and density diagnostics.
     """
     TemperatureProfile(h=h_points, T=T_points).validate()
     arrays = (
@@ -262,13 +269,14 @@ def extract_checkpoints(
     for altitude, temperature in zip(h_points, T_points):
         if altitude < first_altitude or altitude > last_altitude:
             checkpoints.append(
-                CheckpointData(altitude, None, None, temperature)
+                CheckpointData(altitude, None, None, temperature, None)
             )
             continue
 
         upper = bisect_left(result.altitudes, altitude)
         if upper < len(result.altitudes) and result.altitudes[upper] == altitude:
             pressure = result.pressures[upper]
+            stored_density = result.densities[upper]
         else:
             lower = upper - 1
             fraction = (
@@ -278,6 +286,14 @@ def extract_checkpoints(
             pressure = result.pressures[lower] + fraction * (
                 result.pressures[upper] - result.pressures[lower]
             )
+            stored_density = result.densities[lower] + fraction * (
+                result.densities[upper] - result.densities[lower]
+            )
+
+        density = (
+            ideal_gas_density(pressure, result.mu, temperature)
+            if result.mu is not None else stored_density
+        )
 
         checkpoints.append(
             CheckpointData(
@@ -285,6 +301,7 @@ def extract_checkpoints(
                 pressure=pressure,
                 pressure_over_temperature=pressure / temperature,
                 temperature=temperature,
+                density=density,
             )
         )
     return checkpoints

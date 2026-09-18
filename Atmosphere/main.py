@@ -210,22 +210,24 @@ def _format_altitude(value):
 
 
 def print_checkpoints(result, h_points, T_points):
-    """Print pressure, p/T, and temperature at every supplied checkpoint."""
+    """Print pressure, density, p/T, and temperature at every checkpoint."""
     rows = extract_checkpoints(result, h_points, T_points)
     print("\nAtmospheric checkpoints")
-    print("  altitude (m)      pressure (Pa)          p/T (Pa/K)    temperature (K)")
+    print("  altitude (m)      pressure (Pa)    density (kg/m^3)          p/T (Pa/K)    temperature (K)")
     for row in rows:
         if row.pressure is None:
             pressure = "unavailable"
+            density = "unavailable"
             pressure_over_temperature = "unavailable"
         else:
             pressure = _format_value(row.pressure)
+            density = _format_value(row.density)
             pressure_over_temperature = _format_value(
                 row.pressure_over_temperature
             )
         print(
             f"  {_format_altitude(row.altitude):>12}    "
-            f"{pressure:>15}    {pressure_over_temperature:>16}    "
+            f"{pressure:>15}    {density:>18}    {pressure_over_temperature:>16}    "
             f"{_format_value(row.temperature):>15}"
         )
     print("  (Unavailable means the checkpoint is outside the stored positive-pressure domain.)")

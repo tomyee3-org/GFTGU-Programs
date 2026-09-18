@@ -8,7 +8,7 @@ import math
 from numbers import Real
 from typing import List
 
-MODEL_VERSION = "1.2.0"
+MODEL_VERSION = "1.2.1"
 
 
 #: The exact source files this build identifier covers: a documentation-only

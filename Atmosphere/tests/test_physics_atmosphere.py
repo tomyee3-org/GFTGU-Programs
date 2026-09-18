@@ -98,7 +98,7 @@ def closest_index(values, target):
 
 
 def find_help_file(module_dir: Path) -> Path:
-    """Find Help in a flattened upload or the GFTGU-Documentation tree.
+    """Find Help in a flattened upload, combined ZIP, or documentation tree.
 
     Documentation folders no longer use chapter-number prefixes, and the
     Help files live under the sibling ``GFTGU-Documentation`` repository
@@ -108,6 +108,7 @@ def find_help_file(module_dir: Path) -> Path:
     program_name = "Atmosphere"
     candidates = [module_dir / help_filename]
     for ancestor in (module_dir, *module_dir.parents):
+        candidates.append(ancestor / "Atmosphere-Documentation" / help_filename)
         candidates.append(
             ancestor / "GFTGU-Documentation" / program_name / help_filename
         )
@@ -118,7 +119,7 @@ def find_help_file(module_dir: Path) -> Path:
             return candidate
     raise FileNotFoundError(
         "Could not find Atmosphere.html beside the program or in "
-        "GFTGU-Documentation/Atmosphere/."
+        "GFTGU-Documentation/Atmosphere/ or Atmosphere-Documentation/."
     )
 
 
@@ -720,11 +721,18 @@ class CheckpointExtractionTests(unittest.TestCase):
         self.assertEqual([row.altitude for row in rows], DEFAULT_H)
         self.assertEqual([row.temperature for row in rows], DEFAULT_T)
         self.assertTrue(all(row.pressure is not None for row in rows))
+        self.assertTrue(all(row.density is not None for row in rows))
         self.assertTrue(all(row.pressure_over_temperature is not None for row in rows))
+        for row in rows:
+            self.assertAlmostEqual(
+                row.density,
+                ideal_gas_density(row.pressure, self.result.mu, row.temperature),
+            )
 
     def test_surface_checkpoint_uses_exact_initial_pressure(self):
         row = extract_checkpoints(self.result, DEFAULT_H, DEFAULT_T)[0]
         self.assertEqual(row.pressure, 1.013e5)
+        self.assertEqual(row.density, self.result.densities[0])
         self.assertAlmostEqual(
             row.pressure_over_temperature,
             row.pressure / row.temperature,
@@ -741,6 +749,7 @@ class CheckpointExtractionTests(unittest.TestCase):
         )
         row = extract_checkpoints(result, [5.0, 8.0], [250.0, 280.0])[0]
         self.assertEqual(row.pressure, 90.0)
+        self.assertEqual(row.density, 0.9)
         self.assertEqual(row.pressure_over_temperature, 90.0 / 250.0)
         self.assertEqual(row.temperature, 250.0)
 
@@ -756,6 +765,7 @@ class CheckpointExtractionTests(unittest.TestCase):
         rows = extract_checkpoints(result, [-5.0, 20.0], [220.0, 180.0])
         for row in rows:
             self.assertIsNone(row.pressure)
+            self.assertIsNone(row.density)
             self.assertIsNone(row.pressure_over_temperature)
 
     def test_malformed_result_arrays_are_rejected(self):
@@ -838,6 +848,7 @@ class CommandLineHelpAndPlotTests(unittest.TestCase):
         )
         self.assertIn("Atmospheric checkpoints", completed.stdout)
         self.assertIn("pressure (Pa)", completed.stdout)
+        self.assertIn("density (kg/m^3)", completed.stdout)
         self.assertIn("p/T (Pa/K)", completed.stdout)
         self.assertIn("temperature (K)", completed.stdout)
         for altitude in entry_point.DEFAULT_H_POINTS:
