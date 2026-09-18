@@ -755,6 +755,22 @@ class TestMainAndPlotIntegration(unittest.TestCase):
         self.assertEqual(result.final_step, 2)
         self.assertIn(f"RelativisticOrbit {physics.MODEL_VERSION}", output.getvalue())
         self.assertIn("maximum accepted-step count reached", output.getvalue())
+        self.assertIn(f"horizon radius    : {physics.HORIZON_RADIUS:.5g} m", output.getvalue())
+        self.assertIn(f"ISCO radius       : {physics.ISCO_RADIUS:.5g} m", output.getvalue())
+
+    def test_newtonian_summary_does_not_claim_horizon_or_isco(self):
+        main_module = importlib.import_module("main")
+        short_params = params(model="newtonian", max_steps=2, max_orbits=10)
+        output = io.StringIO()
+        with (
+            mock.patch.object(main_module, "params", short_params),
+            mock.patch.object(main_module, "plot_relativistic_orbit"),
+            contextlib.redirect_stdout(output),
+        ):
+            main_module.main([])
+        self.assertIn("model             : newtonian", output.getvalue())
+        self.assertNotIn("horizon radius", output.getvalue())
+        self.assertNotIn("ISCO radius", output.getvalue())
 
     def test_plot_draws_physical_reference_circles_only_for_schwarzschild(self):
         import matplotlib

@@ -154,6 +154,9 @@ def main(argv=None):
 
     print(f"RelativisticOrbit {result.model_version} (build {result.build_id}) summary")
     print(f"  model             : {result.model}")
+    if result.model == "schwarzschild":
+        print(f"  horizon radius    : {physics.HORIZON_RADIUS:.5g} m")
+        print(f"  ISCO radius       : {physics.ISCO_RADIUS:.5g} m")
     print(f"  termination       : {reason_text}")
     print(f"  accepted steps    : {result.final_step}")
     print(f"  proper time       : {result.tau[-1]:.6g} s")
