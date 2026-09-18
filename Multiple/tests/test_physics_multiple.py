@@ -965,7 +965,7 @@ class TestPlotting(unittest.TestCase):
         show.assert_called_once()
 
     @mock.patch.object(plotting.plt, "show")
-    def test_animation_f_key_toggles_display_frame_and_note(self, show):
+    def test_animation_f_key_updates_frame_title_without_redundant_notes(self, show):
         result = driver.run_simulation(
             make_params(output_type="animation", max_steps=2, frame_time=50)
         )
@@ -975,19 +975,16 @@ class TestPlotting(unittest.TestCase):
         event.key = "f"
         controls["on_key"](event)
         self.assertEqual(controls["state"]["display_frame"], "user")
-        note = controls["frame_note"].get_text()
-        self.assertTrue(note.startswith("Switched — Display frame: user"))
-        self.assertNotIn("E=", note)
-        self.assertIsNone(controls["frame_note"].get_bbox_patch())
-        totals = controls["totals_note"].get_text()
-        self.assertIn("interpolated-frame totals", totals)
-        self.assertIn("E=", totals)
-        self.assertIn("\nP=", totals)
-        self.assertIn("\nL=", totals)
+        axes = controls["figure"].axes[0]
+        self.assertIn("user frame", axes.get_title())
+        self.assertEqual(len(axes.texts), 1)
+        self.assertIn("frame 1 /", axes.texts[0].get_text())
+        self.assertEqual(len(axes.get_legend().texts), 2)
         event.key = "F"
         controls["on_key"](event)
         self.assertEqual(controls["state"]["display_frame"], "com")
-        self.assertIn("COM", controls["frame_note"].get_text())
+        self.assertIn("COM frame", axes.get_title())
+        self.assertEqual(len(axes.texts), 1)
         show.assert_called_once()
 
     @mock.patch.object(plotting.plt, "show")
@@ -1090,16 +1087,15 @@ class TestCommandLineAndSamples(unittest.TestCase):
                                    delta=1e-10 * max(abs(midpoint[key]), 1))
 
     @mock.patch.object(plotting.plt, "show")
-    def test_frame_labels_are_small_and_unboxed(self, show):
+    def test_static_plot_title_identifies_frame_without_duplicate_note(self, show):
         result = driver.run_simulation(make_params(
             output_type="trajectories", max_steps=2,
         ))
         plotting.plot_trajectories(result)
-        notes = [text for text in plotting.plt.gca().texts
-                 if "Display frame:" in text.get_text()]
-        self.assertEqual(len(notes), 1)
-        self.assertLessEqual(notes[0].get_fontsize(), 8)
-        self.assertIsNone(notes[0].get_bbox_patch())
+        axes = plotting.plt.gca()
+        self.assertIn("COM frame", axes.get_title())
+        self.assertEqual(len(axes.texts), 0)
+        self.assertEqual(len(axes.get_legend().texts), len(result["masses_solar"]))
         show.assert_called_once()
 
 
@@ -1171,7 +1167,7 @@ class TestBuildDocumentationAndCompatibility(unittest.TestCase):
             "Intermediate",
             "Advanced",
             "E_internal",
-            "interpolated-frame totals",
+            "console samples are independent of",
         )
         for fragment in required_fragments:
             with self.subTest(fragment=fragment):

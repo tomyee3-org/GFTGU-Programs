@@ -7,7 +7,7 @@ from typing import Dict, Any
 import matplotlib.pyplot as plt
 import numpy as np
 
-from physics_multiple import conservation_state, positions_in_display_frame
+from physics_multiple import positions_in_display_frame
 
 
 _COLORS = ["red", "green", "blue", "orange", "purple", "brown"]
@@ -64,12 +64,6 @@ def _frame_label(frame: str) -> str:
     return "user frame"
 
 
-def _frame_note(frame: str) -> str:
-    if frame == "com":
-        return "Display frame: COM (center of mass)"
-    return "Display frame: user (input coordinates)"
-
-
 def _positions_for_display(result: Dict[str, Any], positions, frame: str):
     masses = result.get("masses_solar")
     if frame == "com":
@@ -121,17 +115,6 @@ def plot_trajectories(
     ax.set_title(
         f"Multiple trajectories ({projection.lower()} projection, "
         f"{_frame_label(frame)})"
-    )
-    ax.text(
-        0.02,
-        0.02,
-        _frame_note(frame),
-        transform=ax.transAxes,
-        ha="left",
-        va="bottom",
-        family="monospace",
-        fontsize=7,
-        color="0.35",
     )
     ax.legend()
     ax.set_aspect("equal", "box")
@@ -255,11 +238,6 @@ def animate_multiple(result: Dict[str, Any]):
     projection = result["projection"]
     axis_mode = result["axis_mode"]
     display_frame = _resolve_display_frame(result)
-    masses = result.get("masses_solar")
-    source_velocities = result.get("frame_velocities")
-    if source_velocities is not None:
-        source_velocities = np.asarray(source_velocities, dtype=float)
-
     i1, i2, label1, label2 = _projection_indices(projection)
     n_frames, n_bodies, _ = source_positions.shape
 
@@ -287,23 +265,6 @@ def animate_multiple(result: Dict[str, Any]):
         ha="left", va="top",
         family="monospace",
     )
-    frame_note = ax.text(
-        0.02, 0.02, "",
-        transform=ax.transAxes,
-        ha="left", va="bottom",
-        family="monospace",
-        fontsize=7,
-        color="0.35",
-    )
-    totals_note = ax.text(
-        0.02, 0.85, "",
-        transform=ax.transAxes,
-        ha="left", va="top",
-        family="monospace",
-        fontsize=7,
-        color="0.35",
-    )
-
     ax.set_xlabel(f"{label1} (m)")
     ax.set_ylabel(f"{label2} (m)")
     ax.set_aspect("equal", adjustable="box")
@@ -332,42 +293,16 @@ def animate_multiple(result: Dict[str, Any]):
         ax.set_xlim(*xlim)
         ax.set_ylim(*ylim)
 
-    def _interpolated_totals_text(i):
-        if masses is None or source_velocities is None:
-            return ""
-        cons = conservation_state(
-            source_positions[i], source_velocities[i], masses
-        )
-        momentum = cons["momentum"]
-        angular = cons["angular_momentum"]
-        total_mass = float(np.sum(masses))
-        internal = float(cons["energy"]) - float(
-            np.dot(momentum, momentum)
-        ) / (2.0 * total_mass)
-        return (
-            "interpolated-frame totals (user coordinates):\n"
-            f"E={cons['energy']:.4e}  E_int={internal:.4e}\n"
-            f"P=({momentum[0]:.4e}, {momentum[1]:.4e}, {momentum[2]:.4e})\n"
-            f"L=({angular[0]:.4e}, {angular[1]:.4e}, {angular[2]:.4e})"
-        )
-
-    def _set_frame(frame_name, announce=False, index=None):
+    def _set_frame(frame_name):
         state["display_frame"] = frame_name
         state["projected"] = _projected_for_frame(frame_name)
         ax.set_title(
             f"Multiple animation ({projection} projection, "
             f"{_frame_label(frame_name)})"
         )
-        note = _frame_note(frame_name)
-        if announce:
-            note = "Switched — " + note
-        if index is None:
-            index = state["index"]
-        frame_note.set_text(note)
-        totals_note.set_text(_interpolated_totals_text(index))
         _apply_fixed_limits()
 
-    _set_frame(display_frame, announce=False)
+    _set_frame(display_frame)
 
     def _auto_limits(i):
         if axis_mode != "auto":
@@ -417,12 +352,7 @@ def animate_multiple(result: Dict[str, Any]):
             f"t = {frame_times[i]:.4e} s\n"
             f"frame {i + 1} / {n_frames}"
         )
-        header = _frame_note(state["display_frame"])
-        if "Switched — " in frame_note.get_text():
-            header = "Switched — " + header
-        frame_note.set_text(header)
-        totals_note.set_text(_interpolated_totals_text(i))
-        return [*lines, *markers, time_text, frame_note, totals_note]
+        return [*lines, *markers, time_text]
 
     # Persistent canvas timer: remains valid after the last displayed frame.
     timer = fig.canvas.new_timer(interval=interval_ms)
@@ -472,7 +402,7 @@ def animate_multiple(result: Dict[str, Any]):
 
         if key in ("f", "F"):
             next_frame = "user" if state["display_frame"] == "com" else "com"
-            _set_frame(next_frame, announce=True)
+            _set_frame(next_frame)
             draw_frame(state["index"])
             fig.canvas.draw_idle()
             return
@@ -505,7 +435,5 @@ def animate_multiple(result: Dict[str, Any]):
         "timer": timer,
         "state": state,
         "figure": fig,
-        "frame_note": frame_note,
-        "totals_note": totals_note,
         "on_key": on_key,
     }
