@@ -850,12 +850,14 @@ def test_model_summary_reports_global_and_validity_fields(
     for phrase in (
         "surface radius",
         "total mass",
+        "central pressure",
         "central density",
         "central sound",
         "compactness",
         "causality check",
         "Buchdahl check",
         "radial samples",
+        "Radial checkpoints",
     ):
         assert phrase in output
 

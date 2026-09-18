@@ -11,6 +11,7 @@ p**((gamma-1)/gamma) to zero on the final interval.
 
 from __future__ import annotations
 
+from bisect import bisect_left
 import math
 
 import physics_neutron as phys
@@ -27,6 +28,35 @@ from physics_neutron import (
 
 
 MAX_NUMERICAL_CONTROL = 10_000_000
+RADIUS_FRACTIONS = (0.0, 0.25, 0.50, 0.75, 0.90)
+
+
+def extract_radius_checkpoints(data: dict) -> list[tuple[float, float, float, float, float]]:
+    """Return (r/R, r_km, pressure, density, mass_solar) at five radii.
+
+    Pressure and enclosed mass use linear interpolation in radius. Density
+    follows the model's equation of state at the interpolated pressure.
+    """
+    radii = data["radius"]
+    pressures = data["pressure"]
+    masses = data["mass"]
+    surface_radius = data["surface_radius_m"]
+    rows = []
+    for fraction in RADIUS_FRACTIONS:
+        radius = fraction * surface_radius
+        upper = bisect_left(radii, radius)
+        if radii[upper] == radius:
+            pressure = pressures[upper]
+            mass = masses[upper]
+            density = data["density"][upper]
+        else:
+            lower = upper - 1
+            weight = (radius - radii[lower]) / (radii[upper] - radii[lower])
+            pressure = pressures[lower] + weight * (pressures[upper] - pressures[lower])
+            mass = masses[lower] + weight * (masses[upper] - masses[lower])
+            density = eos_density(pressure, data["K"], data["gamma"])
+        rows.append((fraction, radius / 1000.0, pressure, density, mass / M_SUN))
+    return rows
 
 
 def _validate_inputs(

@@ -9,6 +9,7 @@ import warnings
 import matplotlib.pyplot as plt
 import numpy as np
 
+from driver_neutron import extract_radius_checkpoints
 from physics_neutron import M_SUN
 
 
@@ -77,10 +78,11 @@ def plot_neutron(data: dict, output_type: str, *, log_y: bool = False) -> None:
 
 
 def print_model_summary(data: dict) -> None:
-    """Print the most useful global properties of the computed model."""
+    """Print global properties and five radial structure checkpoints."""
     print("Neutron-star model summary")
     print(f"  surface radius : {data['surface_radius_km']:.3f} km")
     print(f"  total mass     : {data['total_mass_solar']:.6f} M_sun")
+    print(f"  central pressure: {data['pC']:.5g} Pa")
     print(f"  central density: {data['rhoC']:.6e} kg/m^3")
     print(
         "  central sound  : "
@@ -99,3 +101,10 @@ def print_model_summary(data: dict) -> None:
         f"  radial samples : {len(data['radius'])} "
         f"(nominal dr={data['dr_nominal']:.3f} m)"
     )
+    print("Radial checkpoints (fraction of surface radius)")
+    print("   r/R    radius (km)    pressure (Pa)    density (kg/m^3)    enclosed mass (M_sun)")
+    for fraction, radius_km, pressure, density, mass_solar in extract_radius_checkpoints(data):
+        print(
+            f"  {fraction:4.2f}    {radius_km:11.5g}    {pressure:13.5g}"
+            f"    {density:16.5g}    {mass_solar:21.5g}"
+        )

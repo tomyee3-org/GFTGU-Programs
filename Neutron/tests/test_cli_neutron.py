@@ -2,6 +2,8 @@
 import contextlib
 import io
 from pathlib import Path
+import math
+import re
 import subprocess
 import sys
 import unittest
@@ -12,7 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 import main
 import physics_neutron as physics
-from driver_neutron import compute_neutron_star
+from driver_neutron import compute_neutron_star, extract_radius_checkpoints
 
 
 class CommandLineTests(unittest.TestCase):
@@ -67,9 +69,14 @@ class CommandLineTests(unittest.TestCase):
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertIn('Neutron-star model summary',result.stdout)
         self.assertIn('total mass',result.stdout)
+        self.assertIn('central pressure',result.stdout)
+        self.assertEqual(
+            re.findall(r'^  (0\.00|0\.25|0\.50|0\.75|0\.90)\s+', result.stdout, re.M),
+            ['0.00', '0.25', '0.50', '0.75', '0.90'],
+        )
 
     def test_docs_build_metadata(self):
-        parent = ROOT.parent/'20-Neutron'
+        parent = ROOT.parent.parent/'GFTGU-Documentation'/'Neutron'
         for f in (parent/'Neutron.html',parent/'Neutron-ReleaseNotes.html',
                   parent/'SampleOutputs/Neutron-SampleOutputs_Guide.html'):
             self.assertIn(physics.BUILD_ID,f.read_text(encoding='utf-8'))
@@ -81,6 +88,19 @@ class CommandLineTests(unittest.TestCase):
                                delta=2.0)
         self.assertAlmostEqual(model['total_mass_kg'],1.9140826174028036e30,
                                delta=2e-4*1.9140826174028036e30)
+        rows = extract_radius_checkpoints(model)
+        self.assertEqual([row[0] for row in rows], [0.0, 0.25, 0.50, 0.75, 0.90])
+        self.assertEqual((rows[0][2], rows[0][3], rows[0][4]),
+                         (model['pC'], model['rhoC'], 0.0))
+        self.assertTrue(all(math.isclose(row[1] * 1000.0,
+                                             row[0] * model['surface_radius_m'], rel_tol=1e-14)
+                            for row in rows))
+        self.assertTrue(all(left[2] > right[2] and left[3] > right[3]
+                            and left[4] < right[4]
+                            for left, right in zip(rows, rows[1:])))
+        self.assertTrue(all(math.isclose(model['K'] * row[3]**model['gamma'],
+                                             row[2], rel_tol=1e-12)
+                            for row in rows))
         low = compute_neutron_star(1.666667,1e27,5.3802e3)
         self.assertLess(low['total_mass_solar'],.02)
         self.assertTrue(low['causality_satisfied'])

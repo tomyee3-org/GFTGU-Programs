@@ -16,7 +16,7 @@ import math
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.3.0"
+MODEL_VERSION = "1.3.1"
 BUILD_ID_COVERS = (
     "physics_neutron.py",
     "driver_neutron.py",
