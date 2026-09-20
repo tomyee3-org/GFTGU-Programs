@@ -76,12 +76,32 @@ class CheckpointData:
 
 class AtmosphereModel:
     def __init__(self, params: AtmosphereParameters):
+        """Validate ``params`` and keep a private copy of them.
+
+        The model copies the altitude and temperature lists (and the scalar
+        values), so changing the caller's lists or parameter object after
+        construction does not change what ``run()`` computes.  ``run()``
+        validates the model's own copy again before integrating.
+        """
         self.params = params
         self.temp_profile = TemperatureProfile(
             h=params.h_points,
             T=params.T_points,
         )
         self._validate_parameters()
+        self.params = AtmosphereParameters(
+            planet_name=params.planet_name,
+            g_accel=params.g_accel,
+            mu=params.mu,
+            p0=params.p0,
+            h_points=list(params.h_points),
+            T_points=list(params.T_points),
+            output_type=params.output_type,
+        )
+        self.temp_profile = TemperatureProfile(
+            h=self.params.h_points,
+            T=self.params.T_points,
+        )
 
     def _validate_parameters(self) -> None:
         """Raise ValueError with a clear message for invalid user inputs."""
@@ -108,7 +128,16 @@ class AtmosphereModel:
         - Use while-loop to adjust dh if top not reached within array size
         - Use for-loop to step in altitude, stopping when pressure <= 0
         - At each step: hydrostatic equilibrium, getTemp, ideal gas law
+
+        The model's own copy of the parameters is validated again first, so
+        an edit made to ``model.params`` after construction is either
+        honoured with valid values or rejected with a clear ``ValueError``.
         """
+        self.temp_profile = TemperatureProfile(
+            h=self.params.h_points,
+            T=self.params.T_points,
+        )
+        self._validate_parameters()
         g = self.params.g_accel
         mu = self.params.mu
         p0 = self.params.p0

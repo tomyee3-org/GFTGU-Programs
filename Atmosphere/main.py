@@ -22,6 +22,9 @@ profile. Every user-facing model input can be set at the command line:
     kelvin. The lists must have equal lengths; altitudes must strictly increase,
     and temperatures must be positive. Between checkpoints temperature is
     linearly interpolated. Defaults form the documented hybrid Earth profile.
+    A list may begin with a negative altitude, for example
+    ``--h_points -1000,0,10000``; the ``--h_points=-1000,0,10000`` form
+    works as well.
 
 ``--output_type {pressure,density,temperature}``
     Select the plotted quantity: ``pressure`` plots hydrostatic pressure in Pa;
@@ -38,6 +41,8 @@ Examples
 
 import argparse
 import math
+import re
+import sys
 
 import physics_atmosphere
 from driver_atmosphere import (
@@ -127,6 +132,36 @@ def _float_list(text):
     return values
 
 
+_LIST_OPTIONS = ("--h_points", "--T_points")
+_LEADING_MINUS_NUMBER = re.compile(r"^-[0-9.]")
+
+
+def _join_leading_minus_list_values(argv):
+    """Rewrite ``--h_points -1000,0`` as ``--h_points=-1000,0``.
+
+    argparse reads a value that starts with a minus sign, such as
+    ``-1000,0,10000``, as an option flag unless it is attached with an equals
+    sign, and then reports only ``expected one argument``.  Attaching it here
+    lets a profile that starts below altitude zero be typed the natural way.
+    """
+    tokens = list(argv)
+    joined = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if (
+            token in _LIST_OPTIONS
+            and index + 1 < len(tokens)
+            and _LEADING_MINUS_NUMBER.match(tokens[index + 1])
+        ):
+            joined.append(f"{token}={tokens[index + 1]}")
+            index += 2
+        else:
+            joined.append(token)
+            index += 1
+    return joined
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         prog="Atmosphere",
@@ -196,7 +231,9 @@ def parse_args(argv=None):
             "temperature [K]"
         ),
     )
-    return parser.parse_args(argv)
+    if argv is None:
+        argv = sys.argv[1:]
+    return parser.parse_args(_join_leading_minus_list_values(argv))
 
 
 def _format_value(value):
