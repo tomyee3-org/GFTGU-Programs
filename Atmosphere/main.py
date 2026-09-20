@@ -11,7 +11,7 @@ profile. Every user-facing model input can be set at the command line:
     9.81). Larger gravity makes pressure fall more rapidly with altitude.
 
 ``--mu VALUE``
-    Positive, finite mean molecular weight in proton masses (default 28.97 for
+    Positive, finite mean molecular weight in atomic mass units (default 28.97 for
     dry air). Larger values also reduce the atmospheric scale height.
 
 ``--p0 VALUE``
@@ -35,7 +35,7 @@ profile. Every user-facing model input can be set at the command line:
 Examples
 --------
   python main.py --output_type temperature
-  python main.py --planet_name Mars --g_accel 3.71 --mu 44 --p0 610 \
+  python main.py --planet_name Mars --g_accel 3.72 --mu 44 --p0 610 \
       --h_points 0,10000,20000 --T_points 210,180,160 --output_type pressure
 """
 
@@ -197,8 +197,8 @@ def parse_args(argv=None):
         "--mu",
         type=_positive_float,
         default=28.97,
-        metavar="PROTON_MASSES",
-        help="positive mean molecular weight in proton masses",
+        metavar="ATOMIC_MASS_UNITS",
+        help="positive mean molecular weight in atomic mass units",
     )
     parser.add_argument(
         "--p0",

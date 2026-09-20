@@ -132,7 +132,7 @@ HELP_FILE = find_help_file(MODULE_DIR)
 
 def exact_piecewise_pressure(p0, g_accel, mu, h_points, T_points, target):
     """Exact constant-g, constant-mu hydrostatic pressure within a linear profile."""
-    coefficient = g_accel * mu * phys.M_PROTON / phys.K_BOLTZMANN
+    coefficient = g_accel * mu * phys.ATOMIC_MASS_UNIT / phys.K_BOLTZMANN
     pressure = p0
     altitude = h_points[0]
     if altitude != 0.0 or target < 0.0 or target > h_points[-1]:
@@ -194,6 +194,75 @@ def interpolated_temperature(h_points, T_points, altitude):
             fraction = (altitude - h_points[index]) / (h_points[index + 1] - h_points[index])
             return T_points[index] + fraction * (T_points[index + 1] - T_points[index])
     return None
+
+
+# ---------------------------------------------------------------------------
+# Source-oracle fixtures.
+#
+# These tables belong to the test suite.  They are transcribed by hand from
+# the published sources named in each comment and are never parsed from the
+# Help page, so that the Help and the program can each be tested against them.
+# ---------------------------------------------------------------------------
+
+# U.S. Standard Atmosphere, 1976 (NOAA, NASA and USAF; NASA TM-X-74335,
+# NOAA-S/T 76-1562; https://ntrs.nasa.gov/citations/19770009539).
+# Defining constants and the layer-base table (Part 1).  Altitudes below are
+# geopotential metres; pressures are in Pa at the layer base, to the six
+# significant figures the table prints, except the last, which is quoted to
+# four.  The Help quotes these pressures at the corresponding geometric
+# altitudes Z = r0 H / (r0 - H) with r0 = 6 356 766 m.
+USSA_1976 = {
+    "sea_level_pressure_pa": 101325.0,
+    "sea_level_temperature_k": 288.15,
+    "sea_level_density_kg_m3": 1.2250,
+    "mean_molar_mass_g_per_mol": 28.9644,
+    "g0_m_s2": 9.80665,
+    "r_star_j_per_mol_k": 8.31432,
+    "geopotential_radius_m": 6_356_766.0,
+    # (geopotential altitude H_b (m), T_b (K), lapse rate L_b (K/m), p_b (Pa))
+    "layers": (
+        (0.0, 288.15, -0.0065, 101325.0),
+        (11_000.0, 216.65, 0.0, 22632.1),
+        (20_000.0, 216.65, 0.001, 5474.89),
+        (32_000.0, 228.65, 0.0028, 868.019),
+        (47_000.0, 270.65, 0.0, 110.906),
+        (51_000.0, 270.65, -0.0028, 66.9389),
+        (71_000.0, 214.65, -0.002, 3.95642),
+        (84_852.0, 186.946, None, 0.3734),
+    ),
+    # geometric altitudes (m) at which the Help quotes the base pressures
+    "help_geometric_altitudes_m": (11019, 20063, 32162, 47350, 51412, 71802, 86000),
+}
+
+# Venus.  Only the rows the Help quotes are transcribed, from the table of
+# temperature and pressure against altitude in the Wikipedia article
+# "Atmosphere of Venus" -- a secondary compilation, not the VIRA model
+# (Seiff et al., Adv. Space Res. 5(11), 1985) or NASA Venus-GRAM.
+VENUS_TABLE = {
+    # altitude (m): (temperature (deg C), pressure (atm))
+    10_000: (385.0, 47.39),
+    20_000: (306.0, None),
+    60_000: (-10.0, 0.2357),
+}
+ATMOSPHERE_IN_PA = 101_325.0
+
+# NRLMSIS 2.0 thermospheric temperatures used for the default profile above
+# 100 km: a CCMC Instant Run.  The index values, the run identifier and the
+# raw output were not archived, so the run cannot be regenerated from this
+# record; the six rounded temperatures below are the only surviving data.
+NRLMSIS_2_0_RUN = {
+    "date": "2024-10-15",
+    "time_utc": "12:00",
+    "latitude_deg_north": 55.0,
+    "longitude_deg_east": 45.0,
+    "solar_and_geomagnetic_indices": None,
+    "run_identifier": None,
+    "raw_output_archived": False,
+    "temperatures_k": {
+        100_000.0: 190.0, 150_000.0: 800.0, 200_000.0: 1080.0, 250_000.0: 1190.0,
+        300_000.0: 1225.0, 400_000.0: 1240.0, 500_000.0: 1240.0,
+    },
+}
 
 
 class BuildMetadataTests(unittest.TestCase):
@@ -353,9 +422,40 @@ class TemperatureInterpolationTests(unittest.TestCase):
 
 class IdealGasDensityTests(unittest.TestCase):
     def test_known_earth_surface_density(self):
-        expected = 1.013e5 * phys.M_PROTON * 28.97 / (phys.K_BOLTZMANN * 288.15)
+        expected = 1.013e5 * phys.ATOMIC_MASS_UNIT * 28.97 / (phys.K_BOLTZMANN * 288.15)
         self.assertAlmostEqual(ideal_gas_density(1.013e5, 28.97, 288.15), expected)
-        self.assertAlmostEqual(expected, 1.2325, places=4)
+        self.assertAlmostEqual(expected, 1.2249, places=4)
+
+    def test_constants_are_the_exact_boltzmann_and_the_codata_atomic_mass_unit(self):
+        self.assertEqual(phys.K_BOLTZMANN, 1.380649e-23)
+        self.assertEqual(phys.ATOMIC_MASS_UNIT, 1.66053906660e-27)
+        self.assertFalse(hasattr(phys, "M_PROTON"))
+
+    def test_dry_air_density_matches_the_standard_atmosphere_coefficient(self):
+        """Oracle from the standard's own molar quantities, not the program's constants.
+
+        rho = p M / (R T) with the molar mass M = 28.9644 g/mol and the molar gas
+        constant R = N_A k_B = 8.31446261815324 J/(mol K) (exact since 2019).
+        The published sea-level density is 1.2250 kg/m^3 (R* = 8.31432).
+        """
+        standard = USSA_1976
+        pressure = standard["sea_level_pressure_pa"]
+        temperature = standard["sea_level_temperature_k"]
+        molar_mass = standard["mean_molar_mass_g_per_mol"] * 1e-3
+        oracle = pressure * molar_mass / (8.31446261815324 * temperature)
+        program = ideal_gas_density(pressure, standard["mean_molar_mass_g_per_mol"], temperature)
+        self.assertAlmostEqual(program / oracle, 1.0, delta=1e-8)
+        published = standard["sea_level_density_kg_m3"]
+        self.assertAlmostEqual(program / published, 1.0, delta=3e-5)
+        # The coefficient rho*T/p itself, which the wrong mass unit would shift by 0.64%.
+        coefficient = molar_mass / 8.31446261815324
+        self.assertAlmostEqual(
+            phys.ATOMIC_MASS_UNIT * 28.9644 / phys.K_BOLTZMANN / coefficient, 1.0, delta=1e-8
+        )
+
+    def test_default_surface_density_is_within_a_hundredth_of_a_percent_of_the_standard(self):
+        program = ideal_gas_density(1.013e5, 28.97, 288.15)
+        self.assertAlmostEqual(program / USSA_1976["sea_level_density_kg_m3"], 1.0, delta=1e-4)
 
     def test_density_is_linear_in_pressure_and_molecular_weight(self):
         reference = ideal_gas_density(100.0, 2.0, 300.0)
@@ -459,18 +559,18 @@ class AtmosphereIntegrationTests(unittest.TestCase):
 
     def test_default_regression_length_step_and_top(self):
         result = self.default_result
-        self.assertEqual(len(result.altitudes), 13_653)
-        self.assertAlmostEqual(result.altitudes[1], 41.892255239594434, places=10)
-        self.assertAlmostEqual(result.altitudes[-1], 571_913.0685308994, places=6)
-        self.assertAlmostEqual(result.pressures[-1], 1.48243291309413e-14, delta=1e-25)
+        self.assertEqual(len(result.altitudes), 20_933)
+        self.assertAlmostEqual(result.altitudes[1], 27.346570147796527, places=10)
+        self.assertAlmostEqual(result.altitudes[-1], 572_418.4063334728, places=6)
+        self.assertAlmostEqual(result.pressures[-1], 4.1235649603284085e-15, delta=1e-25)
 
     def test_default_pressure_regression_at_key_altitudes(self):
         expected = {
-            10_000.0: 26_070.307248623623,
-            50_000.0: 70.15205286988557,
-            100_000.0: 0.021372282012585772,
-            200_000.0: 5.803839221741799e-05,
-            500_000.0: 1.1699443144669705e-08,
+            10_000.0: 26_330.93672647471,
+            50_000.0: 74.2021537120753,
+            100_000.0: 0.023848461716232592,
+            200_000.0: 6.75276583656202e-05,
+            500_000.0: 1.4367865073110592e-08,
         }
         for altitude, pressure in expected.items():
             index = closest_index(self.default_result.altitudes, altitude)
@@ -538,7 +638,7 @@ class AtmosphereIntegrationTests(unittest.TestCase):
         params = make_params(h_points=[0.0, 100_000.0], T_points=[288.15, 288.15])
         result = AtmosphereModel(params).run()
         scale_height = (
-            phys.K_BOLTZMANN * 288.15 / (params.g_accel * params.mu * phys.M_PROTON)
+            phys.K_BOLTZMANN * 288.15 / (params.g_accel * params.mu * phys.ATOMIC_MASS_UNIT)
         )
         self.assertAlmostEqual(result.altitudes[1], scale_height / driver.STEPS_PER_SCALE_HEIGHT)
 
@@ -607,12 +707,19 @@ class AtmosphereIntegrationTests(unittest.TestCase):
         self.assertAlmostEqual(high_mu, base / 2.0)
 
     def test_exact_zero_pressure_boundary_is_excluded(self):
-        with patch.object(driver, "STEPS_PER_SCALE_HEIGHT", 1):
+        # With a step of one scale height the first Euler pressure is
+        # p0 - g*rho0*H = 0.  The gas law is replaced by exact powers of two so
+        # that this is exactly zero in floating point and does not depend on
+        # the physical constants: p0 = 1024, rho0 = 16, g = 2, H = 32, dh = 32.
+        with (
+            patch.object(driver, "STEPS_PER_SCALE_HEIGHT", 1),
+            patch.object(driver, "ideal_gas_density", lambda pressure, mu, temperature: pressure / 64.0),
+        ):
             result = AtmosphereModel(
-                make_params(h_points=[0.0, 1000.0], T_points=[288.15, 288.15])
+                make_params(g_accel=2.0, p0=1024.0, h_points=[0.0, 1000.0], T_points=[288.15, 288.15])
             ).run()
         self.assertEqual(result.altitudes, [0.0])
-        self.assertEqual(result.pressures, [1.013e5])
+        self.assertEqual(result.pressures, [1024.0])
 
     def test_restart_guard_raises_instead_of_looping_forever(self):
         with (
@@ -643,7 +750,7 @@ class AtmosphereIntegrationTests(unittest.TestCase):
             restarted.altitudes[1],
             2.0 * (
                 phys.K_BOLTZMANN * 288.15
-                / (params.g_accel * params.mu * phys.M_PROTON)
+                / (params.g_accel * params.mu * phys.ATOMIC_MASS_UNIT)
                 / 200.0
             ),
         )
@@ -669,7 +776,7 @@ class AtmosphereIntegrationTests(unittest.TestCase):
             mu = rng.uniform(2.0, 50.0)
             p0 = 10.0 ** rng.uniform(2.0, 7.0)
             t0 = rng.uniform(180.0, 600.0)
-            scale = phys.K_BOLTZMANN * t0 / (g_accel * mu * phys.M_PROTON)
+            scale = phys.K_BOLTZMANN * t0 / (g_accel * mu * phys.ATOMIC_MASS_UNIT)
             h_points = [0.0, 2.0 * scale, 5.0 * scale, 8.0 * scale]
             T_points = [
                 t0,
@@ -718,6 +825,296 @@ class AtmosphereIntegrationTests(unittest.TestCase):
         ):
             with self.subTest(overrides=overrides), self.assertRaises(ValueError):
                 AtmosphereModel(make_params(**overrides)).run()
+
+
+class ColdLayerStepTests(unittest.TestCase):
+    """The step is sized from the coldest temperature the profile reaches."""
+
+    G, MU, P0 = 9.81, 28.97, 1.013e5
+
+    @classmethod
+    def scale_height(cls, temperature):
+        return phys.K_BOLTZMANN * temperature / (cls.G * cls.MU * phys.ATOMIC_MASS_UNIT)
+
+    def run_profile(self, h_points, T_points):
+        return AtmosphereModel(make_params(h_points=h_points, T_points=T_points)).run()
+
+    def test_step_is_one_two_hundredth_of_the_scale_height_at_the_coldest_temperature(self):
+        result = self.run_profile([0.0, 5_000.0, 10_000.0], [300.0, 100.0, 200.0])
+        self.assertAlmostEqual(
+            result.altitudes[1], self.scale_height(100.0) / 200.0, delta=1e-12 * result.altitudes[1]
+        )
+
+    def test_a_profile_warmer_than_the_surface_keeps_the_surface_step(self):
+        result = self.run_profile([0.0, 10_000.0, 20_000.0], [250.0, 300.0, 400.0])
+        self.assertAlmostEqual(
+            result.altitudes[1], self.scale_height(250.0) / 200.0, delta=1e-12 * result.altitudes[1]
+        )
+
+    def test_temperatures_at_or_below_the_reference_level_do_not_set_the_step(self):
+        # 100 K lies 1000 m below the reference level, which the program never visits.
+        result = self.run_profile([-1_000.0, 0.0, 10_000.0], [100.0, 300.0, 300.0])
+        self.assertAlmostEqual(
+            result.altitudes[1], self.scale_height(300.0) / 200.0, delta=1e-12 * result.altitudes[1]
+        )
+
+    def test_the_isothermal_step_is_unchanged(self):
+        result = self.run_profile([0.0, 100_000.0], [288.15, 288.15])
+        self.assertAlmostEqual(
+            result.altitudes[1], self.scale_height(288.15) / 200.0, delta=1e-12 * result.altitudes[1]
+        )
+
+    def test_cooling_profiles_meet_fixed_accuracy_thresholds_at_one_scale_height(self):
+        """Accepted cold layers, checked against the exact integral of Eq. (7.3).
+
+        The profile falls from 300 K to the cold temperature over half of the
+        surface scale height H0 and stays there to H0.  The thresholds are
+        fixed accuracy requirements on the pressure at H0.
+        """
+        h0 = self.scale_height(300.0)
+        for cold, threshold in ((30.0, 0.015), (20.0, 0.025), (15.0, 0.03), (10.0, 0.045)):
+            h_points = [0.0, 0.5 * h0, h0]
+            T_points = [300.0, cold, cold]
+            with self.subTest(cold_temperature=cold):
+                result = self.run_profile(h_points, T_points)
+                row = extract_checkpoints(result, h_points, T_points)[-1]
+                self.assertIsNotNone(row.pressure)
+                exact = exact_piecewise_pressure(self.P0, self.G, self.MU, h_points, T_points, h0)
+                self.assertLess(abs(row.pressure / exact - 1.0), threshold)
+
+    def test_the_cold_layer_of_the_help_experiment_is_accurate_to_two_percent(self):
+        h_points, T_points = [0.0, 4400.0, 8800.0], [300.0, 20.0, 20.0]
+        result = self.run_profile(h_points, T_points)
+        row = extract_checkpoints(result, h_points, T_points)[-1]
+        exact = exact_piecewise_pressure(self.P0, self.G, self.MU, h_points, T_points, 8800.0)
+        self.assertLess(abs(row.pressure / exact - 1.0), 0.02)
+        self.assertGreater(row.pressure, 0.0)
+
+    def test_a_cold_profile_never_reports_a_top_inside_the_supplied_profile(self):
+        h0 = self.scale_height(300.0)
+        h_points, T_points = [0.0, 2.0 * h0, 5.0 * h0], [300.0, 1.5, 1.5]
+        result = self.run_profile(h_points, T_points)
+        rows = extract_checkpoints(result, h_points, T_points)
+        self.assertGreater(result.altitudes[-1], h_points[-1])
+        self.assertTrue(all(row.pressure is not None and row.pressure > 0.0 for row in rows))
+
+    def test_zero_pressure_reached_by_an_enlarged_step_inside_the_profile_is_an_error(self):
+        """A profile too tall and cold for the point budget must not report a false top."""
+        h0 = self.scale_height(300.0)
+        h_points = [0.0, h0, 2.0 * h0, 1.0e7]
+        T_points = [300.0, 3.0, 3.0, 30_000.0]
+        with self.assertRaisesRegex(RuntimeError, "zero pressure inside the supplied temperature profile"):
+            self.run_profile(h_points, T_points)
+
+    def test_the_same_guard_fires_with_a_small_point_budget(self):
+        h0 = self.scale_height(300.0)
+        with patch.object(driver, "MAX_STEPS", 400), self.assertRaisesRegex(
+            RuntimeError, "zero pressure inside the supplied temperature profile"
+        ):
+            self.run_profile([0.0, h0, 2.0 * h0, 20.0 * h0], [300.0, 10.0, 10.0, 300.0])
+
+    def test_the_guard_covers_a_cold_layer_near_the_top_of_the_profile(self):
+        """The crossing may fall anywhere in the profile, not only in its first half."""
+        h0 = self.scale_height(300.0)
+        h_points = [0.0, 18.0 * h0, 19.0 * h0, 20.0 * h0]
+        T_points = [300.0, 300.0, 10.0, 10.0]
+        with patch.object(driver, "MAX_STEPS", 400), self.assertRaisesRegex(
+            RuntimeError, "zero pressure inside the supplied temperature profile"
+        ):
+            self.run_profile(h_points, T_points)
+
+    def test_a_restart_that_ends_above_the_profile_is_still_accepted(self):
+        result = AtmosphereModel(
+            make_params(h_points=[0.0, 1000.0], T_points=[288.15, 288.15])
+        )
+        with patch.object(driver, "MAX_STEPS", 300):
+            run = result.run()
+        self.assertGreater(run.altitudes[-1], 1000.0)
+
+    def test_the_command_line_reports_the_guard_as_a_model_error(self):
+        with self.assertRaisesRegex(SystemExit, "Atmosphere input/model error: The enlarged altitude step"):
+            run_main(["--h_points", "0,8800,17600,10000000", "--T_points", "300,3,3,30000"])
+
+
+class ProfileSpanAndParameterObjectTests(unittest.TestCase):
+    """Extreme finite spans and wrong parameter objects give clear errors."""
+
+    def test_a_span_that_overflows_the_interpolation_arithmetic_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "range too large"):
+            TemperatureProfile([-1e308, 1e308], [100.0, 300.0]).validate()
+        with self.assertRaisesRegex(ValueError, "range too large"):
+            AtmosphereModel(make_params(h_points=[-1e308, 1e308], T_points=[100.0, 300.0]))
+
+    def test_a_large_finite_span_interpolates_correctly_including_the_endpoint(self):
+        profile = TemperatureProfile([-1e308, 1e307], [100.0, 300.0])
+        profile.validate()
+        span = 1.1e308
+        self.assertAlmostEqual(profile.get_temp(0.0, 1e5), 100.0 + 200.0 * (1e308 / span), places=9)
+        self.assertEqual(profile.get_temp(1e307, 1e5), 300.0)
+        self.assertEqual(profile.get_temp(-1e308, 1e5), 100.0)
+
+    def test_a_profile_corrupted_after_validation_cannot_return_a_non_finite_temperature(self):
+        profile = TemperatureProfile([0.0, 1000.0], [300.0, 400.0])
+        profile.validate()
+        profile.T = [1e308, -1e308]
+        with self.assertRaisesRegex(ValueError, "not a finite number"):
+            profile.get_temp(500.0, 1e5)
+
+    def test_a_wrong_parameter_object_is_a_value_error_not_an_attribute_error(self):
+        for bad in (None, {}, [], "Earth", 42, object(), types_namespace()):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "AtmosphereParameters"):
+                AtmosphereModel(bad)
+
+    def test_replacing_the_models_parameter_object_by_a_wrong_object_is_a_value_error(self):
+        model = AtmosphereModel(make_params(h_points=[0.0, 1000.0], T_points=[300.0, 290.0]))
+        model.params = None
+        with self.assertRaisesRegex(ValueError, "AtmosphereParameters"):
+            model.run()
+
+
+def types_namespace():
+    """An object with the right attribute names but the wrong type."""
+    import types
+
+    values = make_params()
+    return types.SimpleNamespace(**vars(values))
+
+
+class MalformedResultTests(unittest.TestCase):
+    """Direct-API results with the wrong shape are rejected with a ValueError."""
+
+    @staticmethod
+    def good_result(**overrides):
+        values = dict(
+            altitudes=[0.0, 1.0, 2.0],
+            pressures=[10.0, 9.0, 8.0],
+            densities=[2.0, 1.8, 1.6],
+            temperatures=[300.0, 299.0, 298.0],
+            output_type="Pressure",
+            planet_name="Test",
+        )
+        values.update(overrides)
+        return AtmosphereResult(**values)
+
+    def test_a_well_formed_result_is_accepted(self):
+        result = self.good_result()
+        extract_output(result)
+        extract_checkpoints(result, [0.0, 1.0], [300.0, 299.0])
+
+    def test_wrong_object_types_are_rejected(self):
+        for bad in (None, {}, "result", 3):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(ValueError, "AtmosphereResult object"):
+                    extract_output(bad)
+                with self.assertRaisesRegex(ValueError, "AtmosphereResult object"):
+                    extract_checkpoints(bad, [0.0, 1.0], [300.0, 299.0])
+
+    def test_non_sequence_and_non_finite_arrays_are_rejected(self):
+        cases = (
+            ("altitudes", None, "non-string sequence"),
+            ("pressures", "abc", "non-string sequence"),
+            ("densities", [2.0, math.nan, 1.6], "finite"),
+            ("temperatures", [300.0, math.inf, 298.0], "finite"),
+            ("pressures", [10.0, True, 8.0], "finite"),
+            ("altitudes", [0.0, "1", 2.0], "finite"),
+            ("altitudes", [0.0, 2.0, 1.0], "strictly increasing"),
+            ("pressures", [10.0, 9.0], "co-indexed"),
+        )
+        for name, bad, message in cases:
+            result = self.good_result(**{name: bad})
+            with self.subTest(name=name, bad=bad):
+                with self.assertRaisesRegex(ValueError, message):
+                    extract_output(result)
+                with self.assertRaisesRegex(ValueError, message):
+                    extract_checkpoints(result, [0.0, 1.0], [300.0, 299.0])
+
+    def test_a_bad_molecular_mass_field_is_rejected(self):
+        for bad in (0.0, -1.0, math.nan, "28.97", True):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "mu must be"):
+                extract_checkpoints(self.good_result(mu=bad), [0.0, 1.0], [300.0, 299.0])
+
+    def test_a_bad_molecular_mass_field_is_rejected_by_every_extractor_and_for_every_checkpoint(self):
+        """The field is checked with the arrays, whether or not a checkpoint uses it."""
+        for bad in (0.0, -1.0, math.nan, math.inf, "28.97", True):
+            with self.subTest(bad=bad, extractor="curve"), self.assertRaisesRegex(ValueError, "mu must be"):
+                extract_output(self.good_result(mu=bad))
+            with self.subTest(bad=bad, extractor="checkpoints outside the domain"), self.assertRaisesRegex(
+                ValueError, "mu must be"
+            ):
+                extract_checkpoints(self.good_result(mu=bad), [-5.0, 1.0e6], [300.0, 250.0])
+
+    def test_an_empty_result_is_rejected(self):
+        empty = self.good_result(altitudes=[], pressures=[], densities=[], temperatures=[])
+        with self.assertRaisesRegex(ValueError, "nonempty"):
+            extract_output(empty)
+
+
+class StandardAtmosphereFixtureTests(unittest.TestCase):
+    """The U.S. Standard Atmosphere 1976 fixture is internally sound and is what the Help quotes."""
+
+    @staticmethod
+    def derived_layer_bases():
+        """Base pressures rebuilt from the standard's defining constants."""
+        g0, molar_mass = USSA_1976["g0_m_s2"], USSA_1976["mean_molar_mass_g_per_mol"] * 1e-3
+        r_star = USSA_1976["r_star_j_per_mol_k"]
+        layers = USSA_1976["layers"]
+        pressure = USSA_1976["sea_level_pressure_pa"]
+        derived = [pressure]
+        for (h_low, t_low, lapse, _), (h_high, *_rest) in zip(layers, layers[1:]):
+            if lapse == 0.0:
+                pressure *= math.exp(-g0 * molar_mass * (h_high - h_low) / (r_star * t_low))
+            else:
+                t_high = t_low + lapse * (h_high - h_low)
+                pressure *= (t_high / t_low) ** (-g0 * molar_mass / (r_star * lapse))
+            derived.append(pressure)
+        return derived
+
+    def test_tabulated_base_pressures_follow_from_the_defining_constants(self):
+        for (h_base, _t, _lapse, tabulated), derived in zip(USSA_1976["layers"], self.derived_layer_bases()):
+            with self.subTest(geopotential_altitude=h_base):
+                tolerance = 1e-4 if h_base == 84_852.0 else 1e-5
+                self.assertAlmostEqual(derived / tabulated, 1.0, delta=tolerance)
+
+    def test_the_help_altitudes_are_the_geometric_altitudes_of_the_layer_bases(self):
+        radius = USSA_1976["geopotential_radius_m"]
+        geometric = [round(radius * h / (radius - h)) for h, *_ in USSA_1976["layers"][1:]]
+        self.assertEqual(geometric, list(USSA_1976["help_geometric_altitudes_m"]))
+        for altitude in USSA_1976["help_geometric_altitudes_m"]:
+            self.assertIn(float(altitude), DEFAULT_H)
+
+    def test_the_default_temperatures_are_the_standard_layer_temperatures(self):
+        for altitude, (_h, temperature, _lapse, _p) in zip(
+            USSA_1976["help_geometric_altitudes_m"], USSA_1976["layers"][1:]
+        ):
+            index = DEFAULT_H.index(float(altitude))
+            with self.subTest(altitude=altitude):
+                self.assertEqual(DEFAULT_T[index], temperature)
+        self.assertEqual(DEFAULT_T[0], USSA_1976["sea_level_temperature_k"])
+
+
+class SecondarySourceFixtureTests(unittest.TestCase):
+    """Venus and NRLMSIS values are recorded with their provenance and checked against the defaults."""
+
+    def test_venus_help_profile_matches_the_transcribed_rows(self):
+        venus_h = [0.0, 10_000.0, 20_000.0, 30_000.0, 40_000.0, 50_000.0, 60_000.0]
+        venus_t = [735.0, 658.0, 579.0, 495.0, 416.0, 348.0, 263.0]
+        for altitude, (celsius, _pressure) in VENUS_TABLE.items():
+            with self.subTest(altitude=altitude):
+                self.assertEqual(round(celsius + 273.15), venus_t[venus_h.index(float(altitude))])
+
+    def test_venus_published_pressures_in_pascals(self):
+        self.assertAlmostEqual(VENUS_TABLE[10_000][1] * ATMOSPHERE_IN_PA / 4.80e6, 1.0, delta=1e-3)
+        self.assertAlmostEqual(VENUS_TABLE[60_000][1] * ATMOSPHERE_IN_PA / 23.9e3, 1.0, delta=1e-3)
+
+    def test_nrlmsis_temperatures_are_the_default_thermospheric_profile(self):
+        for altitude, temperature in NRLMSIS_2_0_RUN["temperatures_k"].items():
+            with self.subTest(altitude=altitude):
+                self.assertEqual(DEFAULT_T[DEFAULT_H.index(altitude)], temperature)
+
+    def test_the_missing_run_record_is_recorded_as_missing(self):
+        self.assertFalse(NRLMSIS_2_0_RUN["raw_output_archived"])
+        self.assertIsNone(NRLMSIS_2_0_RUN["run_identifier"])
+        self.assertIsNone(NRLMSIS_2_0_RUN["solar_and_geomagnetic_indices"])
 
 
 class OutputExtractionTests(unittest.TestCase):
@@ -1133,13 +1530,13 @@ class EdgeProfileFamilyTests(unittest.TestCase):
         mu = rng.uniform(2.0, 50.0)
         p0 = 10.0 ** rng.uniform(2.0, 7.0)
         t0 = rng.uniform(150.0, 600.0)
-        q = phys.M_PROTON * mu / phys.K_BOLTZMANN
+        q = phys.ATOMIC_MASS_UNIT * mu / phys.K_BOLTZMANN
         return g_accel, mu, p0, t0, t0 / (g_accel * q)
 
     @staticmethod
     def exact_pressure(p0, g_accel, mu, h_points, T_points, target):
         """Exact pressure at ``target`` >= 0 for the piecewise-linear profile."""
-        q = phys.M_PROTON * mu / phys.K_BOLTZMANN
+        q = phys.ATOMIC_MASS_UNIT * mu / phys.K_BOLTZMANN
         edges = [0.0] + [h for h in h_points if 0.0 < h < target] + [target]
         integral = 0.0
         for lower, upper in zip(edges, edges[1:]):
@@ -1154,7 +1551,7 @@ class EdgeProfileFamilyTests(unittest.TestCase):
     @staticmethod
     def euler_error_estimate(g_accel, mu, h_points, T_points, target, step):
         """Generous first-order estimate of the relative Euler error at ``target``."""
-        q = phys.M_PROTON * mu / phys.K_BOLTZMANN
+        q = phys.ATOMIC_MASS_UNIT * mu / phys.K_BOLTZMANN
         count = 4000
         total = 0.0
         previous = None
@@ -1293,6 +1690,37 @@ class EdgeProfileFamilyTests(unittest.TestCase):
                     checkpoints_compared += 1
         self.assertEqual(cases_run, 8 * self.CASES_PER_FAMILY)
         self.assertGreater(checkpoints_compared, 200)
+
+    def test_error_in_log_pressure_stays_within_the_stated_bound(self):
+        """A fixed accuracy statement for every generated profile.
+
+        The step is sized from the coldest temperature at or above the
+        reference level, so there are at least 200 steps per local scale
+        height and the error in ln p is about ln(p0/p)/400.  The generated
+        profiles need no restart, and every checkpoint above the surface must
+        satisfy |ln(p/p_exact)| <= 1.75 * ln(p0/p_exact) / 400.
+        """
+        compared = 0
+        for family, (g_accel, mu, p0), h_points, T_points in self.family_profiles():
+            case = {"family": family, "g": g_accel, "mu": mu, "p0": p0, "h": h_points, "T": T_points}
+            with self.subTest(case=case):
+                result = AtmosphereModel(
+                    make_params(g_accel=g_accel, mu=mu, p0=p0, h_points=h_points, T_points=T_points)
+                ).run()
+                coldest = min(
+                    [result.temperatures[0]] + [t for h, t in zip(h_points, T_points) if h > 0.0]
+                )
+                q = phys.ATOMIC_MASS_UNIT * mu / phys.K_BOLTZMANN
+                step = result.altitudes[1] - result.altitudes[0]
+                self.assertAlmostEqual(step, coldest / (g_accel * q) / 200.0, delta=1e-12 * step)
+                for row in extract_checkpoints(result, h_points, T_points):
+                    if row.altitude <= 0.0 or row.pressure is None:
+                        continue
+                    exact = self.exact_pressure(p0, g_accel, mu, h_points, T_points, row.altitude)
+                    depth = math.log(p0 / exact)
+                    self.assertLessEqual(abs(math.log(row.pressure / exact)), 1.75 * depth / 400.0 + 1e-9)
+                    compared += 1
+        self.assertGreater(compared, 150)
 
     def test_entirely_negative_profile_reports_every_checkpoint_unavailable(self):
         h_points, T_points = [-3000.0, -1000.0], [250.0, 300.0]
@@ -1488,14 +1916,17 @@ class HelpStructureTests(unittest.TestCase):
 
     def test_help_constants_and_step_rules_match_the_code(self):
         flat = re.sub(r"\s+", " ", html_module.unescape(re.sub(r"<[^>]+>", "", HELP_HTML)))
-        for name, value in (("K_BOLTZMANN", phys.K_BOLTZMANN), ("M_PROTON", phys.M_PROTON)):
+        for name, value in (("K_BOLTZMANN", phys.K_BOLTZMANN), ("ATOMIC_MASS_UNIT", phys.ATOMIC_MASS_UNIT)):
             with self.subTest(constant=name):
-                self.assertIn(f"{name} = {value!r}", flat)
-                mantissa, exponent = f"{value:.2e}".split("e")
-                self.assertIn(rf"{mantissa}\times10^{{{int(exponent)}}}", HELP_HTML)
+                shown = re.search(rf"{name} = ([0-9.]+e[+-]\d+)", flat)
+                self.assertIsNotNone(shown)
+                self.assertEqual(float(shown.group(1)), value)
+        self.assertIn(r"k_B = 1.380649\times10^{-23}", HELP_HTML)
+        mantissa, exponent = re.search(r"m_u = ([0-9.]+)\\times10\^\{(-\d+)\}", HELP_HTML).groups()
+        self.assertAlmostEqual(float(f"{mantissa}e{exponent}") / phys.ATOMIC_MASS_UNIT, 1.0, delta=1e-4)
         self.assertEqual(driver.STEPS_PER_SCALE_HEIGHT, 200)
-        self.assertIn("scale / 200.0", html_module.unescape(HELP_HTML))
-        self.assertIn("H/200", flat)
+        self.assertIn("dh    = scale_ref / 200.0", html_module.unescape(HELP_HTML))
+        self.assertIn(r"\Delta h = H_{\min}/200", HELP_HTML)
         self.assertEqual(driver.MAX_STEPS, 50_000)
         self.assertIn("50 000", flat)
 
@@ -1616,56 +2047,100 @@ class BeatStructureTests(unittest.TestCase):
 
 @needs_beats
 class BeatQuotedNumberTests(unittest.TestCase):
-    """The numbers quoted in each Beat are recomputed from real runs."""
+    """The numbers quoted in each Beat are recomputed from real runs.
+
+    Every quoted number is pinned to the short phrase it sits in, so a number
+    moved to a different sentence, or a sentence reworded away from the
+    number, fails.
+    """
 
     @staticmethod
     def rows(argv):
         return {float(row[0]): row for row in table_rows(run_main(argv))}
 
-    def assertQuoted(self, number, *strings):
+    def assertPhrase(self, number, *phrases):
         text = beat_text(number)
-        for string in strings:
-            with self.subTest(beat=number, quoted=string):
-                self.assertIn(string, text)
+        for phrase in phrases:
+            with self.subTest(beat=number, phrase=phrase):
+                self.assertIn(phrase, text)
+
+    def assertAbsent(self, number, *phrases):
+        text = beat_text(number)
+        for phrase in phrases:
+            with self.subTest(beat=number, absent=phrase):
+                self.assertNotIn(phrase, text)
 
     def test_beat_0_weight_of_the_air(self):
         rows = self.rows([])
         p0, p11 = float(rows[0.0][1]), float(rows[11019.0][1])
-        self.assertQuoted(0, rows[0.0][1], rows[11019.0][1], "10,300", "22%", "78%")
         self.assertAlmostEqual(p0 / 9.81, 10_300, delta=50)
         self.assertEqual(round(100 * p11 / p0), 22)
+        self.assertPhrase(
+            0,
+            f"read the surface pressure, {rows[0.0][1]} Pa",
+            ": about 10,300 kg.",
+            f"the top of the lowest layer: {rows[11019.0][1]} Pa, which is 22% of the surface value, "
+            "so about 78% of the atmosphere's mass lies below that height",
+            "taken as constant with height in this program",
+        )
 
     def test_beat_1_density_is_proportional_to_p_over_t(self):
         rows = self.rows(["--output_type", "density"])
         self.assertEqual(rows, self.rows([]))
-        constant = 28.97 * phys.M_PROTON / phys.K_BOLTZMANN
+        constant = 28.97 * phys.ATOMIC_MASS_UNIT / phys.K_BOLTZMANN
         for altitude, row in rows.items():
             with self.subTest(altitude=altitude):
                 self.assertAlmostEqual(float(row[2]) / float(row[3]), constant, delta=3e-4 * constant)
-        self.assertQuoted(1, rows[0.0][2], rows[0.0][3], rows[100000.0][2], rows[100000.0][3],
-                          f"{constant * 1e3:.3f}")
-        low, high = rows[71802.0], rows[86000.0]
-        self.assertQuoted(
+        surface, top = rows[0.0], rows[100000.0]
+        self.assertPhrase(
             1,
-            f"{float(low[1]) / float(high[1]):.1f}",
-            f"{float(low[2]) / float(high[2]):.1f}",
-            f"{float(low[4]) / float(high[4]):.3f}",
+            f"read the surface density the program prints, {surface[2]} kg m",
+            "within 0.01% of the 1.2250",
+            f"{surface[2]} / {surface[3]} at the surface and {top[2]} / {top[3]} at 100 km both give "
+            f"{constant * 1e3:.3f}×10",
+        )
+        self.assertAbsent(1, "familiar")
+        low, high = rows[71802.0], rows[86000.0]
+        self.assertPhrase(
+            1,
+            f"the pressure falls by a factor of {float(low[1]) / float(high[1]):.1f} but the density "
+            f"falls only by a factor of {float(low[2]) / float(high[2]):.1f}, and the temperature ratio "
+            f"between the two rows is {float(low[4]) / float(high[4]):.3f}",
+            "atomic mass unit",
+            "\\(\\mu m_u/k_B = " + f"{constant * 1e3:.3f}" + "\\times10^{-3}\\)",
         )
 
     def test_beat_2_equal_steps_give_equal_factors_and_the_scale_height(self):
+        heights = (0.0, 8000.0, 16000.0, 24000.0, 32000.0)
         argv = ["--h_points", "0,8000,16000,24000,32000", "--T_points", "288.15,288.15,288.15,288.15,288.15"]
         rows = self.rows(argv)
-        pressures = [float(rows[h][1]) for h in (0.0, 8000.0, 16000.0, 24000.0, 32000.0)]
+        pressures = [float(rows[h][1]) for h in heights]
+        cells = [rows[h][1] for h in heights]
         for a, b in zip(pressures, pressures[1:]):
-            self.assertEqual(f"{b / a:.4f}", "0.3840")
-        self.assertQuoted(2, "0.3840", rows[8000.0][1], rows[16000.0][1], rows[24000.0][1])
-        self.assertAlmostEqual(8000.0 / math.log(1.0 / 0.3840), 8360.0, delta=10.0)
-        self.assertQuoted(2, f"{math.log(1 / 0.3840):.3f}")
-        scale_from_rows = pressures[0] / (9.81 * float(rows[0.0][2]))
-        self.assertQuoted(2, f"{scale_from_rows:.0f}")
-        self.assertAlmostEqual(
-            scale_from_rows, 288.15 * phys.K_BOLTZMANN / (9.81 * 28.97 * phys.M_PROTON), delta=1.0
+            self.assertEqual(f"{b / a:.4f}", "0.3862")
+        self.assertPhrase(
+            2,
+            f"divide each pressure by the one above it: {cells[1]} / 1.013e5, {cells[2]} / {cells[1]}, "
+            f"{cells[3]} / {cells[2]} and {cells[4]} / {cells[3]} all equal 0.3862",
         )
+        e_fold = 8000.0 / math.log(pressures[0] / pressures[1])
+        self.assertAlmostEqual(e_fold, 8409.0, delta=1.0)
+        self.assertPhrase(
+            2,
+            f"= {math.log(1 / 0.3862):.3f} per 8000 m",
+            f"8000 / {math.log(1 / 0.3862):.3f} = about {round(e_fold, -1):.0f} m",
+        )
+        scale_from_rows = pressures[0] / (9.81 * float(rows[0.0][2]))
+        scale_from_constants = 288.15 * phys.K_BOLTZMANN / (9.81 * 28.97 * phys.ATOMIC_MASS_UNIT)
+        self.assertAlmostEqual(scale_from_rows, scale_from_constants, delta=1.0)
+        self.assertPhrase(
+            2,
+            f"1.013e5 / (9.81 × {rows[0.0][2]}) = {scale_from_rows:.0f} m",
+            f"The two lengths agree to {100 * (1 - e_fold / scale_from_rows):.2f}%",
+            "two readings of the same model output, not independent checks",
+            f"H = {scale_from_constants / 1000:.3f}\\) km",
+        )
+        self.assertAbsent(2, "independent routes", "Two independent")
 
     def test_beat_3_one_dial_at_a_time(self):
         runs = {
@@ -1680,49 +2155,69 @@ class BeatQuotedNumberTests(unittest.TestCase):
             rows = self.rows(argv)
             fractions[name] = float(rows[11019.0][1]) / float(rows[0.0][1])
             cells[name] = rows[11019.0][1]
-        self.assertQuoted(3, cells["mu18"], cells["mu44"], cells["g19"], cells["p0"], "22263")
-        for name, quoted in (("default", "0.2198"), ("mu18", "0.390"), ("mu44", "0.100"),
-                             ("g19", "0.0483"), ("p0", "0.2198")):
-            with self.subTest(run=name):
-                decimals = len(quoted.split(".")[1])
-                self.assertEqual(f"{fractions[name]:.{decimals}f}", quoted)
-                self.assertIn(quoted, beat_text(3))
+        self.assertPhrase(
+            3,
+            f"where the pressure at 11019 m is {cells['default']} Pa out of 1.013e+05 Pa at the ground",
+            f"The default gives {fractions['default']:.4f}",
+            f"--mu 18 gives {cells['mu18']} / 1.013e5 = {fractions['mu18']:.3f}",
+            f"--mu 44 gives {cells['mu44']} / 1.013e5 = {fractions['mu44']:.3f}",
+            f"--g_accel 19.62 gives {cells['g19']} / 1.013e5 = {fractions['g19']:.4f}",
+            f"--p0 1.013e6 gives {cells['p0']} / 1.013e6 = {fractions['p0']:.4f} again",
+        )
         log_default = math.log(fractions["default"])
-        self.assertQuoted(3, f"{log_default:.3f}".replace("-", "\u2212"))
+        self.assertPhrase(
+            3,
+            "the natural logarithm of the default fraction is " + f"{log_default:.3f}".replace("-", "−"),
+            f"\\exp({log_default:.3f}\\times 44/28.97) = {math.exp(log_default * 44 / 28.97):.3f}",
+            f"{fractions['default']:.4f}^2 = {fractions['default'] ** 2:.4f}",
+            "Both agree with the run to 0.1%",
+        )
         self.assertAlmostEqual(math.exp(log_default * 44 / 28.97), fractions["mu44"],
                                delta=1e-3 * fractions["mu44"])
         self.assertAlmostEqual(fractions["default"] ** 2, fractions["g19"], delta=1e-3 * fractions["g19"])
-        self.assertQuoted(
-            3,
-            f"44/28.97) = {math.exp(log_default * 44 / 28.97):.3f}",
-            f"{fractions['default']:.4f}^2 = {fractions['default'] ** 2:.4f}",
-        )
         self.assertAlmostEqual(fractions["default"], fractions["p0"], delta=1e-4)
 
         def scale_km(mu, g):
-            return 288.15 * phys.K_BOLTZMANN / (g * mu * phys.M_PROTON) / 1000.0
+            return 288.15 * phys.K_BOLTZMANN / (g * mu * phys.ATOMIC_MASS_UNIT) / 1000.0
 
-        self.assertQuoted(3, f"{scale_km(28.97, 9.81):.3f}", f"{scale_km(18, 9.81):.2f}",
-                          f"{scale_km(44, 9.81):.3f}", f"{scale_km(28.97, 19.62):.3f}")
+        self.assertPhrase(
+            3,
+            f"= {scale_km(28.97, 9.81):.3f} km (default), {scale_km(18, 9.81):.2f} km",
+            f"{scale_km(44, 9.81):.3f} km (\\(\\mu\\) = 44)",
+            f"{scale_km(28.97, 19.62):.3f} km (\\(g\\) = 19.62",
+            "At fixed gravity, the surface pressure",
+            "the mass of air above each square meter",
+        )
+        self.assertAbsent(3, "decides how much air there is")
 
     def test_beat_4_layers_and_the_cold_layer_below_a_warm_one(self):
         rows = self.rows(["--output_type", "temperature"])
-        self.assertQuoted(4, rows[200000.0][1], rows[500000.0][1])
         p0, p11 = float(rows[0.0][1]), float(rows[11019.0][1])
-        self.assertQuoted(4, f"{p0 / p11:.2f}")
         ratio = float(rows[200000.0][1]) / float(rows[500000.0][1])
         self.assertTrue(4500 < ratio < 5500)
         per_km_cold = math.log(p0 / p11) / 11.019
         per_km_hot = math.log(ratio) / 300.0
         self.assertTrue(4.0 < per_km_cold / per_km_hot < 5.5)
-        base = phys.K_BOLTZMANN / (9.81 * 28.97 * phys.M_PROTON) / 1000.0
-        self.assertQuoted(4, f"{216.65 * base:.2f}", f"{1240.0 * base:.1f}", "186.95")
+        base = phys.K_BOLTZMANN / (9.81 * 28.97 * phys.ATOMIC_MASS_UNIT) / 1000.0
         self.assertEqual(rows[86000.0][4], "186.95")
+        self.assertPhrase(
+            4,
+            f"at 216.65 K, \\(H\\) = {216.65 * base:.2f} km, and at 1240 K, \\(H\\) = {1240.0 * base:.1f} km",
+            f"The pressure falls by a factor of {p0 / p11:.2f} over the first 11 km, but only by a factor "
+            f"of about {round(ratio, -2):.0f} from 200 km ({rows[200000.0][1]} Pa) to 500 km "
+            f"({rows[500000.0][1]} Pa)",
+            "cooling to 186.95 K at 86 km",
+        )
         second = self.rows(["--h_points", "0,50000,100000", "--T_points", "288,200,350"])
         pressure_ratio = float(second[50000.0][1]) / float(second[100000.0][1])
         density_ratio = float(second[50000.0][2]) / float(second[100000.0][2])
-        self.assertQuoted(4, f"{pressure_ratio:.0f}", f"{density_ratio:.0f}")
         self.assertAlmostEqual(density_ratio, pressure_ratio * 350.0 / 200.0, delta=1e-3 * density_ratio)
+        self.assertPhrase(
+            4,
+            f"the pressure falls by a factor of {pressure_ratio:.0f} and the density falls by a factor "
+            f"of {density_ratio:.0f}",
+            "the temperature ratio 350 / 200 = 1.75",
+        )
 
     def test_beat_5_other_worlds(self):
         mars = self.rows(["--planet_name", "Mars", "--g_accel", "3.72", "--mu", "44", "--p0", "610",
@@ -1732,52 +2227,114 @@ class BeatQuotedNumberTests(unittest.TestCase):
                            "--T_points", "735,658,579,495,416,348,263"])
         jupiter = self.rows(["--planet_name", "Jupiter", "--g_accel", "24.8", "--mu", "2.2", "--p0", "1e5",
                              "--h_points", "0,20000,50000,100000", "--T_points", "165,130,110,150"])
-        self.assertQuoted(5, mars[0.0][2], venus[0.0][2], jupiter[0.0][2], "1.2325")
-        for name, rows, p0, g, quoted in (
-            ("Mars", mars, 610.0, 3.72, "10.6"),
-            ("Venus", venus, 9.2e6, 8.87, "15.6"),
-            ("Jupiter", jupiter, 1e5, 24.8, "25.0"),
-        ):
-            with self.subTest(world=name):
-                scale_km = p0 / (g * float(rows[0.0][2])) / 1000.0
-                self.assertEqual(f"{scale_km:.1f}", quoted)
-                self.assertQuoted(5, quoted)
-        self.assertTrue(150 < 1.013e5 / 610.0 < 180)
-        self.assertQuoted(5, venus[10000.0][1], venus[60000.0][1])
+        earth = self.rows([])
+        self.assertPhrase(
+            5,
+            f"Mars {mars[0.0][2]}, Venus {venus[0.0][2]} and Jupiter {jupiter[0.0][2]} kg m",
+            f"against {earth[0.0][2]} for the Earth",
+        )
+        worlds = (
+            ("Mars", mars, 610.0, 3.72, "610 / (3.72 × {rho}) = {h} km"),
+            ("Venus", venus, 9.2e6, 8.87, "9.2e6 / (8.87 × {rho}) = {h} km"),
+            ("Jupiter", jupiter, 1e5, 24.8, "1e5 / (24.8 × {rho}) = {h} km"),
+        )
+        scale_heights = {}
+        for name, rows, p0, g, template in worlds:
+            scale_km = p0 / (g * float(rows[0.0][2])) / 1000.0
+            scale_heights[name] = scale_km
+            self.assertPhrase(5, template.format(rho=rows[0.0][2], h=f"{scale_km:.1f}"))
+        earth_km = 1.013e5 / (9.81 * float(earth[0.0][2])) / 1000.0
+        self.assertEqual(f"{earth_km:.1f}", "8.4")
+        self.assertEqual(max(scale_heights, key=scale_heights.get), "Jupiter")
+        self.assertGreater(24.8, max(3.72, 8.87, 9.81))
+        self.assertGreater(scale_heights["Mars"], earth_km)
+        self.assertPhrase(
+            5,
+            "against the Earth's 8.4 km; Jupiter's is the largest of the four even though its gravity "
+            "is the strongest, because its mean molecular mass is so small",
+        )
+        columns = {"Mars": 610.0 / 3.72, "Venus": 9.2e6 / 8.87, "Jupiter": 1e5 / 24.8, "Earth": 1.013e5 / 9.81}
+        self.assertPhrase(
+            5,
+            f"Mars {columns['Mars']:.0f} kg, Venus {columns['Venus'] / 1e6:.2f}×10 6 kg, "
+            f"Jupiter {columns['Jupiter']:.0f} kg, against the Earth's 10,300 kg",
+            f"Mars has about 1/{1.013e5 / 610.0:.0f} of the Earth's surface pressure but about "
+            f"1/{columns['Earth'] / columns['Mars']:.0f} of its column mass",
+            f"Venus has about a hundred times the Earth's column mass",
+        )
+        self.assertAlmostEqual(columns["Venus"] / columns["Earth"], 100.0, delta=1.0)
+        self.assertAbsent(5, "1/170", "only about 1/63 less", "says only how much air there is")
         low_10 = round(100 * (1 - float(venus[10000.0][1]) / 4.80e6))
         low_60 = round(100 * (1 - float(venus[60000.0][1]) / 23.9e3))
-        self.assertQuoted(5, f"({low_10}% low)", f"({low_60}% low)")
-        self.assertEqual((low_10, low_60), (3, 20))
+        self.assertEqual((low_10, low_60), (2, 16))
+        self.assertPhrase(
+            5,
+            "which are 4.80 MPa at 10 km and 23.9 kPa at 60 km: the run gives "
+            f"{venus[10000.0][1]} Pa ({low_10}% low) and {venus[60000.0][1]} Pa ({low_60}% low)",
+            f"The {low_60}% deficit for Venus at 60 km",
+            "secondary compilation",
+        )
 
     def test_beat_6_euler_error_and_the_comparison_table(self):
         argv = ["--h_points", "0,100000", "--T_points", "288.15,288.15"]
-        exact_scale = 288.15 * phys.K_BOLTZMANN / (9.81 * 28.97 * phys.M_PROTON)
+        exact_scale = 288.15 * phys.K_BOLTZMANN / (9.81 * 28.97 * phys.ATOMIC_MASS_UNIT)
         exact = 1.013e5 * math.exp(-100_000.0 / exact_scale)
-        self.assertQuoted(6, f"{exact:.4f}", f"{exact_scale:.0f}")
-        errors = []
+        errors, printed = [], None
         for steps in (200, 400, 800, 1600):
             with patch.object(driver, "STEPS_PER_SCALE_HEIGHT", steps):
                 rows = self.rows(argv)
             errors.append(100.0 * (1.0 - float(rows[100000.0][1]) / exact))
             if steps == 200:
-                self.assertQuoted(6, rows[100000.0][1])
+                printed = rows[100000.0][1]
         for coarse, fine in zip(errors, errors[1:]):
             self.assertAlmostEqual(coarse / fine, 2.0, delta=0.05)
-        self.assertQuoted(6, f"{errors[0]:.2f}%", f"{errors[1]:.1f}%", f"{errors[2]:.2f}%", f"{errors[3]:.2f}%")
+        self.assertPhrase(
+            6,
+            f"with \\(H\\) = {exact_scale:.0f} m, which is {exact:.4f} Pa, and compare it with the "
+            f"{printed} Pa the program prints: the program is {errors[0]:.2f}% low",
+        )
         height_in_scales = 100_000.0 / exact_scale
-        self.assertQuoted(6, f"{height_in_scales:.2f}", f"{1 - height_in_scales / 400:.3f}")
+        self.assertPhrase(
+            6,
+            f"h/H = {height_in_scales:.2f}",
+            f"1 − {height_in_scales:.2f}/400 = {1 - height_in_scales / 400:.3f}",
+            f"the {errors[0]:.2f}% you measured",
+            f"the error falls to {errors[1]:.1f}%, {errors[2]:.2f}% and {errors[3]:.2f}%",
+        )
 
+        # The comparison table: program column from the real run, standard column from the fixture.
         table = section_html(HELP_HTML, "beat6")
         rows = self.rows([])
         compared = re.findall(
             r'<tr><td class="num">(\d+)</td><td class="num">([^<]+)</td>'
             r'<td class="num">([^<]+)</td><td class="num">([^<]+)</td></tr>', table)
-        self.assertEqual([int(row[0]) for row in compared],
-                         [11019, 20063, 32162, 47350, 51412, 71802, 86000])
-        for altitude, program, standard, ratio in compared:
+        self.assertEqual([int(row[0]) for row in compared], list(USSA_1976["help_geometric_altitudes_m"]))
+        for (altitude, program, standard, ratio), layer in zip(compared, USSA_1976["layers"][1:]):
             with self.subTest(altitude=altitude):
                 self.assertEqual(program, rows[float(altitude)][1])
-                self.assertEqual(f"{float(program) / float(standard):.3f}", ratio)
+                self.assertEqual(standard, f"{layer[3]:.5g}")
+                self.assertEqual(f"{float(program) / layer[3]:.3f}", ratio)
+        ratio_86 = float(rows[86000.0][1]) / USSA_1976["layers"][-1][3]
+        self.assertPhrase(6, f"to {100 * (1 - ratio_86):.0f}% at 86 km", "about 2.6% between the ground and 86 km")
+        radius = 6_371_000.0
+        self.assertEqual(f"{100 * (1 - (radius / (radius + 86_000.0)) ** 2):.1f}", "2.6")
+
+    def test_beat_6_cold_layer_paragraph(self):
+        h_points, T_points = [0.0, 4400.0, 8800.0], [300.0, 20.0, 20.0]
+        result = AtmosphereModel(make_params(h_points=h_points, T_points=T_points)).run()
+        row = extract_checkpoints(result, h_points, T_points)[-1]
+        exact = exact_piecewise_pressure(1.013e5, 9.81, 28.97, h_points, T_points, 8800.0)
+        low = 100.0 * (1.0 - row.pressure / exact)
+        default = AtmosphereModel(make_params()).run()
+        depth = math.log(1.013e5 / extract_checkpoints(default, DEFAULT_H, DEFAULT_T)[7].pressure)
+        self.assertPhrase(
+            6,
+            f"a profile that falls from 300 K to 20 K, where the program is {low:.1f}% low",
+            f"{100 * depth / 400:.1f}% at 86 km in the default run, where the pressure has fallen by a "
+            f"factor of {math.exp(depth) / 1e5:.1f}×10 5",
+            "instead of reporting that numerical crossing as the top of the atmosphere",
+            "at least 200 steps per local scale height",
+        )
 
     def test_beat_6_accounts_for_the_deficit_against_the_standard_atmosphere(self):
         """Removing the model's simplifications one at a time closes the 86 km gap."""
@@ -1793,49 +2350,250 @@ class BeatQuotedNumberTests(unittest.TestCase):
                 total += weight * g_of_h(h) * q / interpolated_temperature(DEFAULT_H, DEFAULT_T, h)
             return p0 * math.exp(-total * width / 3.0)
 
-        table = section_html(HELP_HTML, "beat6")
-        standard_86 = float(re.search(
-            r'<td class="num">86000</td><td class="num">[^<]+</td><td class="num">([^<]+)</td>', table).group(1))
+        standard_86 = USSA_1976["layers"][-1][3]
         program_86 = float(self.rows([])[86000.0][1])
         radius = 6_371_000.0
-        q_program = 28.97 * phys.M_PROTON / phys.K_BOLTZMANN
         atomic_mass_unit, boltzmann = 1.66053907e-27, 1.380649e-23
-        q_standard = 28.9644 * atomic_mass_unit / boltzmann
-
+        q_program = 28.97 * atomic_mass_unit / boltzmann
+        q_standard = USSA_1976["mean_molar_mass_g_per_mol"] * atomic_mass_unit / boltzmann
         ratios = [
             program_86 / standard_86,
             exact_pressure(lambda h: 9.81, q_program, 1.013e5, 86_000.0) / standard_86,
             exact_pressure(lambda h: 9.81 * (radius / (radius + h)) ** 2, q_program, 1.013e5, 86_000.0)
             / standard_86,
-            exact_pressure(lambda h: 9.80665 * (radius / (radius + h)) ** 2, q_standard, 101_325.0, 86_000.0)
-            / standard_86,
+            exact_pressure(lambda h: USSA_1976["g0_m_s2"] * (radius / (radius + h)) ** 2,
+                           q_standard, USSA_1976["sea_level_pressure_pa"], 86_000.0) / standard_86,
         ]
-        self.assertQuoted(6, *(f"{ratio:.3f}" for ratio in ratios))
-        self.assertEqual([f"{ratio:.3f}" for ratio in ratios], ["0.743", "0.773", "0.919", "1.000"])
-        self.assertTrue(ratios[0] < ratios[1] < ratios[2] < ratios[3])
+        formatted = [f"{ratio:.3f}" for ratio in ratios]
+        self.assertEqual(formatted, ["0.815", "0.836", "0.993", "1.000"])
+        self.assertPhrase(
+            6,
+            f"from {formatted[0]} to {formatted[1]} when the Euler step is replaced by the exact integral, "
+            f"to {formatted[2]} when gravity is also allowed to fall as",
+            f"with \\(R\\) = 6371 km, and to {formatted[3]} when the inputs of the standard atmosphere",
+            "9.80665 m s",
+            "101325 Pa at sea level and a mean molecular mass of 28.9644 atomic mass units, in place of "
+            "9.81, 101300 and 28.97",
+        )
         gains = [ratios[1] - ratios[0], ratios[2] - ratios[1], ratios[3] - ratios[2]]
-        self.assertTrue(gains[1] > gains[2] > gains[0], gains)   # gravity, constants, Euler
-        self.assertQuoted(6, "Constant gravity is the largest source, the constants come second and the Euler step third.")
-
-        excess = 100.0 * (q_program / q_standard - 1.0)
-        self.assertQuoted(6, f"{excess:.2f}%")
-        fall = 1.013e5 / program_86
-        self.assertQuoted(6, f"{fall / 1e5:.1f}&times;10".replace("&times;", "\u00d7"), f"e^{{{math.log(fall):.1f}}}")
-        self.assertTrue(7.5 < 100.0 * (math.exp(excess / 100.0 * math.log(fall)) - 1.0) < 9.0)
-        self.assertQuoted(6, "roughly 8%", "9.80665", "101325", "28.9644", "6371")
-        self.assertEqual(f"{100 * (1 - ratios[0]):.0f}%", "26%")
-        self.assertQuoted(6, "26% at 86")
+        self.assertTrue(gains[1] > gains[0] > gains[2], gains)      # gravity, Euler step, rounded inputs
+        self.assertPhrase(
+            6,
+            "Constant gravity is by far the largest source, the Euler step is second and the rounded "
+            "inputs third",
+            "the coefficient of Eq. (7.3) carries no rounding error of its own",
+        )
+        self.assertAbsent(6, "not a bug", "proton")
 
     def test_beat_7_where_the_curve_ends(self):
         default = AtmosphereModel(make_params()).run()
         self.assertEqual(round(default.altitudes[-1] / 1000.0), 572)
-        self.assertAlmostEqual(default.temperatures[-1], 1.4, delta=0.05)
+        self.assertLess(default.temperatures[-1], 1.0)
         short = AtmosphereModel(make_params(h_points=[0.0, 20_000.0], T_points=[288.15, 216.65])).run()
-        self.assertEqual(round(short.altitudes[-1] / 1000.0), 32)
-        self.assertEqual(round(short.altitudes[-1] / 1000.0) - 20, 12)
-        self.assertQuoted(7, "1240 K", "572 km", "216.65 K", "32 km", "12 km", "1.4 K")
+        ends_at = round(short.altitudes[-1] / 1000.0)
+        self.assertEqual(ends_at, 33)
+        self.assertEqual(round(short.altitudes[-1] / 1000.0 - 20.0), 13)
+        self.assertPhrase(
+            7,
+            "the temperature stays at 1240 K up to 500 km, the last supplied altitude, and then falls "
+            "steeply to less than 1 K where the curve ends near 572 km",
+            f"and then falls toward zero, ending near {ends_at} km",
+            "extends about 13 km above the last supplied point",
+            "would be a numerical failure, not this closure's endpoint",
+        )
         rows = self.rows(["--output_type", "temperature"])
         self.assertEqual(rows[500000.0][4], "1240")
+
+    def test_equation_kind_tags_match_the_role_of_each_equation(self):
+        kinds = {}
+        for number in range(8):
+            body = section_html(HELP_HTML, f"beat{number}")
+            for label_html, formula in re.findall(
+                r'<div class="eq-block">(<div class="eq-label">.*?</div>)(.*?)</div>', body, re.DOTALL
+            ):
+                label = re.search(r'<div class="eq-label">(.*?)</div>', label_html, re.DOTALL)
+                block = formula
+                found = re.findall(r'<span class="tag tag-(\w+)">(\w+)</span>', label.group(1))
+                self.assertEqual(len(found), 1, label.group(1))
+                equation = re.search(r"\\tag\{(7\.\d)\}", block)
+                kinds[html_text(label.group(1))] = (found[0][1], equation.group(1) if equation else None)
+        by_equation = {eq: kind for kind, eq in kinds.values() if eq}
+        self.assertEqual(
+            by_equation,
+            {"7.1": "ODE", "7.2": "DERIVED", "7.3": "ODE", "7.4": "DERIVED",
+             "7.5": "PRESCRIPTION", "7.6": "CLOSURE"},
+        )
+        untagged = sorted(kind for kind, eq in kinds.values() if eq is None)
+        self.assertEqual(untagged, ["DERIVED", "DERIVED", "DERIVED"])   # barometric, proportionality, Euler error
+        self.assertNotIn("7.7", by_equation)                            # a numerical method carries no tag
+        index = section_html(HELP_HTML, "equations")
+        for equation, kind in by_equation.items():
+            with self.subTest(equation=equation):
+                self.assertRegex(index, rf"<td>\({re.escape(equation)}\)</td>.*?>{kind}</span>")
+        self.assertRegex(index, r"<td>\(7\.7\)</td>.*?numerical method")
+        for css_class in ("tag-ode", "tag-der", "tag-rule", "tag-cal"):
+            self.assertIn(f".{css_class}", HELP_HTML)
+        legend = html_text(section_html(HELP_HTML, "beats"))
+        for phrase in ("What is integrated and what is prescribed", "is an algorithm rather than physics"):
+            self.assertIn(phrase, legend)
+
+
+@needs_beats
+class ExperimentTextTests(unittest.TestCase):
+    """The exercise text gives concrete commands and check numbers, and they are right."""
+
+    @staticmethod
+    def experiment_text(number):
+        section = section_html(HELP_HTML, "experiments")
+        start = section.index(f'id="exp{number}"')
+        end = section.find('<div class="scenario-card"', start + 10)
+        return html_text(section[start:end if end != -1 else len(section)])
+
+    def rows(self, argv):
+        return {float(row[0]): row for row in table_rows(run_main(argv))}
+
+    def test_experiment_3_states_which_factors_are_ten_and_which_are_a_hundred(self):
+        text = self.experiment_text(3)
+        self.assertIn("so the two extremes differ by a factor of 100", text)
+        self.assertNotIn("The absolute pressures differ by a factor of 10", text)
+        cells = []
+        for p0 in ("1.013e4", "1.013e5", "1.013e6"):
+            rows = self.rows(["--p0", p0])
+            cells.append(rows[11019.0][1])
+            self.assertEqual(f"{float(rows[11019.0][1]) / float(p0):.4f}", "0.2221")
+        self.assertIn(f"({cells[0]}, {cells[1]} and {cells[2]} Pa)", text)
+        self.assertIn("22.21% of its surface value in all three runs", text)
+
+    def test_experiment_4_gives_concrete_g_values_and_a_check_number(self):
+        text = self.experiment_text(4)
+        self.assertIn("4.905 , 9.81 and 19.62", text)
+        fractions = {}
+        for g in ("4.905", "9.81", "19.62"):
+            rows = self.rows(["--g_accel", g])
+            fractions[g] = (rows[11019.0][1], float(rows[11019.0][1]) / float(rows[0.0][1]))
+        self.assertIn(f"g_accel 4.905 should give {fractions['4.905'][0]} Pa ({fractions['4.905'][1]:.4f}", text)
+        self.assertIn(f"g_accel 19.62 should give {fractions['19.62'][0]} Pa ({fractions['19.62'][1]:.4f}", text)
+        self.assertIn(f"gives {fractions['9.81'][0]} Pa, which is {fractions['9.81'][1]:.4f} of the surface", text)
+        self.assertAlmostEqual(fractions["4.905"][1], math.sqrt(fractions["9.81"][1]), delta=1e-3)
+        self.assertAlmostEqual(fractions["19.62"][1], fractions["9.81"][1] ** 2, delta=1e-3 * fractions["19.62"][1])
+        commands = documented_commands(section_html(HELP_HTML, "experiments"))
+        self.assertIn(["--g_accel", "4.905"], commands)
+        self.assertIn(["--g_accel", "19.62"], commands)
+
+    def test_experiment_5_asks_for_the_column_mass_as_well_as_the_scale_height(self):
+        text = self.experiment_text(5)
+        self.assertIn("column masses \\(p_0/g\\)", text)
+        self.assertIn("how much air stands above each square meter", text)
+
+    def test_experiment_8_command_prints_every_comparison_altitude(self):
+        text = self.experiment_text(8)
+        commands = documented_commands(section_html(HELP_HTML, "experiments"))
+        isothermal = [argv for argv in commands if "--h_points" in argv and "90000" in argv[argv.index("--h_points") + 1]]
+        self.assertEqual(len(isothermal), 1)
+        argv = isothermal[0]
+        args = entry_point.parse_args(argv)
+        for altitude in (10_000.0, 50_000.0, 90_000.0):
+            self.assertIn(altitude, args.h_points)
+        rows = self.rows(argv)
+        scale = 288.15 * phys.K_BOLTZMANN / (9.81 * 28.97 * phys.ATOMIC_MASS_UNIT)
+        program, exact, low = [], [], []
+        for altitude in (10_000.0, 50_000.0, 90_000.0):
+            value = float(rows[altitude][1])
+            reference = 1.013e5 * math.exp(-altitude / scale)
+            program.append(rows[altitude][1])
+            exact.append(f"{reference:.5g}")
+            low.append(f"{100 * (1 - value / reference):.2f}%")
+        self.assertIn(f"should print {program[0]}, {program[1]} and {program[2]} Pa, against exact values of "
+                      f"{exact[0]}, {exact[1]} and {exact[2]} Pa: {low[0]}, {low[1]} and {low[2]} low", text)
+        self.assertIn("with extra checkpoints at 10, 50 and 90 km", text)
+
+    def test_experiment_8_convergence_and_cold_layer_check_numbers(self):
+        text = self.experiment_text(8)
+        argv = ["--h_points", "0,100000", "--T_points", "288.15,288.15"]
+        scale = 288.15 * phys.K_BOLTZMANN / (9.81 * 28.97 * phys.ATOMIC_MASS_UNIT)
+        exact = 1.013e5 * math.exp(-100_000.0 / scale)
+        errors = []
+        for steps in (200, 400, 800, 1600):
+            with patch.object(driver, "STEPS_PER_SCALE_HEIGHT", steps):
+                errors.append(100.0 * (1.0 - float(self.rows(argv)[100000.0][1]) / exact))
+        self.assertIn(
+            f"the program should be {errors[0]:.2f}% low with 200 steps per scale height, then "
+            f"{errors[1]:.1f}%, {errors[2]:.2f}% and {errors[3]:.2f}% low with 400, 800 and 1600", text)
+        h_points, T_points = [0.0, 4400.0, 8800.0], [300.0, 20.0, 20.0]
+        cold = self.rows(["--h_points", "0,4400,8800", "--T_points", "300,20,20", "--output_type", "pressure"])
+        exact_cold = exact_piecewise_pressure(1.013e5, 9.81, 28.97, h_points, T_points, 8800.0)
+        self.assertIn(
+            f"it should print {cold[8800.0][1]} Pa at 8800 m, against an exact value of {exact_cold:.4g} Pa "
+            f"({100 * (1 - float(cold[8800.0][1]) / exact_cold):.1f}% low)", text)
+        self.assertIn(["--h_points", "0,4400,8800", "--T_points", "300,20,20", "--output_type", "pressure"],
+                      documented_commands(section_html(HELP_HTML, "experiments")))
+
+    def test_experiment_9_sketch_reproduces_the_expected_checkpoints(self):
+        """Run the code sketch of Experiment 9 and compare with the quoted check numbers."""
+        text = self.experiment_text(9)
+        radius = 6.371e6
+        original = driver.hydrostatic_step
+        calls = {"count": 0}
+
+        def variable_gravity_step(pressure_prev, rho_prev, g_accel, dh):
+            altitude = calls["count"] * dh          # the bottom of the step, alt[j - 1]
+            calls["count"] += 1
+            g_here = g_accel * (radius / (radius + altitude)) ** 2
+            return original(pressure_prev, rho_prev, g_here, dh)
+
+        with patch.object(driver, "hydrostatic_step", variable_gravity_step):
+            result = AtmosphereModel(make_params()).run()
+        rows = {row.altitude: row for row in extract_checkpoints(result, DEFAULT_H, DEFAULT_T)}
+        constant = AtmosphereModel(make_params()).run()
+        constant_rows = {row.altitude: row for row in extract_checkpoints(constant, DEFAULT_H, DEFAULT_T)}
+        p11, p86 = f"{rows[11019.0].pressure:.5g}", f"{rows[86000.0].pressure:.5g}"
+        self.assertEqual((p11, p86), ("22560", "0.36195"))
+        self.assertIn(f"the pressure at 11019 m should be about {p11} Pa", text)
+        self.assertIn(f"the pressure at 86000 m about {p86} Pa", text)
+        self.assertIn(f"constant-gravity {constant_rows[11019.0].pressure:.5g} Pa", text)
+        self.assertIn(f"constant-gravity {constant_rows[86000.0].pressure:.5g} Pa", text)
+        self.assertIn(f"{rows[86000.0].pressure / USSA_1976['layers'][-1][3]:.3f} of the standard atmosphere", text)
+        self.assertIn("g_here = g * (R / (R + alt[j - 1])) ** 2", html_module.unescape(section_html(HELP_HTML, "experiments")))
+        self.assertIn("receives", text)
+
+    def test_every_mars_example_uses_the_same_surface_gravity(self):
+        sources = {
+            "Help": html_module.unescape(HELP_HTML),
+            "main.py": (MODULE_DIR / "main.py").read_text(encoding="utf-8"),
+        }
+        found = set()
+        for name, source in sources.items():
+            flattened = re.sub(r"\\\n\s*", " ", source)
+            values = re.findall(r"--planet_name Mars\s+--g_accel ([0-9.]+)", flattened)
+            values += re.findall(r"python main\.py --planet_name Mars --g_accel ([0-9.]+)", flattened)
+            self.assertTrue(values, name)
+            found |= set(values)
+        self.assertEqual(found, {"3.72"})
+        # The Mars examples that do not name the planet first are still Mars examples.
+        for match in re.finditer(r"--g_accel (3\.7\d)", html_module.unescape(HELP_HTML)):
+            self.assertEqual(match.group(1), "3.72")
+
+
+class UnitConventionDocumentationTests(unittest.TestCase):
+    """mu is a number of atomic mass units everywhere it is documented."""
+
+    def test_no_document_or_source_calls_mu_a_number_of_proton_masses(self):
+        for name in CORE_MODULE_FILENAMES:
+            source = (MODULE_DIR / name).read_text(encoding="utf-8")
+            with self.subTest(file=name):
+                self.assertNotRegex(source, r"(?i)proton")
+                self.assertNotIn("M_PROTON", source)
+        self.assertNotRegex(HELP_HTML, r"(?i)proton")
+        self.assertNotIn("PROTON_MASSES", HELP_HTML)
+
+    def test_the_documented_and_command_line_units_agree(self):
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured), self.assertRaises(SystemExit):
+            entry_point.parse_args(["--help"])
+        usage = " ".join(captured.getvalue().split())
+        self.assertIn("ATOMIC_MASS_UNITS", usage)
+        self.assertIn("atomic mass units", usage)
+        self.assertIn("--mu ATOMIC_MASS_UNITS", HELP_HTML)
 
 
 if __name__ == "__main__":

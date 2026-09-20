@@ -8,7 +8,7 @@ import math
 from numbers import Real
 from typing import List
 
-MODEL_VERSION = "1.3.0"
+MODEL_VERSION = "1.4.0"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -59,8 +59,8 @@ BUILD_ID = _compute_build_id()
 
 
 # Physical constants (SI)
-K_BOLTZMANN = 1.38e-23  # Boltzmann constant, J/K
-M_PROTON = 1.67e-27     # Proton mass, kg
+K_BOLTZMANN = 1.380649e-23         # Boltzmann constant, J/K (exact, SI 2019)
+ATOMIC_MASS_UNIT = 1.66053906660e-27  # Atomic mass unit, kg (CODATA 2018)
 
 
 def _is_finite_number(value) -> bool:
@@ -96,6 +96,10 @@ class TemperatureProfile:
             raise ValueError("T_points must contain only finite temperatures greater than zero kelvin.")
         if any(self.h[i + 1] <= self.h[i] for i in range(len(self.h) - 1)):
             raise ValueError("h_points must be in strictly increasing order.")
+        if not math.isfinite(self.h[-1] - self.h[0]):
+            raise ValueError(
+                "h_points span a range too large for the interpolation arithmetic."
+            )
         if not _is_finite_number(self.power) or self.power <= 0.0:
             raise ValueError("power must be a finite positive number.")
 
@@ -122,7 +126,12 @@ class TemperatureProfile:
                     t_high = self.T[i + 1]
                     # Linear interpolation in altitude
                     frac = (altitude - h_low) / (h_high - h_low)
-                    return t_low + frac * (t_high - t_low)
+                    temperature = t_low + frac * (t_high - t_low)
+                    if not math.isfinite(temperature):
+                        raise ValueError(
+                            "The interpolated temperature is not a finite number."
+                        )
+                    return temperature
             # If altitude is below first measurement, just use first temperature
             if altitude < self.h[0]:
                 return self.T[0]
@@ -179,10 +188,10 @@ def ideal_gas_density(pressure: float, mu: float, temperature: float) -> float:
     """
     Ideal gas law in the form used by Atmosphere:
 
-        rho = p * q / T,  where q = mp * mu / k
+        rho = p * q / T,  where q = u * mu / k
 
     pressure: p (Pa)
-    mu: mean molecular weight (in units of proton mass)
+    mu: mean molecular weight (in atomic mass units, u; about 28.97 for dry air)
     temperature: T (K)
     """
     if not _is_finite_number(pressure) or pressure < 0.0:
@@ -192,7 +201,7 @@ def ideal_gas_density(pressure: float, mu: float, temperature: float) -> float:
     if not _is_finite_number(temperature) or temperature <= 0.0:
         raise ValueError("temperature must be a finite number greater than zero kelvin.")
 
-    q = M_PROTON * mu / K_BOLTZMANN
+    q = ATOMIC_MASS_UNIT * mu / K_BOLTZMANN
     density = pressure * q / temperature
     if not math.isfinite(density):
         raise ValueError("The supplied values produce a non-finite density.")

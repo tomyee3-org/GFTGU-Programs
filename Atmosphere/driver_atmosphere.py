@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from bisect import bisect_left
 import math
 from numbers import Real
-from typing import List, Literal
+from typing import List, Literal, Sequence
 
 import physics_atmosphere as phys
 from physics_atmosphere import TemperatureProfile, ideal_gas_density, hydrostatic_step
@@ -30,7 +30,7 @@ MAX_RETRIES = 25
 class AtmosphereParameters:
     planet_name: str
     g_accel: float          # surface gravity (m/s^2)
-    mu: float               # mean molecular weight (in proton masses)
+    mu: float               # mean molecular weight (atomic mass units, u)
     p0: float               # surface pressure (Pa)
     h_points: List[float]   # measured altitudes (m)
     T_points: List[float]   # measured temperatures (K)
@@ -76,13 +76,15 @@ class CheckpointData:
 
 class AtmosphereModel:
     def __init__(self, params: AtmosphereParameters):
-        """Validate ``params`` and keep a private copy of them.
+        """Validate ``params`` and keep a model-owned copy of them.
 
         The model copies the altitude and temperature lists (and the scalar
         values), so changing the caller's lists or parameter object after
         construction does not change what ``run()`` computes.  ``run()``
         validates the model's own copy again before integrating.
         """
+        if not isinstance(params, AtmosphereParameters):
+            raise ValueError("params must be an AtmosphereParameters object.")
         self.params = params
         self.temp_profile = TemperatureProfile(
             h=params.h_points,
@@ -124,7 +126,8 @@ class AtmosphereModel:
         """
         Compute an atmosphere profile by finite steps in altitude:
 
-        - Compute scale height and initial step dh
+        - Compute the scale height at the coldest supplied temperature and
+          the initial step dh from it
         - Use while-loop to adjust dh if top not reached within array size
         - Use for-loop to step in altitude, stopping when pressure <= 0
         - At each step: hydrostatic equilibrium, getTemp, ideal gas law
@@ -133,6 +136,8 @@ class AtmosphereModel:
         an edit made to ``model.params`` after construction is either
         honoured with valid values or rejected with a clear ``ValueError``.
         """
+        if not isinstance(self.params, AtmosphereParameters):
+            raise ValueError("params must be an AtmosphereParameters object.")
         self.temp_profile = TemperatureProfile(
             h=self.params.h_points,
             T=self.params.T_points,
@@ -156,9 +161,20 @@ class AtmosphereModel:
         if not math.isfinite(scale) or scale <= 0.0:
             raise ValueError("The supplied values do not produce a finite positive scale height.")
 
-        # Initial altitude step, following Schutz's choice of 200 steps per
-        # base scale height.
-        dh = scale / STEPS_PER_SCALE_HEIGHT
+        # Initial altitude step: Schutz's choice of 200 steps per scale
+        # height, but measured at the coldest temperature the supplied
+        # profile reaches at or above the reference level.  The scale height
+        # is proportional to T, so a layer colder than the surface has a
+        # smaller local scale height, and a step sized from T(0) alone would
+        # be too coarse there.  For an isothermal profile the coldest
+        # temperature is T0 and the step is the same as before.
+        coldest = min(
+            [T0] + [t for h_i, t in zip(self.params.h_points, self.params.T_points) if h_i > 0.0]
+        )
+        scale_ref = p0 / (g * ideal_gas_density(p0, mu, coldest))
+        if not math.isfinite(scale_ref) or scale_ref <= 0.0:
+            raise ValueError("The supplied values do not produce a finite positive scale height.")
+        dh = scale_ref / STEPS_PER_SCALE_HEIGHT
         if not math.isfinite(dh) or dh <= 0.0:
             raise ValueError("The supplied values do not produce a usable altitude step.")
 
@@ -202,6 +218,21 @@ class AtmosphereModel:
                 # Stop when the Euler step reaches or crosses the model's
                 # zero-pressure boundary.  The non-positive point is excluded.
                 if p[j] <= 0.0:
+                    # The first pass takes 200 steps per scale height at the
+                    # coldest temperature, so it cannot reach zero pressure at
+                    # or below the top supplied altitude.  After a restart has
+                    # enlarged the step it can: the step has then become too
+                    # coarse for the coldest layer, and reporting that
+                    # crossing as the top of the atmosphere would be false.
+                    if retry_count > 1 and alt[j - 1] <= self.temp_profile.h[-1]:
+                        raise RuntimeError(
+                            "The enlarged altitude step reached zero pressure "
+                            "inside the supplied temperature profile, so the "
+                            "result would be unreliable there. The profile is "
+                            "too tall, or too cold in one layer, for the "
+                            "point budget: shorten it, or raise the coldest "
+                            "temperature."
+                        )
                     last_step = j
                     break
 
@@ -233,10 +264,48 @@ class AtmosphereModel:
         )
 
 
+def _require_result_arrays(result: AtmosphereResult) -> None:
+    """Raise ValueError unless ``result`` is a well-formed AtmosphereResult.
+
+    The four arrays must be non-string sequences of finite real numbers of one
+    common, nonzero length, and the altitudes must increase strictly.
+    """
+    if not isinstance(result, AtmosphereResult):
+        raise ValueError("result must be an AtmosphereResult object.")
+    arrays = (
+        ("altitudes", result.altitudes),
+        ("pressures", result.pressures),
+        ("densities", result.densities),
+        ("temperatures", result.temperatures),
+    )
+    for name, values in arrays:
+        if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+            raise ValueError(f"AtmosphereResult {name} must be a non-string sequence of numbers.")
+    if not result.altitudes or any(len(values) != len(result.altitudes) for _, values in arrays):
+        raise ValueError("AtmosphereResult arrays must be nonempty and co-indexed.")
+    for name, values in arrays:
+        if any(
+            not isinstance(value, Real) or isinstance(value, bool) or not math.isfinite(value)
+            for value in values
+        ):
+            raise ValueError(f"AtmosphereResult {name} must contain only finite numbers.")
+    if any(
+        result.altitudes[index + 1] <= result.altitudes[index]
+        for index in range(len(result.altitudes) - 1)
+    ):
+        raise ValueError("AtmosphereResult altitudes must be strictly increasing.")
+    if result.mu is not None and (
+        not isinstance(result.mu, Real) or isinstance(result.mu, bool)
+        or not math.isfinite(result.mu) or result.mu <= 0.0
+    ):
+        raise ValueError("AtmosphereResult mu must be None or a finite positive number.")
+
+
 def extract_output(result: AtmosphereResult) -> CurveData:
     """
     x-values are altitude, y-values depend on outputType.
     """
+    _require_result_arrays(result)
     if result.output_type == "Pressure":
         y = result.pressures
         unit = "Pa"
@@ -278,19 +347,7 @@ def extract_checkpoints(
     returned table with unavailable pressure and density diagnostics.
     """
     TemperatureProfile(h=h_points, T=T_points).validate()
-    arrays = (
-        result.altitudes,
-        result.pressures,
-        result.temperatures,
-        result.densities,
-    )
-    if not result.altitudes or any(len(values) != len(result.altitudes) for values in arrays):
-        raise ValueError("AtmosphereResult arrays must be nonempty and co-indexed.")
-    if any(
-        result.altitudes[index + 1] <= result.altitudes[index]
-        for index in range(len(result.altitudes) - 1)
-    ):
-        raise ValueError("AtmosphereResult altitudes must be strictly increasing.")
+    _require_result_arrays(result)
 
     checkpoints = []
     first_altitude = result.altitudes[0]
