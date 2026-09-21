@@ -158,6 +158,14 @@ def fmt(value, unit=""):
     return "undefined" if value is None else f"{value:.5g}{unit}"
 
 
+def _mass_fractions(MA, MB):
+    """Return ``(MB/(MA+MB), MA/(MA+MB))`` without overflowing the mass sum."""
+    total = MA + MB
+    if isfinite(total):
+        return MB / total, MA / total
+    return 1.0 / (1.0 + MA / MB), 1.0 / (1.0 + MB / MA)
+
+
 def print_summary(result, parameters):
     elements = phys.orbital_elements(*(parameters[key] for key in (
         "MA", "MB", "xInitA", "yInitA", "vInitA", "uInitA",
@@ -175,8 +183,8 @@ def print_summary(result, parameters):
     print(f"Initial Keplerian orbit: {elements.kind}; eccentricity: {fmt(elements.eccentricity)}")
     if elements.kind == "radial":
         print("Radial trajectory (zero angular momentum): apsides and period are undefined.")
-    for label, fraction in (("A", parameters["MB"] / (parameters["MA"] + parameters["MB"])),
-                            ("B", parameters["MA"] / (parameters["MA"] + parameters["MB"]))):
+    fraction_A, fraction_B = _mass_fractions(parameters["MA"], parameters["MB"])
+    for label, fraction in (("A", fraction_A), ("B", fraction_B)):
         scaled = lambda number: None if number is None else fraction * number
         period_days = None if elements.period is None else elements.period / 86400.
         print(f"Body {label} about centre of mass: semi-major axis: "

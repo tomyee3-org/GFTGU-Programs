@@ -2006,6 +2006,105 @@ class TestOrbitalElementsAnalytic(unittest.TestCase):
             self.assertIsNone(getattr(elements, name), name)
 
 
+class TestElementsWithoutFalseRangeErrors(unittest.TestCase):
+    """orbital_elements() and the summary's mass fractions must not overflow in an
+    intermediate step when the quantity asked for is representable.  The oracle is
+    exact decimal arithmetic on the same formulas."""
+
+    @staticmethod
+    def _decimal_context():
+        import decimal
+        context = decimal.getcontext()
+        context.prec = 60
+        context.Emax = 100000
+        context.Emin = -100000
+        return decimal
+
+    @staticmethod
+    def _circular(mass_a, mass_b, separation):
+        """Relative state of a circular orbit, split about the centre of mass."""
+        decimal = TestElementsWithoutFalseRangeErrors._decimal_context()
+        D = decimal.Decimal
+        mu = D(physics.G) * (D(mass_a) + D(mass_b))
+        relative_speed = (mu / D(separation)).sqrt()
+        period = 2 * D(math.pi) * (D(separation) ** 3 / mu).sqrt()
+        return mu, relative_speed, period
+
+    def test_a_circular_period_whose_cube_of_the_radius_overflows(self):
+        mass, radius = 5e199, 1e110
+        with self.assertRaises(OverflowError):
+            radius ** 3
+        mu, relative_speed, period = self._circular(mass, mass, radius)
+        speed = float(relative_speed)
+        elements = physics.orbital_elements(mass, mass, radius / 2, 0.0, 0.0, speed / 2,
+                                            -radius / 2, 0.0, 0.0, -speed / 2)
+        self.assertEqual(elements.kind, "elliptic")
+        self.assertAlmostEqual(elements.period / float(period), 1.0, delta=1e-12)
+        self.assertAlmostEqual(elements.relative_semimajor / radius, 1.0, delta=1e-12)
+        self.assertAlmostEqual(elements.relative_periapsis / radius, 1.0, delta=1e-9)
+        self.assertAlmostEqual(elements.relative_apoapsis / radius, 1.0, delta=1e-9)
+
+    def test_a_mass_sum_that_overflows_although_g_times_it_is_representable(self):
+        mass, radius = 1e308, 1e100
+        self.assertTrue(math.isinf(mass + mass))
+        mu, relative_speed, period = self._circular(mass, mass, radius)
+        speed = float(relative_speed)
+        elements = physics.orbital_elements(mass, mass, radius / 2, 0.0, 0.0, speed / 2,
+                                            -radius / 2, 0.0, 0.0, -speed / 2)
+        self.assertEqual(elements.kind, "elliptic")
+        self.assertAlmostEqual(elements.period / float(period), 1.0, delta=1e-12)
+        self.assertAlmostEqual(elements.relative_semimajor / radius, 1.0, delta=1e-12)
+
+    def test_periapsis_when_the_square_of_the_angular_momentum_overflows(self):
+        decimal = self._decimal_context()
+        D = decimal.Decimal
+        mass, radius, speed = 5e199, 1e110, 1e50
+        angular_momentum = radius * speed
+        self.assertTrue(math.isinf(angular_momentum * angular_momentum))
+        elements = physics.orbital_elements(mass, mass, radius / 2, 0.0, 0.0, speed / 2,
+                                            -radius / 2, 0.0, 0.0, -speed / 2)
+        mu = D(physics.G) * (D(mass) + D(mass))
+        speed_squared = D(speed) ** 2
+        e_x = (speed_squared - mu / D(radius)) * D(radius) / mu
+        expected_periapsis = (D(radius) * D(speed)) ** 2 / (mu * (1 + abs(e_x)))
+        self.assertEqual(elements.kind, "hyperbolic")
+        self.assertAlmostEqual(elements.relative_periapsis / float(expected_periapsis), 1.0, delta=1e-9)
+        self.assertAlmostEqual(elements.eccentricity / float(abs(e_x)), 1.0, delta=1e-9)
+
+    def test_a_period_that_really_is_out_of_range_is_a_value_error(self):
+        mass, radius = 1e-40, 1e200
+        mu, relative_speed, period = self._circular(mass, mass, radius)
+        self.assertGreater(period, self._decimal_context().Decimal("1e308"))
+        speed = float(relative_speed)
+        with self.assertRaises(ValueError) as caught:
+            physics.orbital_elements(mass, mass, radius / 2, 0.0, 0.0, speed / 2,
+                                     -radius / 2, 0.0, 0.0, -speed / 2)
+        self.assertIn("numerical range", str(caught.exception))
+
+    def test_ordinary_results_agree_with_the_textbook_forms(self):
+        elements = physics.orbital_elements(2e30, 2e30, 4.6e10, 0.0, 0.0, 13000.0,
+                                            -4.6e10, 0.0, 0.0, -13000.0)
+        mu = physics.G * 4e30
+        semi = elements.relative_semimajor
+        angular_momentum = 9.2e10 * 26000.0
+        self.assertAlmostEqual(elements.period / (2 * math.pi * math.sqrt(semi ** 3 / mu)),
+                               1.0, delta=1e-14)
+        self.assertAlmostEqual(elements.relative_periapsis
+                               / (angular_momentum ** 2 / (mu * (1 + elements.eccentricity))),
+                               1.0, delta=1e-14)
+
+    def test_mass_fractions_with_and_without_an_overflowing_sum(self):
+        from fractions import Fraction
+        cases = ((2e30, 1e30), (1e30, 2e30), (2e30, 2e30), (1.7e308, 1.7e308),
+                 (1.7e308, 0.85e308), (0.85e308, 1.7e308), (1.7e308, 1e300), (1e-300, 1.7e308))
+        for mass_a, mass_b in cases:
+            with self.subTest(MA=mass_a, MB=mass_b):
+                total = Fraction(mass_a) + Fraction(mass_b)
+                fraction_a, fraction_b = entry._mass_fractions(mass_a, mass_b)
+                self.assertAlmostEqual(fraction_a, float(Fraction(mass_b) / total), delta=1e-15)
+                self.assertAlmostEqual(fraction_b, float(Fraction(mass_a) / total), delta=1e-15)
+                self.assertAlmostEqual(fraction_a + fraction_b, 1.0, delta=2e-16)
+
 class TestPrintedSummaryLines(unittest.TestCase):
     def test_default_summary_lines(self):
         printed = printed_run([])
@@ -2757,6 +2856,11 @@ class BeatQuotedNumberTests(unittest.TestCase):
         run = run_result()
         below = 100 * (2 * peri - min(separation_list(run))) / (2 * peri)
         self.assertEqual(f"{below:.3f}", "0.015")
+        # the rounded digits printed in the Help give the smaller figure the Help quotes beside it
+        printed_min = float(default["Minimum separation (sampled)"].replace(" m", ""))
+        printed_below = 100 * (2 * 6.0643e9 - printed_min) / (2 * 6.0643e9)
+        self.assertEqual(f"{printed_below:.3f}", "0.013")
+        self.assertIn("the rounded digits printed here give about 0.013%", beat_text(4))
         self.assertPhrase(
             4,
             "The minimum and maximum separations are both 9.2e+10 m",
@@ -3265,11 +3369,41 @@ class ExperimentQuotedNumberTests(unittest.TestCase):
         self.assertIn("from driver_binary import integrate_binary", code)
         return code
 
-    def test_experiment_8_snippet_runs_and_prints_the_quoted_departure(self):
+    def test_experiment_8_snippet_runs_and_prints_the_quoted_departures(self):
         code = self.snippet_source()
+        calls = []
+
+        def cached_integrate_binary(**settings):
+            # The same integration, served from the suite's cache; the arguments
+            # must all be keywords that the real function accepts.
+            calls.append(settings)
+            return run_result(**settings)
+
+        stand_in = type(sys)("driver_binary")
+        stand_in.integrate_binary = cached_integrate_binary
+        with mock.patch.dict(sys.modules, {"driver_binary": stand_in}):
+            with redirect_stdout(io.StringIO()) as out:
+                exec(compile(code, "experiment 8 snippet", "exec"), {"__name__": "snippet"})
+        printed = [float(line) for line in out.getvalue().split()]
+        self.assertEqual(len(printed), 6)
+        self.assertEqual(len(calls), 6)
+        self.assertEqual([f"{abs(value):.4e}" for value in printed[:3]], ["1.2853e-03", "4.5163e-04", "2.9623e-04"])
+        self.assertEqual(f"{100 * abs(printed[3]):.1f}", "25.9")
+        self.assertEqual([f"{abs(value):.4e}" for value in printed[4:]], ["2.0184e-04", "1.0371e-04"])
+        # each printed value is the suite's own largest departure, measured from the first stored E
+        for settings, value in zip(calls, printed):
+            with self.subTest(settings=settings):
+                # exact equality: the same subtraction and division, so a different reference
+                # energy (a change of about 4e-13 in relative terms) would show
+                self.assertEqual(abs(value), abs(largest_departure(run_result(**settings))))
+        self.assertIn("so the first line begins 0.00128", experiment_text(8))
+
+    def test_experiment_8_snippet_first_line_runs_against_the_real_integrator(self):
+        code = self.snippet_source().split("print(largest_departure())")[0] + "print(largest_departure())"
         with redirect_stdout(io.StringIO()) as out:
             exec(compile(code, "experiment 8 snippet", "exec"), {"__name__": "snippet"})
         self.assertEqual(f"{float(out.getvalue()):.4e}", "1.2853e-03")
+        self.assertTrue(out.getvalue().startswith("0.00128"))
 
     def test_experiment_8_three_orbit_comparison(self):
         def worst(**changes):
@@ -3299,8 +3433,8 @@ class ExperimentQuotedNumberTests(unittest.TestCase):
             "Neither the plot nor the printed table can give that maximum",
             "the eleven rows of the table fall at multiples of 16.2 days, while the closest approaches are at "
             "days 26.4, 79.3 and 132.2",
-            "This gives 1.2853e-03, reached at the third closest approach",
-            "With dt 1000 and max_steps 14000 it gives 4.5163e-04, and with eps2 1e-8 as well it gives 2.9623e-04",
+            "The first, for the default settings, is 1.2853e-03, reached at the third closest approach",
+            "With dt 1000 and max_steps 14000 it is 4.5163e-04, and with eps2 1e-8 as well it is 2.9623e-04",
             "The printed Total revolutions is 3.0136 for the first run and 3.0133 for the second",
         )
 
@@ -3324,9 +3458,9 @@ class ExperimentQuotedNumberTests(unittest.TestCase):
             "The eccentricity is 0.99862 and the Keplerian period is 43.956 days",
             "the run takes 2456 steps and stops after 43.231 days",
             "reports a largest departure of 25.9%",
-            "With eps1 = 0.001 the run takes 43303 steps, stops after 43.97 days, and the largest departure is "
-            "2.0184e-04",
-            "Add --eps2 1e-8 as well and it falls to 1.0371e-04",
+            "With eps1 = 0.001 the run takes 43303 steps, stops after 43.97 days, and the largest departure, on the "
+            "fifth line, is 2.0184e-04",
+            "Add --eps2 1e-8 as well and it falls to 1.0371e-04, the sixth line",
         )
 
 
@@ -3424,7 +3558,7 @@ EXPECTED_CROSS_REFERENCES = {'overview': ['Beats 5 to 7'],
            'Experiment 2',
            'Experiment 3'],
  'beat3': ['Beat 3', 'Eq. (1)', 'Beat 4)', 'Equation (6)', 'Eq. (1)', 'Beats 5 to 7', 'Experiment 6'],
- 'beat4': ['Beat 4', 'Beat 3', 'Eq. (1)', 'Experiment 1', 'Experiment 4'],
+ 'beat4': ['Beat 4', 'Beat 3', 'Eq. (1)', 'Beat 2', 'Experiment 3)', 'Experiment 1', 'Experiment 4'],
  'beat5': ['Beat 5',
            'Eqs. (2) and (3)',
            'Eq. (9)',
@@ -3458,12 +3592,15 @@ EXPECTED_CROSS_REFERENCES = {'overview': ['Beats 5 to 7'],
                'Eqs. (5) to (7)',
                'Beat 6)',
                'Beat 7)',
-               'Beat 5)',
                'Beat 7)',
+               'Beats 5 and 7',
+               'Beat 7)',
+               'Beat 7',
                'Experiment 8)'],
  'output-types': ['Beat 3)'],
  'summary': ['Beat 6)',
              'Beat 4',
+             'Beat 7)',
              'Beat 6)',
              'Beat 2)',
              'Experiment 6)',
@@ -3484,7 +3621,15 @@ EXPECTED_CROSS_REFERENCES = {'overview': ['Beats 5 to 7'],
 
 EXPECTED_ROW_LABELS = {'beat2': ['row 0.0', 'row 0.0', 'row 0.5'],
  'beat3': ['row 0.0', 'row 0.0'],
- 'beat5': ['rows 0.5 and 1.0', 'row 0.5', 'row 1.0', 'Row 0.5', 'row 0.5', 'row 1.0', 'row 1.0', 'row 0.5'],
+ 'beat5': ['rows 0.5 and 1.0',
+           'Row 0.5',
+           'row 0.5',
+           'row 1.0',
+           'Row 0.5',
+           'row 0.5',
+           'row 1.0',
+           'row 1.0',
+           'row 0.5'],
  'beat6': ['row 0.5', 'row 0.5', 'row 0.5', 'Row 0.5'],
  'beat7': ['rows 0.5 and 1.0',
            'row 0.5',
@@ -3515,8 +3660,8 @@ EXPECTED_DISPLAY_EQUATIONS = [('beat0', ['F=\\frac{GM_AM_B}{r^2}, \\qquad r=\\sq
    'U \\;=\\; -\\frac{G\\,M_A\\,M_B}{r}',
    'E \\;=\\; K + U']),
  ('beat4',
-  ['\\ell_A \\;=\\; x_A u_A - y_A v_A \\;=\\; \\text{constant}, \\qquad r_p\\,v_p \\;=\\; r_a\\,v_a \\;=\\; '
-   '\\ell_A',
+  ['\\ell_A \\;=\\; (\\mathbf r_A-\\mathbf R_{\\rm CM})\\times(\\mathbf v_A-\\mathbf V_{\\rm CM}) \\;=\\; '
+   '\\text{constant}, \\qquad r_p\\,v_p \\;=\\; r_a\\,v_a \\;=\\; \\ell_A',
    'T \\;=\\; 2\\pi\\sqrt{\\frac{a^{3}}{G\\,(M_A+M_B)}}, \\qquad a \\;=\\; a_A + a_B',
    'R_v \\;=\\; \\tfrac12\\,(v_p+v_a), \\qquad d_v \\;=\\; \\tfrac12\\,(v_p-v_a), \\qquad e \\;=\\; '
    '\\frac{d_v}{R_v} \\;=\\; \\frac{v_p-v_a}{v_p+v_a}',
@@ -3540,20 +3685,31 @@ EXPECTED_DISPLAY_EQUATIONS = [('beat0', ['F=\\frac{GM_AM_B}{r^2}, \\qquad r=\\sq
 
 EXPECTED_INLINE_MATH_WITH_NUMBERS = {'beat0': ['G=6.67430\\times10^{-11}\\,\\mathrm{m^3\\,kg^{-1}\\,s^{-2}}'],
  'beat1': ['M_A/M_B=2', 'M_A\\mathbf a_A+M_B\\mathbf a_B=0'],
- 'beat2': ['\\tfrac12(M_A+M_B)V^2=\\tfrac12\\times4\\times10^{30}\\times(6\\times10^4)^2',
+ 'beat2': ['\\tfrac12(M_A+M_B)V^2',
+           '\\tfrac12\\times4\\times10^{30}\\times(6\\times10^4)^2',
            '3\\times10^{36}',
            '|E_0|',
            '\\mathbf V_0',
            '\\mathbf r_i(t)\\to\\mathbf r_i(t)+\\mathbf V_0t',
            '\\mathbf V_0t'],
- 'beat3': ['-GM_AM_B/r=-6.6743\\times10^{-11}\\times(2\\times10^{30})^2/9.2\\times10^{10}',
+ 'beat3': ['-6.6743\\times10^{-11}\\times(2\\times10^{30})^2',
+           '9.2\\times10^{10}',
            'E<0',
            'E>0',
            'E=0',
            'E<0',
            '|E_0|',
            'E_0'],
- 'beat4': ['a(1-e)', 'a(1+e)', 'v_p/v_a=(1+e)/(1-e)', '(v_p-v_a)/2', 'e<1', 'e=1', 'e>1', '2\\pi'],
+ 'beat4': ['a(1-e)',
+           'a(1+e)',
+           'v_p/v_a=(1+e)/(1-e)',
+           '(v_p-v_a)/2',
+           'e<1',
+           'e=1',
+           'e>1',
+           '\\mathbf V_0',
+           '\\mathbf V_0',
+           '2\\pi'],
  'beat5': ['\\mathbf a^{n+1}', '\\mathbf r^{n+1}', '\\mathbf v^{(0)}'],
  'beat6': ['\\Delta_a>\\varepsilon_1', '\\varepsilon_1'],
  'algorithm': ['\\Delta_a>\\varepsilon_1', '2\\pi', '0.05', '10^{-4}'],
@@ -3869,21 +4025,190 @@ class ProsePinTests(unittest.TestCase):
     def test_the_experiment_8_snippet_is_the_call_whose_result_is_quoted(self):
         block = next(block for block in re.findall(r"<pre[^>]*>(.*?)</pre>", experiment_html(8), re.DOTALL)
                      if "integrate_binary" in block)
-        code = " ".join(html_module.unescape(re.sub(r"<[^>]+>", "", block)).split())
-        self.assertEqual(
-            code,
-            "from driver_binary import integrate_binary r = integrate_binary(2e30, 2e30, 4.6e10, 0, 0, 13000, "
-            "-4.6e10, 0, 0, -13000, 2000, 7000, 0.05, 1e-4, stop_after_one_orbit=False) "
-            "print(max(abs(e - r.E[0]) / abs(r.E[0]) for e in r.E))")
-        call = ast.parse(code.split(" r = ")[1].split(" print")[0]).body[0].value
-        arguments = [ast.literal_eval(argument) for argument in call.args]
-        names = ("MA", "MB", "xInitA", "yInitA", "vInitA", "uInitA", "xInitB", "yInitB", "vInitB", "uInitB",
-                 "dt", "max_steps", "eps1", "eps2")
-        expected = dict(DEFAULTS, dt=2000.0, max_steps=7000)
-        for name, value in zip(names, arguments):
-            with self.subTest(argument=name):
-                self.assertEqual(value, expected[name])
-        self.assertEqual(len(arguments), 14)
+        source = html_module.unescape(re.sub(r"<[^>]+>", "", block))
+        tree = ast.parse(source)
+        function = next(node for node in tree.body if isinstance(node, ast.FunctionDef))
+        self.assertEqual(function.name, "largest_departure")
+        settings = next(node.value for node in function.body
+                        if isinstance(node, ast.Assign) and node.targets[0].id == "settings")
+        defaults = {keyword.arg: ast.literal_eval(keyword.value) for keyword in settings.keywords}
+        expected = dict(DEFAULTS, dt=2000.0, max_steps=7000, stop_after_one_orbit=False)
+        self.assertEqual(defaults, expected)
+        self.assertEqual(len(defaults), 15)
+        printed = [{keyword.arg: ast.literal_eval(keyword.value) for keyword in node.value.args[0].keywords}
+                   for node in tree.body if isinstance(node, ast.Expr)]
+        self.assertEqual(printed, [
+            {},
+            {"dt": 1000, "max_steps": 14000},
+            {"dt": 1000, "max_steps": 14000, "eps2": 1e-8},
+            {"uInitA": 1000, "uInitB": -1000, "max_steps": 400000, "stop_after_one_orbit": True},
+            {"uInitA": 1000, "uInitB": -1000, "max_steps": 400000, "stop_after_one_orbit": True, "eps1": 0.001},
+            {"uInitA": 1000, "uInitB": -1000, "max_steps": 400000, "stop_after_one_orbit": True, "eps1": 0.001,
+             "eps2": 1e-8},
+        ])
+
+
+@needs_beats
+class TerminationClaimTests(unittest.TestCase):
+    """What the Help says about how a run ends must match what the program does, and the
+    places that say it must not contradict one another."""
+
+    def test_an_inward_radial_start_stops_early_with_the_safety_error(self):
+        with self.assertRaisesRegex(RuntimeError, "numerical safety limit"):
+            driver.integrate_binary(**dict(DEFAULTS, uInitA=0.0, uInitB=0.0, max_steps=100000))
+
+    def test_an_outward_radial_start_runs_to_the_step_ceiling(self):
+        result = driver.integrate_binary(**dict(DEFAULTS, uInitA=0.0, uInitB=0.0, vInitA=4000.0,
+                                                vInitB=-4000.0, max_steps=300))
+        self.assertFalse(result.completed_orbit)
+        self.assertEqual(result.accepted_steps, 300)
+
+    def test_an_unbound_orbit_runs_to_the_step_ceiling(self):
+        result = run_result(uInitA=60000.0, uInitB=-60000.0, max_steps=1000)
+        self.assertFalse(result.completed_orbit)
+        self.assertEqual(result.accepted_steps, 1000)
+
+    def test_the_printed_summary_gives_both_outcomes(self):
+        summary = html_text(section_html(HELP_HTML, "summary"))
+        self.assertIn("the one-revolution rule cannot stop it; if the integration stays numerically viable "
+                      "it runs to max_steps", summary)
+        self.assertIn("An inward radial start can instead stop early with the close-approach safety error "
+                      "(Beat 7)", summary)
+
+    def test_beat_7_and_the_algorithm_section_agree_that_a_head_on_start_stops_early(self):
+        beat = html_text(section_html(HELP_HTML, "beat7"))
+        self.assertIn("a head-on start", beat)
+        self.assertIn("the program stops with a message that the required timestep has fallen below the "
+                      "numerical safety limit", beat)
+        algorithm = html_text(section_html(HELP_HTML, "algorithm"))
+        self.assertIn("A run can also end earlier with an error, for example when an inward radial start "
+                      "reaches the close-approach safety limit (Beat 7)", algorithm)
+
+    def test_no_sentence_says_that_an_unbound_or_radial_run_always_ends_at_max_steps(self):
+        for section in ALL_SECTIONS:
+            text = html_text(section_html(HELP_HTML, section))
+            for sentence in re.split(r"(?<=[.!?])\s+", text):
+                if "max_steps" in sentence and re.search(r"radial|unbound|head-on", sentence):
+                    with self.subTest(section=section, sentence=sentence[:80]):
+                        self.assertNotRegex(sentence, r"\b(always|invariably|must)\b")
+
+
+@needs_beats
+class FrameAndWordingTests(unittest.TestCase):
+    """Statements about frames, closed-form solutions and energy diagnostics, each tied to
+    the computation that makes it true (or to the wording that keeps it from over-reaching)."""
+
+    def test_beat_4_angular_momentum_is_stated_about_the_centre_of_mass(self):
+        beat = html_text(section_html(HELP_HTML, "beat4"))
+        self.assertIn("exerts no torque about the centre of mass", beat)
+        self.assertNotIn("cannot turn it", beat)
+        self.assertIn("In the two commands above the centre of mass is at the origin and at rest", beat)
+        html = section_html(HELP_HTML, "beat4")
+        self.assertIn(r"\ell_A \;=\; (\mathbf r_A-\mathbf R_{\rm CM})\times(\mathbf v_A-\mathbf V_{\rm CM})", html)
+
+    def test_the_centre_of_mass_form_is_conserved_and_the_origin_form_is_not_when_the_pair_drifts(self):
+        # equal masses: R_CM is the mean position and V_CM the mean velocity
+        def series(result, about_centre_of_mass):
+            values = []
+            for xa, ya, va, ua, xb, yb, vb, ub in zip(result.xA, result.yA, result.vA, result.uA,
+                                                      result.xB, result.yB, result.vB, result.uB):
+                if about_centre_of_mass:
+                    rx, ry = xa - (xa + xb) / 2, ya - (ya + yb) / 2
+                    wx, wy = va - (va + vb) / 2, ua - (ua + ub) / 2
+                else:
+                    rx, ry, wx, wy = xa, ya, va, ua
+                values.append(rx * wy - ry * wx)
+            return values
+
+        at_rest = run_result()
+        moving = run_result(vInitA=60000.0, vInitB=60000.0)
+        first = series(at_rest, False)[0]
+        self.assertAlmostEqual(first, 4.6e10 * 13000.0, delta=1e-9 * first)
+        for label, result, about_centre_of_mass in (("at rest, origin", at_rest, False),
+                                                   ("at rest, centre of mass", at_rest, True),
+                                                   ("moving, centre of mass", moving, True)):
+            values = series(result, about_centre_of_mass)
+            with self.subTest(case=label):
+                self.assertLess(max(values) - min(values), 5e-4 * abs(values[0]))
+        spread = series(moving, False)
+        self.assertGreater(max(spread) - min(spread), 0.1 * abs(spread[0]))
+
+    def test_the_hodograph_origin_test_needs_a_centre_of_mass_at_rest(self):
+        def winding(result):
+            """Total turning of body A's inertial velocity vector, in units of a full turn."""
+            angle = 0.0
+            for i in range(len(result.vA) - 1):
+                cross = result.vA[i] * result.uA[i + 1] - result.uA[i] * result.vA[i + 1]
+                dot = result.vA[i] * result.vA[i + 1] + result.uA[i] * result.uA[i + 1]
+                angle += math.atan2(cross, dot)
+            return angle / (2 * math.pi)
+
+        self.assertAlmostEqual(abs(winding(run_result())), 1.0, delta=0.01)
+        self.assertLess(abs(winding(run_result(vInitA=60000.0, vInitB=60000.0))), 0.25)
+        text = html_text(section_html(HELP_HTML, "beat4"))
+        for phrase in ("which are measured relative to the centre of mass",
+                       "when the centre of mass is at rest, a glance at the velocity-space plot tells you "
+                       "whether an orbit is bound",
+                       "so with a moving centre of mass the origin test applies only after \\(\\mathbf V_{\\rm CM}\\) has "
+                       "been subtracted, and a large enough boost puts the origin outside the circle of a bound orbit"):
+            with self.subTest(phrase=phrase[:50]):
+                self.assertIn(phrase, text)
+
+    def test_beat_5_does_not_claim_that_the_two_body_problem_has_no_closed_form(self):
+        beat = html_text(section_html(HELP_HTML, "beat5"))
+        self.assertNotIn("cannot be solved in closed form", beat)
+        self.assertIn("do have an exact solution for two point masses", beat)
+        self.assertIn("Binary deliberately integrates the equations step by step", beat)
+        self.assertIn("the Keplerian block then serves as an outside check on the integration", beat)
+
+    def test_energy_error_wording_does_not_claim_more_than_the_evidence(self):
+        beat3 = html_text(section_html(HELP_HTML, "beat3"))
+        self.assertNotIn("direct measure of accumulated numerical error", beat3)
+        self.assertIn("one important diagnostic of accumulated numerical error, although a small energy error "
+                      "does not by itself bound the error in the positions, the period or the phase", beat3)
+        beat7 = html_text(section_html(HELP_HTML, "beat7"))
+        self.assertIn("shows in these runs what the corrector contributes", beat7)
+        self.assertIn("not a universal separation of two sources of error", beat7)
+        algorithm = html_text(section_html(HELP_HTML, "algorithm"))
+        self.assertIn("in the runs of Beats 5 and 7", algorithm)
+        self.assertIn("In the runs of Beat 7, a departure that remains at the end of the orbit", algorithm)
+
+    def test_row_0_5_is_at_or_near_closest_approach_in_the_runs_that_beat_5_describes(self):
+        beat5 = html_text(section_html(HELP_HTML, "beat5"))
+        self.assertIn("Row 0.5 is half way through the run; every run here starts at apoapsis, so that row "
+                      "falls at or near closest approach", beat5)
+        for changes in ({}, {"eps2": 1e-8}, {"eps2": 0.5}):
+            with self.subTest(changes=changes):
+                result = run_result(**changes)
+                separations = separation_list(result)
+                closest = min(range(len(separations)), key=separations.__getitem__)
+                self.assertAlmostEqual(result.times[closest] / result.times[-1], 0.5, delta=0.01)
+                self.assertEqual(separations[0], 9.2e10)
+                self.assertLessEqual(max(separations), 9.2e10 * (1 + 1e-3))
+
+    def test_beat_3_gives_the_real_reason_the_unbound_runs_stop_at_max_steps(self):
+        beat3 = html_text(section_html(HELP_HTML, "beat3"))
+        self.assertIn("because their commands turn the one-revolution stop off", beat3)
+        for command in experiment_commands(6)[:2]:
+            self.assertIn("--no-stop_after_one_orbit", command)
+
+    def test_every_table_scrolls_inside_a_labelled_region(self):
+        html = HELP_HTML
+        tables = re.findall(r"<table\b", html)
+        wrappers = re.findall(r'<div class="table-scroll" role="region" tabindex="0" aria-label="([^"]+)">'
+                              r"\s*<table\b", html)
+        self.assertEqual(len(tables), len(wrappers))
+        self.assertGreaterEqual(len(tables), 5)
+        self.assertEqual(len(set(wrappers)), len(wrappers))
+        self.assertRegex(html, r"\.table-scroll\s*\{\s*overflow-x:\s*auto;")
+        self.assertRegex(html, r"main\s*\{\s*min-width:\s*0;")
+
+    def test_no_inline_formula_is_too_long_to_wrap_on_a_phone(self):
+        for section in ALL_SECTIONS:
+            body = re.sub(r"\\\[(.*?)\\\]", "", section_html(HELP_HTML, section), flags=re.DOTALL)
+            for formula in re.findall(r"\\\((.*?)\\\)", body, re.DOTALL):
+                with self.subTest(section=section, formula=formula[:40]):
+                    self.assertLessEqual(len(" ".join(formula.split())), 55)
 
 
 if __name__ == "__main__":

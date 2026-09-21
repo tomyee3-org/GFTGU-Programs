@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from math import frexp, fsum, hypot, isfinite, ldexp, pi, sqrt
 from numbers import Real
 
-MODEL_VERSION = "1.2.1"
+MODEL_VERSION = "1.2.2"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -101,7 +101,10 @@ def orbital_elements(MA: float, MB: float, xA: float, yA: float,
         _finite_real(name, value)
     rx, ry, r = relative_displacement(xA, yA, xB, yB)
     vx, vy = vA - vB, uA - uB
-    mu = G * (MA + MB)
+    total_mass = MA + MB
+    # Sum the two gravitational parameters separately when the mass sum itself
+    # would overflow although G times it is representable.
+    mu = G * total_mass if isfinite(total_mass) else G * MA + G * MB
     if not all(isfinite(z) for z in (vx, vy, mu)) or mu <= 0:
         raise ValueError("Orbital elements are outside the numerical range.")
     v2 = vx * vx + vy * vy
@@ -130,16 +133,18 @@ def orbital_elements(MA: float, MB: float, xA: float, yA: float,
         kind = "elliptic"
         semi = -mu / (2 * specific_energy)
         eccentricity = min(eccentricity, 1.0)
-        period = 2 * pi * sqrt(semi ** 3 / mu)
+        # semi ** 3 could overflow when the period is representable.
+        period = 2 * pi * semi * sqrt(semi / mu)
         apo = semi * (1 + eccentricity)
         speed_apo = abs(h) / apo
     else:
         kind = "hyperbolic"
         semi = -mu / (2 * specific_energy)  # Signed conic semimajor axis.
         period = apo = speed_apo = None
-    peri = h * h / (mu * (1 + eccentricity))
+    peri = h / (mu * (1 + eccentricity)) * h
     speed_peri = abs(h) / peri
-    if not all(isfinite(z) for z in (eccentricity, peri, speed_peri)):
+    if not all(isfinite(z) for z in (eccentricity, peri, speed_peri, period, apo, speed_apo)
+               if z is not None):
         raise ValueError("Orbital elements are outside the numerical range.")
     return OrbitalElements(kind, eccentricity, semi, period,
                            peri, apo, speed_peri, speed_apo)
