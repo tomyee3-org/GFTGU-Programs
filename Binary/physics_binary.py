@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from math import frexp, fsum, hypot, isfinite, ldexp, pi, sqrt
 from numbers import Real
 
-MODEL_VERSION = "1.2.0"
+MODEL_VERSION = "1.2.1"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -116,7 +116,8 @@ def orbital_elements(MA: float, MB: float, xA: float, yA: float,
     if not isfinite(eccentricity):
         raise ValueError("Orbital elements are outside the numerical range.")
     if h == 0:
-        # A radial collision has no nonzero periapsis or apsidal speed.
+        # Zero angular momentum: a straight-line (radial) path, inward or outward,
+        # has no periapsis or apsidal speed in the usual sense.
         return OrbitalElements("radial", eccentricity, None, None,
                                None, None, None, None)
     # Treat roundoff at escape energy as a parabola.

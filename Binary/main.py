@@ -106,8 +106,12 @@ def parse_args(argv=None):
     stop.add_argument("--stop_after_one_orbit", dest="stop_after_one_orbit",
                       action="store_true", default=True,
                       help="stop when the relative position completes one turn")
+    # The value True belongs to --stop_after_one_orbit above.  Suppressing the
+    # default here keeps --help from printing "(default: True)" beside the
+    # option that turns the stop off.
     stop.add_argument("--no-stop_after_one_orbit", dest="stop_after_one_orbit",
-                      action="store_false", help="run to max_steps, including unbound trajectories")
+                      action="store_false", default=argparse.SUPPRESS,
+                      help="run to max_steps, including unbound trajectories")
     parser.add_argument("--output_type", choices=tuple(OUTPUT_TYPES), default="orbits",
                         help="plot: orbits = xy tracks; velocity_space = velocity plane; "
                              "position_vs_time_body_a/b = positions versus time; "
@@ -170,7 +174,7 @@ def print_summary(result, parameters):
     print(f"Maximum separation (sampled): {fmt(max(separations))} m")
     print(f"Initial Keplerian orbit: {elements.kind}; eccentricity: {fmt(elements.eccentricity)}")
     if elements.kind == "radial":
-        print("Radial trajectory: apsides and period are undefined for a collision orbit.")
+        print("Radial trajectory (zero angular momentum): apsides and period are undefined.")
     for label, fraction in (("A", parameters["MB"] / (parameters["MA"] + parameters["MB"])),
                             ("B", parameters["MA"] / (parameters["MA"] + parameters["MB"]))):
         scaled = lambda number: None if number is None else fraction * number

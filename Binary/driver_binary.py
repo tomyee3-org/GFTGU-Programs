@@ -106,6 +106,22 @@ def _advance_time(current_time: float, timestep: float) -> float:
     return new_time
 
 
+def _compensated_add(total: float, compensation: float, term: float):
+    """One step of Neumaier's compensated summation.
+
+    Return the updated ``(total, compensation)``.  The best estimate of the
+    sum is ``total + compensation``; ``compensation`` collects the low-order
+    part of each addition that a plain ``total + term`` would discard, so the
+    accumulated orbit angle stays accurate over a very large number of steps.
+    """
+    new_total = total + term
+    if abs(total) >= abs(term):
+        compensation += (total - new_total) + term
+    else:
+        compensation += (term - new_total) + total
+    return new_total, compensation
+
+
 def integrate_binary(
     MA: float,
     MB: float,
@@ -202,7 +218,11 @@ def integrate_binary(
     max_retries_per_step = 60
     accepted_steps = 0
     completed_orbit = False
+    # The signed orbit angle is summed with compensation (see _compensated_add);
+    # total_angle is the running best estimate of the sum.
     accumulated_angle = 0.0
+    angle_compensation = 0.0
+    total_angle = 0.0
 
     rel_x_old = state.xA - state.xB
     rel_y_old = state.yA - state.yB
@@ -305,14 +325,17 @@ def integrate_binary(
             raise RuntimeError(
                 "The orbit-angle diagnostic produced a non-finite increment."
             )
-        accumulated_angle += angle_increment
-        if not isfinite(accumulated_angle):
+        accumulated_angle, angle_compensation = _compensated_add(
+            accumulated_angle, angle_compensation, angle_increment
+        )
+        total_angle = accumulated_angle + angle_compensation
+        if not isfinite(total_angle):
             raise RuntimeError(
                 "The accumulated orbit angle is outside the numerical range."
             )
         rel_x_old, rel_y_old = rel_x_new, rel_y_new
 
-        if stop_after_one_orbit and abs(accumulated_angle) >= 2.0 * pi:
+        if stop_after_one_orbit and abs(total_angle) >= 2.0 * pi:
             completed_orbit = True
             break
 
@@ -325,7 +348,7 @@ def integrate_binary(
         U=U_list, K=K_list, E=E_list,
         completed_orbit=completed_orbit,
         accepted_steps=accepted_steps,
-        total_angle_rad=accumulated_angle,
+        total_angle_rad=total_angle,
         model_version=phys.MODEL_VERSION,
         build_id=phys.BUILD_ID,
     )
