@@ -84,8 +84,10 @@ def run_cannon_trajectory(
     max_steps counts stored points, including the initial point. Normal output
     includes the initial point and the first sampled point below ground.
 
-    Raises ValueError for invalid input and RuntimeError if max_steps is
-    exhausted before a below-ground sample is reached.
+    Raises TypeError for a setting of the wrong type and ValueError for an
+    invalid value.  Raises RuntimeError if max_steps is exhausted before a
+    below-ground sample is reached, and FloatingPointError if the computed
+    state becomes non-finite.
     """
     speed, angle_deg, dt, max_steps = _validate_inputs(
         speed, angle_deg, dt, max_steps, method
