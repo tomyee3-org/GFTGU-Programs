@@ -40,6 +40,19 @@ def _require_real(name, value):
     return normalized
 
 
+def _finite_result(what, calculate):
+    """Return ``calculate()`` as a float, or raise FloatingPointError.
+
+    The arithmetic runs with overflow and invalid operations raised, so that
+    finite samples can never produce an infinite or undefined result silently.
+    """
+    try:
+        with np.errstate(over="raise", invalid="raise"):
+            return float(calculate())
+    except FloatingPointError as exc:
+        raise FloatingPointError(f"{what} is not finite for these samples") from exc
+
+
 def _validate_inputs(speed, angle_deg, dt, max_steps, method):
     speed = _require_real("speed", speed)
     if speed <= 0.0:
@@ -136,7 +149,9 @@ def interpolated_landing_range(xs, hs):
     The stored trajectory ends at the first sample below ground.  Linear
     interpolation between that sample and the preceding non-negative sample
     gives a range accurate enough for the introductory comparisons, without
-    requiring the student to write the interpolation themselves.
+    requiring the student to write the interpolation themselves.  Raises
+    ValueError for samples that are not a landing pair and FloatingPointError
+    if the arithmetic overflows.
     """
     xs = np.asarray(xs, dtype=float)
     hs = np.asarray(hs, dtype=float)
@@ -152,7 +167,10 @@ def interpolated_landing_range(xs, hs):
         raise ValueError("the sample before landing must be at or above ground")
     if hs[-2] == 0.0:
         return float(xs[-2])
-    return float(xs[-2] + (xs[-1] - xs[-2]) * hs[-2] / (hs[-2] - hs[-1]))
+    return _finite_result(
+        "the interpolated landing range",
+        lambda: xs[-2] + (xs[-1] - xs[-2]) * hs[-2] / (hs[-2] - hs[-1]),
+    )
 
 
 def maximum_height(hs):
@@ -198,7 +216,11 @@ def interpolated_maximum_height(hs):
 
 
 def interpolated_flight_time(hs, dt):
-    """Return flight time from linear interpolation at the ground crossing."""
+    """Return flight time from linear interpolation at the ground crossing.
+
+    Raises ValueError for samples that are not a landing pair and
+    FloatingPointError if the arithmetic overflows.
+    """
     hs = np.asarray(hs, dtype=float)
     if hs.ndim != 1 or hs.size < 2:
         raise ValueError("hs must be a one-dimensional array with at least two samples")
@@ -213,5 +235,9 @@ def interpolated_flight_time(hs, dt):
     if dt <= 0.0:
         raise ValueError("dt must be a finite positive number")
 
-    fraction = 0.0 if hs[-2] == 0.0 else hs[-2] / (hs[-2] - hs[-1])
-    return float((hs.size - 2 + fraction) * dt)
+    if hs[-2] == 0.0:
+        return _finite_result("the interpolated flight time", lambda: (hs.size - 2) * dt)
+    return _finite_result(
+        "the interpolated flight time",
+        lambda: (hs.size - 2 + hs[-2] / (hs[-2] - hs[-1])) * dt,
+    )

@@ -24,6 +24,7 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+import warnings
 
 import numpy as np
 
@@ -568,16 +569,34 @@ class TestDriverValidation(unittest.TestCase):
             driver.run_cannon_trajectory(max_steps=2)
 
     def test_enormous_step_ceiling_does_not_trigger_enormous_allocation(self):
-        xs, hs = driver.run_cannon_trajectory(
-            speed=1.0,
-            angle_deg=0.0,
-            dt=0.1,
-            max_steps=10**100,
-            method="improved",
-        )
+        # The enormous ceiling proves that nothing is allocated up front.  If a
+        # defect kept the ball above the ground, the append-only loop would
+        # grow until memory ran out, so the stepper is wrapped and the test
+        # fails after 100 calls instead.  The correct program needs one call.
+        calls = []
+        real_step = driver.improved_euler_step
+
+        class RanAway(Exception):
+            pass
+
+        def counting_step(state, dt):
+            calls.append(dt)
+            if len(calls) > 100:
+                raise RanAway("the projectile had not landed after 100 steps")
+            return real_step(state, dt)
+
+        with mock.patch.object(driver, "improved_euler_step", counting_step):
+            xs, hs = driver.run_cannon_trajectory(
+                speed=1.0,
+                angle_deg=0.0,
+                dt=0.1,
+                max_steps=10**100,
+                method="improved",
+            )
         np.testing.assert_allclose(xs, [0.0, 0.1])
         self.assertEqual(len(hs), 2)
         self.assertLess(hs[-1], 0.0)
+        self.assertEqual(len(calls), 1)
 
     def test_non_finite_computed_state_raises(self):
         with self.assertRaisesRegex(FloatingPointError, "non-finite"):
@@ -1003,6 +1022,98 @@ def minus_to_hyphen(text):
     return text.replace("−", "-").replace("&minus;", "-")
 
 
+_TEX_TOKEN = re.compile(
+    r"\\t?frac|\\varphi|\\Delta\s*t|\\[;,!]|\\quad|u_0|v_\{0y\}|\d+(?:\.\d+)?|[A-Za-z]|[-+^(){}]|\s+"
+)
+
+
+def evaluate_tex(tex, **variables):
+    """Evaluate the right-hand side of a displayed formula in the small TeX
+    subset the Help's error equations use (fractions, powers, products).
+
+    Supported names: u_0, v_{0y}, \\varphi, \\Delta t, g, T (from ``variables``
+    as u0, v0y, phi, dt, g, T).  Anything else raises ValueError, so an edit
+    that introduces an unknown symbol fails loudly instead of evaluating to
+    something plausible.  The text after the last "=" or "\\approx" is used.
+    """
+    right = re.split(r"=|\\approx", tex)[-1].strip().rstrip(".")
+    names = {"u_0": "u0", "v_{0y}": "v0y", "\\varphi": "phi", "\\Delta t": "dt", "g": "g", "T": "T"}
+    tokens, position = [], 0
+    while position < len(right):
+        match = _TEX_TOKEN.match(right, position)
+        if not match:
+            raise ValueError(f"cannot read {right[position:position + 12]!r}")
+        position = match.end()
+        token = re.sub(r"\s+", " ", match.group(0))
+        if token.strip() == "" or token.startswith(("\\;", "\\,", "\\!", "\\quad")):
+            continue
+        tokens.append("\\Delta t" if token.startswith("\\Delta") else token)
+    state = {"i": 0}
+
+    def peek():
+        return tokens[state["i"]] if state["i"] < len(tokens) else None
+
+    def take():
+        state["i"] += 1
+        return tokens[state["i"] - 1]
+
+    def group():
+        if take() != "{":
+            raise ValueError("expected {")
+        value = expression()
+        if take() != "}":
+            raise ValueError("expected }")
+        return value
+
+    def atom():
+        token = take()
+        if token in ("\\frac", "\\tfrac"):
+            numerator = group()
+            return numerator / group()
+        if token == "(":
+            value = expression()
+            if take() != ")":
+                raise ValueError("expected )")
+            return value
+        if token == "{":
+            state["i"] -= 1
+            return group()
+        if token in names:
+            return variables[names[token]]
+        if re.fullmatch(r"\d+(?:\.\d+)?", token):
+            return float(token)
+        raise ValueError(f"unknown symbol {token!r}")
+
+    def power():
+        base = atom()
+        if peek() == "^":
+            take()
+            exponent = group() if peek() == "{" else atom()
+            return base ** exponent
+        return base
+
+    def term():
+        value = power()
+        while peek() not in (None, "+", "-", ")", "}"):
+            value *= power()
+        return value
+
+    def expression():
+        sign = 1.0
+        if peek() == "-":
+            take()
+            sign = -1.0
+        value = sign * term()
+        while peek() in ("+", "-"):
+            value = value + term() if take() == "+" else value - term()
+        return value
+
+    result = expression()
+    if state["i"] != len(tokens):
+        raise ValueError(f"unread tokens {tokens[state['i']:]}")
+    return result
+
+
 def help_layout(root):
     """Recognise which Help layout a parsed file uses: 'beats', 'classic' or None."""
     beats = all(nodes_by_id(root, f"beat{number}") for number in range(8))
@@ -1243,7 +1354,7 @@ class TestBeatsHelp(unittest.TestCase):
             for label in descendants(self.root, lambda node: has_class(node, "eq-label"))
             if "(unnumbered)" in normalized_text(label)
         ]
-        self.assertEqual(len(labels), 4, labels)
+        self.assertEqual(len(labels), 5, labels)
         for label in labels:
             self.assertTrue(label.endswith("DERIVED"), label)
 
@@ -1480,7 +1591,11 @@ class TestBeatsHelp(unittest.TestCase):
         expected = f"{run['xs'][-2:]} {run['hs'][-2:]}"
         self.assertEqual(captured.getvalue().strip(), expected)
 
-    def test_interpolated_range_error_follows_the_quoted_formula(self):
+    def test_interpolated_range_error_follows_the_leading_order_formula(self):
+        # The formula of Beat 5 is a leading-order approximation, so the
+        # tolerances below are those of an approximation: 12% of the predicted
+        # error, and 2% beyond the "at most about" figure.  The exact
+        # expression is checked to rounding error in the next test.
         g = physics.g
         worst = 0.0
         for speed in (20.0, 50.0, 100.0, 300.0):
@@ -1506,8 +1621,10 @@ class TestBeatsHelp(unittest.TestCase):
         self.assertIn(f"{g * 0.01 / 8:.4f} m for", text)
         self.assertIn(f"\\varphi={phi:.3f}\\)", text)
         measured = full_run(dt=1.0)["R"] - exact["R"]
+        exact_error = -exact["u0"] * phi * (1 - phi) / (exact["T"] + (1 - 2 * phi))
         self.assertIn(
-            f"\u2212{g / 2 * phi * (1 - phi):.3f} m against the measured \u2212{abs(measured):.3f} m",
+            f"predicts \u2212{g / 2 * phi * (1 - phi):.3f} m, the exact expression "
+            f"\u2212{abs(exact_error):.3f} m, and the measured error is \u2212{abs(measured):.3f} m",
             text,
         )
         for speed, angle, dt, key in ((100.0, 30.0, 0.1, "30"), (100.0, 60.0, 0.1, "60"), (50.0, 45.0, 0.1, "50")):
@@ -1516,6 +1633,210 @@ class TestBeatsHelp(unittest.TestCase):
                 phi = (exact["T"] / dt) % 1.0
                 self.assertIn(f"{phi:.3f}", text)
                 self.assertIn(f"{(g * dt * dt / 2) * (exact['u0'] / exact['v0y']) * phi * (1 - phi):.4f} m", text)
+
+    @staticmethod
+    def exact_interpolation_errors(speed, angle, dt):
+        """Return (phi, T* - T, R* - R) from the closed form of Beat 5.
+
+        With T/dt = N + phi and every stored sample on the exact parabola,
+        Eq. 9 gives T* - T = -phi (1 - phi) dt^2 / (T + (1 - 2 phi) dt), and
+        the range error is u0 times that.  This is derived here from the
+        sample heights, not read from the Help or from the program.
+        """
+        exact = exact_launch(speed, angle)
+        g = physics.g
+        T = exact["T"]
+        phi = (T / dt) % 1.0
+        whole = int(round(T / dt - phi))
+        t_before, t_after = whole * dt, (whole + 1) * dt
+        h_before = exact["v0y"] * t_before - 0.5 * g * t_before ** 2
+        h_after = exact["v0y"] * t_after - 0.5 * g * t_after ** 2
+        fraction = h_before / (h_before - h_after)
+        time_error = (whole + fraction) * dt - T
+        closed_form = -phi * (1 - phi) * dt * dt / (T + (1 - 2 * phi) * dt)
+        return phi, time_error, closed_form, exact["u0"]
+
+    def test_exact_interpolation_error_expression_matches_the_program(self):
+        # An independent oracle for the unnumbered "exact error" equation of
+        # Beat 5: for every improved-Euler run whose landing is not on a
+        # sample, the printed time and range errors equal the closed form to
+        # rounding error, with no allowance for an approximation.  The grid
+        # includes flights of fewer than ten steps and of less than one step.
+        checked = 0
+        separated = 0
+        for speed in (5.0, 20.0, 50.0, 100.0, 300.0):
+            for angle in (10.0, 25.0, 45.0, 60.0, 80.0):
+                for dt in (2.0, 1.37, 1.0, 0.5, 0.3, 0.2, 0.1, 0.05, 0.02):
+                    phi, from_samples, closed_form, u0 = self.exact_interpolation_errors(speed, angle, dt)
+                    if min(phi, 1.0 - phi) < 1e-6:
+                        continue
+                    exact = exact_launch(speed, angle)
+                    run = full_run(speed, angle, dt)
+                    with self.subTest(speed=speed, angle=angle, dt=dt):
+                        self.assertAlmostEqual(from_samples, closed_form, delta=1e-12 + 1e-9 * abs(closed_form))
+                        self.assertAlmostEqual(run["T"] - exact["T"], closed_form, delta=1e-10)
+                        self.assertAlmostEqual(run["R"] - exact["R"], u0 * closed_form, delta=1e-7)
+                    leading = -(physics.g * dt * dt / 2) * (u0 / exact["v0y"]) * phi * (1 - phi)
+                    if abs(leading - u0 * closed_form) > 0.05 * abs(u0 * closed_form):
+                        separated += 1
+                    checked += 1
+        self.assertGreaterEqual(checked, 200)
+        # The oracle can tell the exact expression from the leading-order one.
+        self.assertGreaterEqual(separated, 20)
+
+    def test_leading_order_bound_is_not_a_strict_bound(self):
+        # Default launch, dt = 1.37 s: the exact error is larger than the
+        # "at most about" figure g dt^2 u0 / (8 v0y), so a strict bound is false.
+        g = physics.g
+        dt = 1.37
+        exact = exact_launch()
+        error = exact["R"] - full_run(dt=dt)["R"]
+        bound = g * dt * dt * exact["u0"] / (8 * exact["v0y"])
+        self.assertAlmostEqual(error, 2.3059219701, places=8)
+        self.assertAlmostEqual(bound, 2.3007626731, places=8)
+        self.assertGreater(error, bound)
+        phi, _, closed_form, u0 = self.exact_interpolation_errors(100.0, 45.0, dt)
+        self.assertGreater(phi, 0.5)
+        self.assertAlmostEqual(-u0 * closed_form, error, places=8)
+        text = self.text("beat5")
+        self.assertIn(f"\\Delta t={dt}\\) s, where \\(\\varphi={phi:.3f}\\)", text)
+        self.assertIn(f"the exact error is \u2212{error:.4f} m", text)
+        self.assertIn(f"slightly larger than the figure {bound:.4f} m", text)
+
+    def test_displayed_error_equations_evaluate_to_the_closed_forms(self):
+        # The displayed TeX itself is evaluated (not compared as text), so a
+        # wrong sign, power or denominator in either equation fails here even
+        # if the ledgers were regenerated over it.
+        displayed = {}
+        for block in descendants(self.section("beat5"), lambda node: has_class(node, "eq-block")):
+            text = normalized_text(block)
+            if "(unnumbered)" in text:
+                displayed[text.split(" (unnumbered)")[0]] = re.search(r"\\\[(.*)\\\]", text, re.S).group(1)
+        self.assertEqual(
+            sorted(displayed),
+            ["Exact error of the interpolated range and time",
+             "Leading-order error of the interpolated range"],
+        )
+        exact_tex = displayed["Exact error of the interpolated range and time"]
+        leading_tex = displayed["Leading-order error of the interpolated range"]
+        g = physics.g
+        differing = 0
+        for speed, angle, dt in ((100.0, 45.0, 1.0), (100.0, 45.0, 1.37), (100.0, 45.0, 0.1),
+                                 (50.0, 30.0, 0.7), (300.0, 80.0, 0.25), (20.0, 60.0, 2.0)):
+            with self.subTest(speed=speed, angle=angle, dt=dt):
+                launch = exact_launch(speed, angle)
+                T = launch["T"]
+                phi = (T / dt) % 1.0
+                variables = dict(u0=launch["u0"], v0y=launch["v0y"], phi=phi, dt=dt, g=g, T=T)
+                closed_exact = -launch["u0"] * phi * (1 - phi) * dt * dt / (T + (1 - 2 * phi) * dt)
+                closed_leading = -(g * dt * dt / 2) * (launch["u0"] / launch["v0y"]) * phi * (1 - phi)
+                self.assertAlmostEqual(evaluate_tex(exact_tex, **variables), closed_exact, delta=1e-12 * (1 + abs(closed_exact)))
+                self.assertAlmostEqual(evaluate_tex(leading_tex, **variables), closed_leading, delta=1e-12 * (1 + abs(closed_leading)))
+                if abs(closed_exact - closed_leading) > 0.01 * abs(closed_exact):
+                    differing += 1
+                # An edited equation would be noticed: flip one sign in each.
+                self.assertNotAlmostEqual(evaluate_tex(exact_tex.replace("1-2", "1+2"), **variables), closed_exact, delta=1e-9)
+                self.assertNotAlmostEqual(evaluate_tex(leading_tex.replace("\\frac{g", "\\frac{2g"), **variables), closed_leading, delta=1e-9)
+        self.assertGreaterEqual(differing, 3)
+        with self.assertRaises(ValueError):
+            evaluate_tex(r"x = 2 \\alpha")
+
+    def test_beat_five_calls_the_formula_leading_order_and_gives_the_exact_error(self):
+        text = self.text("beat5")
+        html = self.section("beat5")
+        labels = [
+            normalized_text(label)
+            for label in descendants(html, lambda node: has_class(node, "eq-label"))
+            if "(unnumbered)" in normalized_text(label)
+        ]
+        self.assertEqual(len(labels), 2, labels)
+        self.assertTrue(labels[0].startswith("Exact error of the interpolated range and time"), labels)
+        self.assertTrue(labels[1].startswith("Leading-order error of the interpolated range"), labels)
+        self.assertIn("This is a leading-order approximation, not an exact result.", text)
+        self.assertIn("The error is second order in", text)
+        self.assertNotIn("first-order estimate", text)
+        self.assertNotIn("first-order", text)
+        self.assertIn("short by at most about", text)
+        self.assertIn("never too long; they are a little short unless the landing falls exactly on a sample", text)
+        self.assertNotIn("always a little short", text)
+        self.assertIn("The word \u201cabout\u201d matters", text)
+
+    def test_beat_six_states_the_error_bound_only_approximately(self):
+        text = self.text("beat6")
+        self.assertIn("lies between 0 and about", text)
+        self.assertNotIn("short by between 0 and", text)
+        self.assertIn("the exact error of Beat 5", text)
+
+    def test_beat_six_refinement_check_is_stated_with_its_limits(self):
+        # Timestep refinement is the standard practical check, not a test that
+        # always works, and it says nothing about the model or the program.
+        text = self.text("beat6")
+        for required in (
+            "The standard practical check is the one used here",
+            "Halve \\(\\Delta t\\) at least three times",
+            "settle into a steady trend",
+            "It shows how sensitive the numerical answer is to the timestep.",
+            "It does not show that the model is right",
+            "it does not show that the program solves the equations it claims to solve",
+            "the refinement check described above is the practical one to use there",
+            "a tenfold reduction in the leading error takes about ten times as many steps",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, text)
+        for forbidden in ("always works", "you must take ten times as many steps", "halving test"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, text)
+
+    def test_small_gold_text_uses_a_colour_that_meets_wcag_aa(self):
+        style = re.search(r"<style>(.*?)</style>", self.html, re.S).group(1)
+
+        def variable(name):
+            return re.search(rf"--{name}:\s*(#[0-9a-fA-F]{{6}})", style).group(1)
+
+        def luminance(colour):
+            channels = [int(colour[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+            linear = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+            return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+        def contrast(one, other):
+            high, low = sorted((luminance(one), luminance(other)), reverse=True)
+            return (high + 0.05) / (low + 0.05)
+
+        for background in ("eq-bg", "surface", "bg", "note-bg"):
+            with self.subTest(background=background):
+                self.assertGreaterEqual(contrast(variable("gold-text"), variable(background)), 4.5)
+        # The decorative gold stays for borders; it is too light for small text.
+        self.assertLess(contrast(variable("gold"), variable("eq-bg")), 4.5)
+        allowed = {".eq-label", ".experiment-card .exp-num", ".related-card .rc-ch"}
+        gold_text_rules = set()
+        for selector, body in re.findall(r"([^{}]+)\{([^{}]*)\}", style):
+            if re.search(r"(^|;)\s*color:\s*var\(--gold\)", body.strip()):
+                gold_text_rules.add(" ".join(selector.split()))
+        self.assertEqual(gold_text_rules, allowed)
+        self.assertIn(
+            ".eq-label, .experiment-card .exp-num, .related-card .rc-ch { color: var(--gold-text); }",
+            style,
+        )
+
+    def test_links_and_signature_boxes_pass_the_automated_accessibility_rules_found_failing(self):
+        # axe-core reported a footer link distinguishable only by colour and a
+        # scrollable signature box that keyboard users cannot reach.
+        style = re.search(r"<style>(.*?)</style>", self.html, re.S).group(1)
+        self.assertIn("footer a { text-decoration: underline; }", style)
+        self.assertIn(
+            ".module-card .sig { white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: visible; }",
+            style,
+        )
+
+    def test_skip_link_is_the_first_link_and_leads_to_the_main_content(self):
+        links = descendants(self.root, lambda node: node.tag == "a" and has_class(node, "skip-link"))
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0].attrs["href"], "#content")
+        target = nodes_by_id(self.root, "content")
+        self.assertEqual([node.tag for node in target], ["main"])
+        self.assertEqual(target[0].attrs.get("tabindex"), "-1")
+        first = descendants(self.root, lambda node: node.tag == "a" and "href" in node.attrs)[0]
+        self.assertIs(first, links[0])
 
     def test_degraded_update_mirrors_forward_euler(self):
         g = physics.g
@@ -1902,7 +2223,12 @@ class TestMaintenanceItems(unittest.TestCase):
             "pair in list of two arrays": [xs, hs],
             "four values": [("a", xs, hs, "extra")],
             "single triple not in a list": ("a", xs, hs),
-            "dictionary": {"a": (xs, hs)},
+            "dictionary as the whole collection": {"a": (xs, hs)},
+            "three-key integer dictionary as an item": [{7: 1, 8: 2, 9: 3}],
+            "three-key string dictionary as an item": [{"a": 1, "b": 2, "c": 3}],
+            "dictionary with the right names as an item": [{"label": "a", "xs": xs, "hs": hs}],
+            "three-member set as an item": [{1, 2, 3}],
+            "three-member frozenset as an item": [frozenset({1, 2, 3})],
             "number": [5],
             "three-character string": ["abc"],
             "bytes": [b"abc"],
@@ -2022,6 +2348,33 @@ class TestDriverHelperEdges(unittest.TestCase):
                 with self.assertRaises(TypeError):
                     driver.interpolated_flight_time([1.0, -1.0], dt)
 
+    def test_helpers_refuse_a_non_finite_result_from_finite_samples(self):
+        # Every supplied value is finite; the arithmetic is what overflows.
+        overflowing = {
+            "range: sample spacing overflows": (
+                driver.interpolated_landing_range, ([1e308, -1e308], [1.0, -1.0]),
+                "the interpolated landing range is not finite for these samples"),
+            "range: height difference overflows": (
+                driver.interpolated_landing_range, ([0.0, 1.0], [1e308, -1e308]),
+                "the interpolated landing range is not finite for these samples"),
+            "time: step times count overflows": (
+                driver.interpolated_flight_time, ([1.0, 1.0, 1.0, -1.0], 1e308),
+                "the interpolated flight time is not finite for these samples"),
+            "time: height difference overflows": (
+                driver.interpolated_flight_time, ([1e308, -1e308], 1.0),
+                "the interpolated flight time is not finite for these samples"),
+        }
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            for name, (helper, arguments, message) in overflowing.items():
+                with self.subTest(case=name):
+                    with self.assertRaisesRegex(FloatingPointError, f"^{message}$"):
+                        helper(*arguments)
+            # Large but representable results are still returned.
+            self.assertEqual(driver.interpolated_landing_range([0.0, 1e300], [1.0, -1.0]), 5e299)
+            self.assertEqual(driver.interpolated_flight_time([1.0, -1.0], 1e300), 5e299)
+            self.assertEqual(driver.interpolated_flight_time([0.0, -1.0], 2.0), 0.0)
+
     def test_run_raises_when_the_ceiling_is_reached_exactly_on_the_ground(self):
         # With g launched straight up at speed g and dt = 1, improved Euler
         # samples h = 0, g/2, 0 exactly, then -g/2.  Three stored points end
@@ -2100,22 +2453,30 @@ class TestBuildIdFallback(unittest.TestCase):
             self.assertEqual(self.build_id_of(copy), "unknown")
 
 
-
-
 # ---------------------------------------------------------------------------
 # Ledgers of the numbers and of the key words in the Beats Help.
 #
-# The other Help tests tie the important claims to live runs of the program.
-# These two ledgers close the gap around them.  CLAIMS: every number in the
-# prose, code, output and equation text is recorded with the two words in
-# front of it and the word after it.  DIRECTIONS: every word that states a
-# direction (higher, later, shorter, ...), names a method, an equation kind
-# or a quantity (range, height, time, speed), or gives an order or position
-# (first, last, above, below, before, after, more, less, half) is recorded in
-# order.  If an edit changes any entry the test fails and shows the entries
-# that moved.  The ledgers say what the text says now; that it is right is
-# established by the live-run tests.  After an intended edit, check each
-# moved entry against a live run, then regenerate the data with
+# THESE LEDGERS DETECT CHANGE; THEY DO NOT VERIFY.  Regenerating them after an
+# edit records whatever the edited text says, including a mistake, so a green
+# ledger test says only that the Help still reads as it did when the ledger
+# was last reviewed.  The claims themselves are verified by tests that compute
+# them independently of the Help's wording: live command-line output
+# (FROZEN_RUNS), the closed-form Eqs. 3 to 5, the exact expression for the
+# interpolation error (test_exact_interpolation_error_expression_matches_the_
+# program and test_leading_order_bound_is_not_a_strict_bound), the convergence
+# tables and script of Beat 6, the equation-to-code mapping, the deliberate
+# wording guards on scope and on exact-versus-approximate statements, and the
+# digests of the carried sections.
+#
+# CLAIMS: every number in the prose, code, output and equation text is
+# recorded with the two words in front of it and the word after it.
+# DIRECTIONS: every word that states a direction (higher, later, shorter, ...),
+# names a method, an equation kind or a quantity (range, height, time, speed),
+# or gives an order or position (first, last, above, below, before, after,
+# more, less, half) is recorded in order.  If an edit changes any entry the
+# test fails and shows the entries that moved.  After an intended edit, check
+# each moved entry against a live run or an independent calculation, then
+# regenerate the data with
 #     python -c "import test_physics_cannon as t; t.print_ledgers()"
 # and paste the output over the LEDGER_* constants below.
 #
@@ -2310,7 +2671,7 @@ class TestBeatsHelpReferences(unittest.TestCase):
     def test_each_kind_tag_has_the_class_of_its_word(self):
         classes = {"ODE": "kind-ode", "DEFINITION": "kind-def", "DERIVED": "kind-der", "ALGORITHM": "kind-alg"}
         tags = descendants(self.root, lambda node: has_class(node, "kind"))
-        self.assertEqual(len(tags), 30)
+        self.assertEqual(len(tags), 31)
         for tag in tags:
             with self.subTest(word=normalized_text(tag)):
                 self.assertIn(classes[normalized_text(tag)], tag.attrs["class"].split())
@@ -2731,12 +3092,25 @@ at Eq. [11] —
 of Beat [4] lie
 g\Delta t^ [2] \,s(1-s)\)
 g\Delta t^2\,s( [1] -s)\)
+and \( [0] \le\varphi<1\).
+and \(0\le\varphi< [1] \).
+of Beat [4] ,
+parabola, Eqs. [9] and
+9 and [10] give
+\;=\; -\,\frac{u_0\,\varphi\,( [1] -\varphi)\,\Delta
+-\,\frac{u_0\,\varphi\,(1-\varphi)\,\Delta t^{ [2] }}{T
++ ( [1] -2\varphi)\,\Delta
++ (1- [2] \varphi)\,\Delta
+denominator \(T+( [1] -2\varphi)\Delta
+denominator \(T+(1- [2] \varphi)\Delta
+to \(T= [2] v_{0y}/g\),
+to \(T=2v_{ [0] y}/g\),
 -\,\frac{g\,\Delta t^{ [2] }}{2}\,\frac{u_0}{v_{0y}}\;\varphi\,(1-\varphi).
 -\,\frac{g\,\Delta t^{2}}{ [2] }\,\frac{u_0}{v_{0y}}\;\varphi\,(1-\varphi).
 -\,\frac{g\,\Delta t^{2}}{2}\,\frac{u_0}{v_{ [0] y}}\;\varphi\,(1-\varphi).
 -\,\frac{g\,\Delta t^{2}}{2}\,\frac{u_0}{v_{0y}}\;\varphi\,( [1] -\varphi).
-and \(u_0/v_{ [0] y}=1\)
-and \(u_0/v_{0y}= [1] \)
+with \(u_0/v_{ [0] y}=1\)
+with \(u_0/v_{0y}= [1] \)
 for a [45] °
 factor \(\varphi( [1] -\varphi)\)
 \(g\Delta t^ [2] u_0/(8v_{0y})\),
@@ -2746,9 +3120,14 @@ which is [1.23] m
 \(\Delta t= [1] \)
 s and [0.0123] m
 \(\Delta t= [0.1] \)
+\(\Delta t= [1.37] \)
+where \(\varphi= [0.526] \),
+is − [2.3059] m,
+the figure [2.3008] m.
 above \(\varphi= [0.421] \),
-predicts − [1.195] m
-measured − [1.182] m.
+predicts − [1.195] m,
+expression − [1.182] m,
+is − [1.182] m.
 beats. The [30] °
 30° and [60] °
 of Beat [1] have
@@ -2830,7 +3209,6 @@ error (s) [1171089.3] +69.669.6+36.58+0.9844
 0.027241021.1+1.41470.71+0.7076+0.02 0.011,4451020.4+ [0.707170] .71+0.3537+0.009999
 0.027241021.1+1.41470.71+0.7076+0.02 0.011,4451020.4+0.707170.71+ [0.3537] +0.009999
 0.027241021.1+1.41470.71+0.7076+0.02 0.011,4451020.4+0.707170.71+0.3537+ [0.009999] Improved
-of Beat [5] (m)Printed
 error (s) [1161018.5] −1.182−1.195254.93−0.01672
 (s) 1161018.5− [1.182] −1.195254.93−0.01672
 (s) 1161018.5−1.182− [1.195254] .93−0.01672
@@ -2882,13 +3260,18 @@ s and [0.02] s
 by about [33] ,
 factor \(\varphi( [1] -\varphi)\)
 of Beat [5] is
+of Beat [5] ,
+factor \(\varphi( [1] -\varphi)\)
+of Beat [5] ),
+of Beat [7] ,
+of Beat [2] is
 error \(\approx+v_{ [0] y}\Delta
 \(\approx+v_{0y}\Delta t/ [2] \).
-by between [0] and
-\(g\Delta t^ [2] u_0/(8v_{0y})\),
-\(g\Delta t^2u_0/( [8] v_{0y})\),
-\(g\Delta t^2u_0/(8v_{ [0] y})\),
-of Beat [5] .
+of Beat [5] ,
+lies between [0] and
+\(g\Delta t^ [2] u_0/(8v_{0y})\).
+\(g\Delta t^2u_0/( [8] v_{0y})\).
+\(g\Delta t^2u_0/(8v_{ [0] y})\).
 beat: Experiment [6] in
 """,
     "beat7": r"""
@@ -2936,7 +3319,7 @@ driver_cannon.py Eq. [11] ALGORITHMMaximum
 height (Beat [2] ,
 lie (Beat [3] ,
 update (Beat [4] ,
-range (Beat [5] ,
+approximation (Beat [5] ,
 """,
     "algorithm": r"""
 steps, Eqs. [6] to
@@ -3152,8 +3535,8 @@ LEDGER_DIRECTIONS = {
     "beat2": "speed speed exactly range height time speed range height time range height time twice half range range last range height speed time speed below height DERIVED time height DERIVED range time DERIVED speed range range does_not more",
     "beat3": "forward Euler time after forward Euler range height time Euler speed halves Euler ALGORITHM Euler exactly after height Euler DERIVED Euler exactly speed longer exactly higher range time height height exactly range time smaller landing more range Euler range time speed",
     "beat4": "improved Euler Euler Euler Heun first Euler improved first height improved falls Euler range time improved Euler range improved Euler Heun ALGORITHM Heun ALGORITHM height Heun height DERIVED exactly improved less Heun height",
-    "beat5": "peak last first below range height time first last last range time last below range range above below range time time height height last ALGORITHM time ALGORITHM range time time last above exactly landing height height peak height ALGORITHM falls first last peak more half larger height range time peak below range time always range DERIVED landing falls never more range above earlier range last falls",
-    "beat6": "last range height time improved last first Euler range Euler range height Euler range speed height more Euler range improved height range time smaller landing roughly range falls always smaller Euler range height Euler height range above",
+    "beat5": "peak last first below range height time first last last range time last below range range above below range time time height height last ALGORITHM time ALGORITHM range time time last above exactly landing height height peak height ALGORITHM falls first last peak more half larger height range time peak below range time never landing falls exactly landing falls exactly range range time DERIVED range DERIVED never more range more smaller larger above earlier range last falls",
+    "beat6": "last range height time improved last first Euler range Euler range height Euler range speed height more Euler range improved height range time smaller landing roughly range falls smaller Euler roughly improved does_not does_not Euler range height Euler height range above",
     "beat7": "first before larger range range height time first larger speed range height always height",
     "equations": "after Euler time height time height DERIVED Euler DERIVED Heun height DERIVED range DERIVED after first below",
     "algorithm": "after speed improved speed last height last height last first below range height time before first last height below height height first below first above last below range time last first exactly landing height",

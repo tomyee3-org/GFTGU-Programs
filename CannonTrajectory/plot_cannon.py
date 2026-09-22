@@ -2,6 +2,8 @@
 Plotting routine for CannonTrajectory.
 """
 
+from collections.abc import Mapping, Set
+
 import matplotlib.pyplot as plt
 
 
@@ -13,10 +15,12 @@ def plot_cannon(xs, hs):
 def _unpack_trajectory(item):
     """Return ``(label, xs, hs)`` from one overlay item or raise ValueError.
 
-    A string is refused explicitly: a three-character string would otherwise
-    unpack into three one-character values and be plotted as categories.
+    Strings, bytes, mappings and sets are refused explicitly: they unpack into
+    three items when they happen to have three characters, keys or members (a
+    three-character string would be plotted as categories, a three-key
+    dictionary as its keys, and a set in no particular order).
     """
-    if not isinstance(item, (str, bytes)):
+    if not isinstance(item, (str, bytes, Mapping, Set)):
         try:
             label, xs, hs = item
         except (TypeError, ValueError):
@@ -35,8 +39,9 @@ def plot_cannon_overlay(trajectories):
     ``trajectories`` is an iterable of ``(label, xs, hs)`` triples.  This
     compact interface keeps the plotting details out of parameter-sweep
     exercises while leaving students responsible for generating the data.
-    Any item that is not exactly such a triple raises ``ValueError``.  Code
-    that extends this helper must keep accepting that triple form.
+    Any item that is not exactly such a triple raises ``ValueError``; a string,
+    bytes object, dictionary or set is never accepted as a triple.  Code that
+    extends this helper must keep accepting that triple form.
     """
     fig, ax = plt.subplots(figsize=(8, 6))
     try:
