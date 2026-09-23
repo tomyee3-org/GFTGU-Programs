@@ -574,7 +574,20 @@ class DriverBehaviorTests(unittest.TestCase):
                 self.assertGreater(order, 0.8)
                 self.assertLess(order, 1.2)
 
-    def test_full_period_orbit_recovery_converges_toward_initial_state(self):
+    _full_period_recovery_cache = None
+
+    @classmethod
+    def _full_period_recovery_errors(cls):
+        """Run one full inverse-square orbit at three resolutions.
+
+        Shared by the convergence-order test and the absolute-baseline
+        test below, and cached on the class, so the (relatively
+        expensive) triple integration runs only once per test session
+        rather than once per concern.
+        """
+        if cls._full_period_recovery_cache is not None:
+            return cls._full_period_recovery_cache
+
         h0 = 300_000.0
         initial_radius = physics.R_EARTH + h0
         initial_speed = math.sqrt(physics.MU_EARTH / initial_radius)
@@ -602,21 +615,23 @@ class DriverBehaviorTests(unittest.TestCase):
             errors.append(
                 (angle_error, radius_error, position_error, velocity_error)
             )
+        cls._full_period_recovery_cache = (errors, initial_radius, initial_speed)
+        return cls._full_period_recovery_cache
+
+    def test_full_period_orbit_recovery_converges_toward_initial_state(self):
+        """Errors shrink monotonically, and at roughly first order, as dt refines.
+
+        This is a convergence-*rate* contract: it is agnostic to the
+        absolute size of any one error. The fixed absolute ceilings
+        carried over from the Version 1.1.1 baseline are checked
+        separately, in test_full_period_orbit_recovery_meets_absolute_baseline.
+        """
+        errors, _, _ = self._full_period_recovery_errors()
 
         for metric_index in range(4):
             metric_errors = [row[metric_index] for row in errors]
             self.assertGreater(metric_errors[0], metric_errors[1])
             self.assertGreater(metric_errors[1], metric_errors[2])
-
-        # Version 1.1.1 baselines at 2880 updates were approximately:
-        # 0.0636 rad angular error, 1.37% radial error, 6.54% position
-        # error, and 6.37% velocity error.  These ceilings retain a modest
-        # cross-platform margin while detecting a meaningful degradation.
-        fine_angle, fine_radius, fine_position, fine_velocity = errors[-1]
-        self.assertLess(fine_angle, 0.068)
-        self.assertLess(fine_radius / initial_radius, 0.015)
-        self.assertLess(fine_position / initial_radius, 0.068)
-        self.assertLess(fine_velocity / initial_speed, 0.068)
 
         metric_names = ("angle", "radius", "position", "velocity")
         for metric_index, metric_name in enumerate(metric_names):
@@ -632,6 +647,24 @@ class DriverBehaviorTests(unittest.TestCase):
                 with self.subTest(metric=metric_name, observed_order=order):
                     self.assertGreater(order, 0.8)
                     self.assertLess(order, 1.2)
+
+    def test_full_period_orbit_recovery_meets_absolute_baseline(self):
+        """The finest (2880-update) run stays within the Version 1.1.1 error baseline.
+
+        Measured Version 1.1.1 errors at 2880 updates were approximately:
+        0.0636 rad angular error, 1.37% radial error, 6.54% position
+        error, and 6.37% velocity error. These ceilings are that measured
+        baseline plus headroom for ordinary run-to-run floating-point
+        variation on one machine, not a survey of multiple platforms --
+        the suite has not been run cross-platform to confirm the margin
+        holds elsewhere.
+        """
+        errors, initial_radius, initial_speed = self._full_period_recovery_errors()
+        fine_angle, fine_radius, fine_position, fine_velocity = errors[-1]
+        self.assertLess(fine_angle, 0.068)
+        self.assertLess(fine_radius / initial_radius, 0.015)
+        self.assertLess(fine_position / initial_radius, 0.068)
+        self.assertLess(fine_velocity / initial_speed, 0.068)
 
 
 class TrajectorySummaryTests(unittest.TestCase):
@@ -990,11 +1023,20 @@ class HelpFileTests(unittest.TestCase):
         angle_travelled = namespaces[9]["angle_travelled"]
         self.assertGreater(float(angle_travelled[-1]), 2.0 * math.pi)
         self.assertEqual(len(angle_travelled), len(namespaces[9]["ts"]))
+        self.assertTrue(np.all(np.isfinite(angle_travelled)))
+        # EXP-9's accumulated angular travel is |theta - theta[0]| for a
+        # circular orbit traversed in a fixed direction, so it should never
+        # step backwards between stored samples.
+        self.assertTrue(np.all(np.diff(angle_travelled) >= 0.0))
 
-        self.assertEqual(
-            len(namespaces[10]["r"]), len(namespaces[10]["speed_squared"])
-        )
-        self.assertEqual(len(namespaces[10]["r"]), len(namespaces[10]["ts"]))
+        exp10_r = namespaces[10]["r"]
+        exp10_speed_squared = namespaces[10]["speed_squared"]
+        self.assertEqual(len(exp10_r), len(exp10_speed_squared))
+        self.assertEqual(len(exp10_r), len(namespaces[10]["ts"]))
+        self.assertTrue(np.all(np.isfinite(exp10_r)))
+        self.assertTrue(np.all(np.isfinite(exp10_speed_squared)))
+        self.assertTrue(np.all(exp10_r > 0.0))
+        self.assertTrue(np.all(exp10_speed_squared >= 0.0))
 
     def test_advanced_blocks_are_explicitly_runnable_starter_code(self):
         for number in (9, 10):
