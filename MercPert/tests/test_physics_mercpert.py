@@ -1132,6 +1132,53 @@ class BeatsHelpTests(unittest.TestCase):
                 entry.parse_args(shlex.split(command)[2:])
             self.assertEqual(failure.exception.code, 2)
 
+    def _section(self, section_id: str) -> str:
+        match = re.search(rf'<section id="{section_id}">(.*?)</section>',
+                          self.text, flags=re.DOTALL)
+        self.assertIsNotNone(match)
+        assert match is not None
+        return match.group(1)
+
+    def test_beat4_quotes_the_signed_jacobi_drift_range_of_the_default_run(self) -> None:
+        output = driver.run_mercpert(
+            default_binary(), default_ic(),
+            driver.MercPertRunParams(2000.0, 10000, 0.05, 1.0e-4,
+                                     physics.R_SUN, 0.0),
+        )
+        c0 = output.jacobi[0]
+        signed = [(c - c0) / abs(c0) for c in output.jacobi]
+        low, high = min(signed), max(signed)
+        self.assertLess(low, 0.0)
+        self.assertGreater(high, 0.0)
+        beat4 = self._section("beat4")
+        # Beat 4 quotes the minimum as -x.xx e-6 and the maximum as +y.y e-8.
+        self.assertIn(f"&minus;{-low * 1e6:.2f} &times; 10<sup>&minus;6</sup>", beat4)
+        self.assertIn(f"+{high * 1e8:.1f} &times; 10<sup>&minus;8</sup>", beat4)
+
+    def test_positive_energy_is_not_presented_as_proof_of_escape(self) -> None:
+        # Near the moving stars Mercury's inertial energy is not conserved:
+        # in Experiment 6's 0.45 AU run it changes sign more than once.
+        output = driver.run_mercpert(
+            default_binary(),
+            physics.MercuryInitialConditions(0.45 * physics.AU, 0.0, 0.0, 59220.0),
+            driver.MercPertRunParams(2000.0, 30000, 0.05, 1.0e-4,
+                                     physics.R_SUN, 0.0),
+        )
+        binary = default_binary()
+        energy = [
+            0.5 * (vx * vx + vy * vy)
+            - physics.GM_SUN * binary.m_sun_solar / math.hypot(x - sx, y - sy)
+            - physics.GM_SUN * binary.m_planet_solar / math.hypot(x - cx, y - cy)
+            for x, y, vx, vy, sx, sy, cx, cy in zip(
+                output.merc_x, output.merc_y, output.merc_vx, output.merc_vy,
+                output.sun_x, output.sun_y, output.planet_x, output.planet_y)
+        ]
+        changes = sum((a > 0.0) != (b > 0.0) for a, b in zip(energy, energy[1:]))
+        self.assertGreaterEqual(changes, 2)
+        lowered = " ".join(self.text.lower().split())
+        self.assertNotIn("means it is no longer bound", lowered)
+        self.assertIn("finite-time", " ".join(self._section("beat6").lower().split()))
+
     def test_energy_one_liner_runs_and_prints_a_fraction(self) -> None:
         lines = [
             line
