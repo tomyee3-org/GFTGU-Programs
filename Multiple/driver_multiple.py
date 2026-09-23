@@ -457,7 +457,19 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
                 dt_work *= 0.5
                 continue
 
-            acc_pred = compute_accelerations(pos_pred, masses)
+            # pos_pred is a *trial* configuration, not the accepted state:
+            # a predictor overshoot can drive two bodies onto exactly the
+            # same point even when the accepted state (used for acc0) was
+            # never singular. compute_accelerations() raises ValueError for
+            # that, same as it would for the genuinely singular initial or
+            # accepted state -- so treat only a trial-step ValueError as a
+            # rejected step (halve dt and retry), the same response already
+            # given to a non-finite trial acceleration below.
+            try:
+                acc_pred = compute_accelerations(pos_pred, masses)
+            except ValueError:
+                dt_work *= 0.5
+                continue
             if not np.all(np.isfinite(acc_pred)):
                 dt_work *= 0.5
                 continue
@@ -502,7 +514,14 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
                     converged = True
                     break
 
-                acc_end = compute_accelerations(pos_guess, masses)
+                # pos_guess is also a trial (uncommitted) corrector
+                # position; a singular ValueError here is the same kind of
+                # rejected-iterate outcome as the non-finite check below,
+                # not a genuine singularity of the accepted state.
+                try:
+                    acc_end = compute_accelerations(pos_guess, masses)
+                except ValueError:
+                    break
                 if not np.all(np.isfinite(acc_end)):
                     break
 

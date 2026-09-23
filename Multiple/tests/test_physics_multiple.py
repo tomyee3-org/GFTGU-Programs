@@ -773,6 +773,34 @@ class TestSimulation(unittest.TestCase):
         )
         self.assertGreater(result["angular_momentum_drift_scale"], 0.0)
 
+    def test_predictor_singularity_retries_instead_of_aborting(self):
+        # Audit32 Codex #1: a predictor overshoot can drive two bodies onto
+        # exactly the same *trial* point even though the accepted state
+        # never is singular. compute_accelerations() raises ValueError for
+        # that, and the retry loop previously let it propagate uncaught
+        # instead of treating it like the existing non-finite-trial
+        # rejection (halve dt_work and retry). Reproduction from the
+        # audit: with dt=1 the predictor initially overshoots the two
+        # bodies onto the same point; the fixed retry loop halves dt_work
+        # until the trial configuration is no longer singular, landing on
+        # an accepted dt of 2**-8 for these initial conditions.
+        params = make_params(
+            n_bodies=2,
+            masses_solar=[4.0 / phys.GM_SUN, 4.0 / phys.GM_SUN],
+            positions_init=[[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            velocities_init=[[0.5, 0.0, 0.0], [-0.5, 0.0, 0.0]],
+            dt=1.0,
+            max_steps=1,
+            eps1=0.005,
+            eps2=1.0e-7,
+        )
+        result = driver.run_simulation(params)
+        self.assertEqual(result["accepted_steps"], 1)
+        self.assertAlmostEqual(result["dt_used"][-1], 2.0**-8)
+        self.assertFalse(
+            np.allclose(result["positions"][-1, 0], result["positions"][-1, 1])
+        )
+
     def test_no_input_mutation(self):
         params = make_params()
         positions_before = [row[:] for row in params.positions_init]

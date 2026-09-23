@@ -4,7 +4,9 @@ Run ``python main.py --help`` for defaults and examples. Inputs:
   --n_bodies: number of bodies (at least two).
   --masses_solar: comma-separated positive masses in solar units.
   --positions_init: semicolon-separated x,y,z triples in metres; quote the
-      complete argument in your shell, e.g. '1e10,0,0;-1e10,0,0'.
+      complete argument in your shell, e.g. "1e10,0,0;-1e10,0,0" (double
+      quotes work in both cmd.exe and POSIX shells; a single-quoted
+      argument is passed through literally by cmd.exe and will not parse).
   --velocities_init: matching x,y,z triples of velocities [m/s].
   --dt: largest integration step [s]; --max_steps: accepted-step ceiling.
   --eps1: per-body predictor acceleration-change threshold (0 to 1).
@@ -119,9 +121,9 @@ def parse_args(argv=None):
     p.add_argument("--masses_solar", type=masses, default=DEFAULTS["masses_solar"],
                    metavar="M1,M2,...", help="one positive solar mass per body")
     p.add_argument("--positions_init", type=triples, default=DEFAULTS["positions_init"],
-                   metavar="'X,Y,Z;X,Y,Z;...'", help="one Cartesian position triple per body [m]; quote semicolons")
+                   metavar='"X,Y,Z;X,Y,Z;..."', help="one Cartesian position triple per body [m]; quote semicolons with double quotes")
     p.add_argument("--velocities_init", type=triples, default=DEFAULTS["velocities_init"],
-                   metavar="'VX,VY,VZ;VX,VY,VZ;...'", help="one velocity triple per body [m/s]; quote semicolons")
+                   metavar='"VX,VY,VZ;VX,VY,VZ;..."', help="one velocity triple per body [m/s]; quote semicolons with double quotes")
     for name, value_type, description in (
         ("dt", positive_float, "maximum adaptive integration timestep [s]"),
         ("max_steps", positive_int, "maximum accepted integration steps"),
