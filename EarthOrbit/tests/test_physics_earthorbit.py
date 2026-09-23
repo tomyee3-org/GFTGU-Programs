@@ -178,7 +178,7 @@ class VersionAndBuildTests(unittest.TestCase):
 
     def test_version_is_semantic(self):
         self.assertRegex(physics.MODEL_VERSION, r"^\d+\.\d+\.\d+$")
-        self.assertEqual(physics.MODEL_VERSION, "1.2.0")
+        self.assertEqual(physics.MODEL_VERSION, "1.3.0")
 
     def test_build_coverage_is_exactly_the_four_core_modules(self):
         self.assertEqual(physics.BUILD_ID_COVERS, CORE_MODULE_FILENAMES)
@@ -410,6 +410,36 @@ class DriverValidationTests(unittest.TestCase):
     def test_nonfinite_integrated_state_is_rejected(self):
         with self.assertRaisesRegex(FloatingPointError, "non-finite state"):
             driver.run_earth_orbit(uInit=1.0e308, dt=10.0, maxSteps=2)
+
+    def test_coarse_step_that_skips_through_earth_is_rejected(self):
+        """A single overlarge step can jump from outside Earth on one side
+        to outside Earth on the other, with the connecting chord passing
+        straight through the reference sphere. Both stored endpoints would
+        satisfy the old ``r >= R_EARTH`` loop check, so without an explicit
+        segment/sphere test this silently misreported an escape or ordinary
+        orbit instead of the impact that actually occurred."""
+        with self.assertRaisesRegex(FloatingPointError, "passed through"):
+            driver.run_earth_orbit(
+                h0=300_000.0, uInit=0.0, vInit=-20_000.0, dt=1000.0,
+                maxSteps=2, force_law="inverse_square",
+            )
+
+    def test_ordinary_steps_do_not_false_positive_on_earth_crossing(self):
+        """The segment/sphere check must not fire for legitimate runs,
+        including a close-perigee orbit and the program's own default."""
+        # Default near-surface impact scenario.
+        driver.run_earth_orbit(maxSteps=2000)
+        # A 300 km circular-ish orbit with a realistic dt.
+        driver.run_earth_orbit(
+            h0=300_000.0, uInit=7725.72, vInit=0.0, dt=1.0,
+            maxSteps=7000, force_law="inverse_square",
+        )
+        # An eccentric orbit with a perigee only ~200 m above the surface,
+        # integrated at a realistic (not artificially coarse) timestep.
+        driver.run_earth_orbit(
+            h0=200.0, uInit=7900.0, vInit=0.0, dt=0.1,
+            maxSteps=20000, force_law="inverse_square",
+        )
 
 
 class DriverBehaviorTests(unittest.TestCase):
@@ -689,6 +719,23 @@ class TrajectorySummaryTests(unittest.TestCase):
             300.0: "300.00",
             0.0: "0.0000",
             1_583_500.0: "1.5835e+06",
+        }
+        for value, formatted in expected.items():
+            with self.subTest(value=value):
+                self.assertEqual(driver._five_significant(value), formatted)
+
+    def test_five_significant_handles_rounding_that_crosses_a_decade(self):
+        """Rounding to five significant digits can carry the value up a
+        power of ten (99999.9 -> 100000, 0.999999 -> 1.00000); the
+        formatter must re-derive its exponent so the result always has
+        exactly five significant digits, never six."""
+        expected = {
+            99999.9: "1.0000e+05",
+            -99999.9: "-1.0000e+05",
+            0.999999: "1.0000",
+            -0.999999: "-1.0000",
+            9.99996: "10.000",
+            0.000099999: "9.9999e-05",
         }
         for value, formatted in expected.items():
             with self.subTest(value=value):

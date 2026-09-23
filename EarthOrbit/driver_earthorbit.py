@@ -66,6 +66,14 @@ def run_earth_orbit(
         Returned when return_diagnostics is False.
     xs, ys, xEarth, yEarth, ts, us, vs
         Returned when return_diagnostics is True.
+
+    Raises
+    ------
+    FloatingPointError
+        If a step produces a non-finite state, or if a step's straight-line
+        displacement passes through the reference Earth sphere without
+        either endpoint landing inside it (dt too coarse to resolve the
+        surface crossing). In both cases, reduce dt.
     """
     # Validate user-editable inputs before allocating arrays or integrating.
     if force_law not in ("simplified", "inverse_square"):
@@ -121,12 +129,14 @@ def run_earth_orbit(
         # position at the beginning of the step.
         ax, ay = compute_acceleration(x, y, force_law)
 
+        x_prev, y_prev = x, y
+
         u1 = u0 + ax * dt
         v1 = v0 + ay * dt
 
         # Advance position using the average of old and new velocities.
-        x = x + (u0 + u1) * 0.5 * dt
-        y = y + (v0 + v1) * 0.5 * dt
+        x = x_prev + (u0 + u1) * 0.5 * dt
+        y = y_prev + (v0 + v1) * 0.5 * dt
 
         if not all(math.isfinite(value) for value in (x, y, u1, v1)):
             raise FloatingPointError(
@@ -135,6 +145,20 @@ def run_earth_orbit(
             )
 
         r = math.hypot(x, y)
+
+        if r >= R_EARTH and _segment_dips_inside_earth(x_prev, y_prev, x, y):
+            # Both the start and end of this step lie outside the reference
+            # sphere, but the straight-line displacement between them passed
+            # through it. A large dt can carry the projectile clean through
+            # Earth in a single step; left unchecked, the loop above would
+            # keep running and analyze_earth_orbit would misreport this as
+            # an ordinary escape or orbit instead of an impact.
+            raise FloatingPointError(
+                "this step's straight-line displacement passed through "
+                "Earth's reference surface without either endpoint landing "
+                "inside it; dt is too coarse to resolve the surface "
+                "crossing -- reduce dt"
+            )
 
         xs[j] = x
         ys[j] = y
@@ -178,11 +202,57 @@ def _five_significant(value):
     if value == 0.0:
         return "0.0000"
 
+    def _format_at(exponent):
+        if -4 <= exponent < 5:
+            decimal_places = max(0, 4 - exponent)
+            return f"{value:.{decimal_places}f}"
+        return f"{value:.4e}"
+
     exponent = math.floor(math.log10(abs(value)))
-    if -4 <= exponent < 5:
-        decimal_places = max(0, 4 - exponent)
-        return f"{value:.{decimal_places}f}"
-    return f"{value:.4e}"
+    text = _format_at(exponent)
+
+    # Rounding to five significant digits at this exponent can carry the
+    # magnitude up by a power of ten -- 99999.9 rounds to "100000" and
+    # 0.999999 rounds to "1.00000", each with six digits, unless the
+    # exponent used for formatting is re-derived from the rounded value.
+    # The %e branch already renormalizes its own mantissa, so this only
+    # ever fires for the fixed-point branch, and never needs a second pass:
+    # rounding to ~5 significant digits shifts the magnitude by at most one
+    # decade.
+    rounded_exponent = math.floor(math.log10(abs(float(text))))
+    if rounded_exponent != exponent:
+        text = _format_at(rounded_exponent)
+
+    return text
+
+
+def _segment_dips_inside_earth(x0, y0, x1, y1):
+    """Return True if the segment from (x0, y0) to (x1, y1) comes within
+    R_EARTH of the origin anywhere strictly between its endpoints.
+
+    Both endpoints are assumed to already be at or outside the reference
+    surface; this only detects a straight-line displacement large enough to
+    cut through the disk of radius R_EARTH and back out again -- a single
+    fixed-step update whose start and end points are both above the surface
+    but whose connecting chord passes through it.
+    """
+    dx = x1 - x0
+    dy = y1 - y0
+    segment_length_squared = dx * dx + dy * dy
+    if segment_length_squared == 0.0:
+        return False
+
+    # Fraction along the segment of the closest approach to the origin.
+    closest_fraction = -(x0 * dx + y0 * dy) / segment_length_squared
+    if closest_fraction <= 0.0 or closest_fraction >= 1.0:
+        # The closest approach to Earth's centre is at or beyond an
+        # endpoint, both of which are already confirmed to be outside the
+        # reference surface, so the whole segment stays outside.
+        return False
+
+    closest_x = x0 + closest_fraction * dx
+    closest_y = y0 + closest_fraction * dy
+    return math.hypot(closest_x, closest_y) < R_EARTH
 
 
 def _surface_crossing_fraction(x0, y0, x1, y1):
