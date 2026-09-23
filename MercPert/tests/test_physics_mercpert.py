@@ -11,6 +11,7 @@ import ast
 import base64
 from contextlib import redirect_stderr, redirect_stdout
 import hashlib
+from html import unescape
 from html.parser import HTMLParser
 import io
 import math
@@ -20,6 +21,8 @@ import re
 import subprocess
 import sys
 import tempfile
+from typing import Optional
+import shlex
 import unittest
 from unittest import mock
 
@@ -74,6 +77,20 @@ def find_help_file(module_dir: Path) -> Path:
 
 MODULE_DIR = find_module_dir(Path(__file__))
 HELP_FILE = find_help_file(MODULE_DIR)
+BEATS_HELP_FILENAME = "MercPert-claude.html"
+
+
+def find_beats_help_file(help_file: Path) -> Optional[Path]:
+    """Return the Beats-format tutorial Help beside the classic Help, if any.
+
+    The Beats file is optional in a flattened upload, so its tests skip
+    rather than fail when it is absent.
+    """
+    candidate = help_file.parent / BEATS_HELP_FILENAME
+    return candidate if candidate.is_file() else None
+
+
+BEATS_HELP_FILE = find_beats_help_file(HELP_FILE)
 if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 
@@ -788,6 +805,99 @@ class PlotTests(unittest.TestCase):
             plots.plot_jacobi_drift(output)
 
 
+class DegeneratePlotTests(unittest.TestCase):
+    """Plotting must cope with the shortest outputs the driver can return."""
+
+    def tearDown(self) -> None:
+        plt.close("all")
+
+    def _immediate_collision(self) -> driver.MercPertOutput:
+        return driver.run_mercpert(
+            default_binary(),
+            physics.MercuryInitialConditions(0.5 * physics.R_SUN, 0.0, 0.0, 0.0),
+            driver.MercPertRunParams(1.0, 5, 0.05, 1.0e-4, physics.R_SUN, 0.0),
+        )
+
+    def test_single_sample_collision_output_plots_in_both_units(self) -> None:
+        output = self._immediate_collision()
+        self.assertEqual(len(output.times), 1)
+        for unit in ("m", "AU"):
+            with self.subTest(unit=unit), mock.patch.object(plt, "show"):
+                plots.plot_orbits(
+                    output,
+                    merc_ic=physics.MercuryInitialConditions(
+                        0.5 * physics.R_SUN, 0.0, 0.0, 0.0
+                    ),
+                    binary_params=default_binary(),
+                    corner="lower right",
+                    position_unit=unit,
+                )
+                axis = plt.gcf().axes[0]
+                labels = [line.get_label() for line in axis.lines]
+                self.assertIn("Collision: Sun", labels)
+                self.assertEqual(
+                    axis.get_xlabel(), f"barycentric x ({unit})"
+                )
+            plt.close("all")
+
+    def test_jacobi_plot_of_single_sample_is_zero(self) -> None:
+        output = self._immediate_collision()
+        with mock.patch.object(plt, "show"):
+            plots.plot_jacobi_drift(output)
+        axis = plt.gcf().axes[0]
+        self.assertEqual(list(axis.lines[0].get_ydata()), [0.0])
+
+    def test_jacobi_plot_with_zero_initial_constant_uses_unit_scale(self) -> None:
+        output = short_run(2)
+        output.jacobi = [0.0, 2.0e-9, -1.0e-9]
+        with mock.patch.object(plt, "show"):
+            plots.plot_jacobi_drift(output)
+        axis = plt.gcf().axes[0]
+        self.assertEqual(list(axis.lines[0].get_ydata()),
+                         [0.0, 2.0e-9, -1.0e-9])
+
+
+class TimestepRecoveryTests(unittest.TestCase):
+    """Long-duration check that the controller shrinks and fully recovers."""
+
+    def test_timestep_recovers_after_each_pericentre_passage(self) -> None:
+        # A nearly isolated Sun and an eccentric orbit (launch at 30% of the
+        # circular speed from 0.3 AU) give three pericentre passages at
+        # about 0.014 AU in 3000 accepted steps.
+        binary = physics.BinarySystemParams(1.0, 1.0e-10, 100.0 * physics.AU)
+        circular = math.sqrt(physics.GM_SUN / (0.3 * physics.AU))
+        ic = physics.MercuryInitialConditions(
+            0.3 * physics.AU, 0.0, 0.0, 0.3 * circular
+        )
+        output = driver.run_mercpert(
+            binary, ic,
+            driver.MercPertRunParams(2000.0, 3000, 0.05, 1.0e-4,
+                                     physics.R_SUN, 0.0),
+        )
+        self.assertEqual(output.termination_reason, "max_steps reached")
+        steps = output.dt_used[1:]
+        self.assertTrue(all(0.0 < dt <= 2000.0 for dt in steps))
+        for before, after in zip(steps, steps[1:]):
+            if after > before:
+                self.assertLessEqual(after, 1.1 * before * (1.0 + 1.0e-12))
+
+        # Split the run into passages: maximal runs of reduced steps.
+        passages, current = [], []
+        for dt in steps:
+            if dt < 2000.0:
+                current.append(dt)
+            elif current:
+                passages.append(current)
+                current = []
+        self.assertEqual(current, [], "the run should end fully recovered")
+        self.assertGreaterEqual(len(passages), 3)
+        minima = [min(passage) for passage in passages]
+        self.assertLess(max(minima), 500.0)
+        # Recovery must not ratchet the step down from passage to passage.
+        self.assertLess(max(minima) / min(minima), 1.2)
+        self.assertEqual(steps[-1], 2000.0)
+
+
 class CommandLineTests(unittest.TestCase):
     def test_all_model_and_plot_defaults_are_exposed(self) -> None:
         args = entry.parse_args([])
@@ -893,6 +1003,152 @@ class CommandLineTests(unittest.TestCase):
             completed.stdout,
             r"Maximum fractional Jacobi drift: [0-9.e+-]+",
         )
+
+
+JUPITER_REFERENCE = re.compile(r"Jupiter(?=[ -]mass| itself)")
+
+
+class TerminologyTests(unittest.TestCase):
+    """The second massive body is the companion; Jupiter is only a mass scale."""
+
+    def _help_texts(self):
+        texts = [(HELP_FILE.name, HELP_FILE.read_text(encoding="utf-8"))]
+        if BEATS_HELP_FILE is not None:
+            texts.append((BEATS_HELP_FILE.name,
+                          BEATS_HELP_FILE.read_text(encoding="utf-8")))
+        return texts
+
+    def test_help_mentions_jupiter_only_as_a_mass_reference(self) -> None:
+        for name, text in self._help_texts():
+            with self.subTest(help_file=name):
+                total = text.count("Jupiter")
+                allowed = len(JUPITER_REFERENCE.findall(text))
+                self.assertEqual(total, allowed)
+                self.assertNotIn("historical \u201cJupiter\u201d", text)
+
+    def test_command_line_help_calls_the_second_body_the_companion(self) -> None:
+        with redirect_stdout(io.StringIO()) as text, \
+                self.assertRaises(SystemExit):
+            entry.parse_args(["--help"])
+        help_text = " ".join(text.getvalue().split())
+        self.assertIn("companion mass", help_text)
+        self.assertIn("Sun–companion separation", help_text)
+        self.assertNotIn("Jupiter", help_text)
+        self.assertNotIn("planet mass", help_text)
+
+
+@unittest.skipIf(BEATS_HELP_FILE is None,
+                 f"{BEATS_HELP_FILENAME} is not present beside {HELP_FILENAME}")
+class BeatsHelpTests(unittest.TestCase):
+    """Structural checks on the Beats-format tutorial Help."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        assert BEATS_HELP_FILE is not None
+        cls.text = BEATS_HELP_FILE.read_text(encoding="utf-8")
+
+    def _commands(self, outside_beat9: bool):
+        body = self.text
+        beat9 = re.search(r'<section id="beat9">(.*?)</section>', body,
+                          flags=re.DOTALL)
+        self.assertIsNotNone(beat9)
+        assert beat9 is not None
+        source = body.replace(beat9.group(0), "") if outside_beat9 \
+            else beat9.group(1)
+        pre_pattern = r'<pre class="code-block"><code>(.*?)</code></pre>'
+        lines = []
+        for block in re.findall(pre_pattern, source, flags=re.DOTALL):
+            lines.extend(unescape(block).splitlines())
+        inline_source = re.sub(pre_pattern, "", source, flags=re.DOTALL)
+        lines.extend(unescape(code) for code in
+                     re.findall(r"<code>(.*?)</code>", inline_source,
+                                flags=re.DOTALL))
+        commands = []
+        for line in lines:
+            line = " ".join(line.split())
+            if (line.startswith("python main.py")
+                    and line not in ("python main.py --help",
+                                     "python main.py --version")):
+                commands.append(line)
+        return commands
+
+    def test_version_and_build_match_program(self) -> None:
+        match = re.search(
+            r'<p\s+id="version_build"[^>]*>\s*'
+            r'Version\s+([0-9]+\.[0-9]+\.[0-9]+)'
+            r'(?:&nbsp;|\s)+Build\s+([0-9a-f]{12})',
+            self.text,
+        )
+        self.assertIsNotNone(match)
+        assert match is not None
+        self.assertEqual(match.group(1), physics.MODEL_VERSION)
+        self.assertEqual(match.group(2), physics.BUILD_ID)
+
+    def test_internal_links_and_ids_are_consistent(self) -> None:
+        inspector = _HelpInspector()
+        inspector.feed(self.text)
+        self.assertEqual(len(inspector.ids), len(set(inspector.ids)))
+        self.assertTrue(set(inspector.fragment_links).issubset(inspector.ids))
+        for number in range(10):
+            self.assertIn(f"beat{number}", inspector.ids)
+        for number in range(1, 9):
+            self.assertIn(f"exp{number}", inspector.ids)
+
+    def test_numbered_equations_appear_once_and_in_order(self) -> None:
+        numbers = [int(n) for n in re.findall(r"Eq\. (\d+) —", self.text)]
+        self.assertEqual(numbers, list(range(1, 11)))
+
+    def test_student_help_has_no_development_history(self) -> None:
+        lowered = self.text.lower()
+        for phrase in ("copilot", "gemini", "codex", "grok", "audit",
+                       "ai-generated", "ported from java",
+                       "development history"):
+            with self.subTest(phrase=phrase):
+                self.assertNotIn(phrase, lowered)
+
+    def test_documents_every_command_line_option(self) -> None:
+        for name in entry.DEFAULTS:
+            self.assertIn("--" + name, self.text)
+        for flag in ("--binary_separation_au", "--x_init_au", "--y_init_au",
+                     "--no-show_jacobi_diagnostic"):
+            self.assertIn(flag, self.text)
+
+    def test_every_tutorial_command_is_accepted_by_the_parser(self) -> None:
+        commands = self._commands(outside_beat9=True)
+        self.assertGreater(len(commands), 25)
+        for command in commands:
+            with self.subTest(command=command), \
+                    redirect_stderr(io.StringIO()):
+                entry.parse_args(shlex.split(command)[2:])
+
+    def test_beat9_input_errors_are_rejected_by_the_parser(self) -> None:
+        commands = self._commands(outside_beat9=False)
+        rejected = [c for c in commands if "--x_init 0" not in c]
+        self.assertEqual(len(rejected), 3)
+        for command in rejected:
+            with self.subTest(command=command), \
+                    redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit) as failure:
+                entry.parse_args(shlex.split(command)[2:])
+            self.assertEqual(failure.exception.code, 2)
+
+    def test_energy_one_liner_runs_and_prints_a_fraction(self) -> None:
+        lines = [
+            line
+            for block in re.findall(
+                r'<pre class="code-block"><code>(.*?)</code></pre>',
+                self.text, flags=re.DOTALL)
+            for line in unescape(block).splitlines()
+            if line.startswith('python -c "')
+        ]
+        self.assertEqual(len(lines), 1)
+        code = shlex.split(lines[0])[2]
+        completed = subprocess.run(
+            [sys.executable, "-c", code], cwd=MODULE_DIR, text=True,
+            capture_output=True, check=True, timeout=60,
+            env={**os.environ, "MPLBACKEND": "Agg"},
+        )
+        self.assertRegex(completed.stdout.strip(), r"^0\.\d{4}$")
 
 
 if __name__ == "__main__":
