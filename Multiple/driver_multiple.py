@@ -258,7 +258,20 @@ def _energy_drift_scale(
     return abs(total), "initial_energy"
 
 
-def _vector_drift(value: np.ndarray, reference: np.ndarray) -> float:
+def _vector_drift(
+    value: np.ndarray,
+    reference: np.ndarray,
+    scale: Optional[float] = None,
+) -> float:
+    """
+    Return the norm of (value - reference), optionally divided by `scale`.
+
+    `scale` should be the same scale chosen once, at the initial state, by
+    `_vector_drift_metadata` -- either the initial vector's own norm, a
+    near-cancellation-safe characteristic scale, or None for an absolute
+    (unscaled) drift. Recomputing a fresh denominator from `reference` at
+    every step would defeat the point of choosing a stable scale up front.
+    """
     if not (
         np.all(np.isfinite(value))
         and np.all(np.isfinite(reference))
@@ -272,11 +285,17 @@ def _vector_drift(value: np.ndarray, reference: np.ndarray) -> float:
             "Conservation-vector drift is outside the floating-point range."
         )
 
-    scale = float(np.hypot.reduce(reference))
     diff = float(np.hypot.reduce(difference))
-    if not (np.isfinite(scale) and np.isfinite(diff)):
+    if not np.isfinite(diff):
         raise ValueError(
             "Conservation-vector norm is outside the floating-point range."
+        )
+    if scale is None:
+        return diff
+    if not np.isfinite(scale) or scale < 0.0:
+        raise ValueError(
+            "Conservation-vector drift scale is outside the floating-point "
+            "range."
         )
     if scale == 0.0:
         return diff
@@ -288,8 +307,25 @@ def _vector_drift(value: np.ndarray, reference: np.ndarray) -> float:
     return drift
 
 
-def _vector_drift_metadata(reference: np.ndarray) -> tuple[Optional[float], str]:
-    """Return the vector-drift scale and its public normalization label."""
+def _vector_drift_metadata(
+    reference: np.ndarray,
+    characteristic: Optional[float] = None,
+) -> tuple[Optional[float], str]:
+    """
+    Return the vector-drift scale and its public normalization label.
+
+    `characteristic` is the sum of individual-body magnitudes (from
+    `scaled_characteristic_momentum` or
+    `scaled_characteristic_angular_momentum`), which is always at least as
+    large as the norm of `reference` itself. When the total is small only
+    because individually nonzero contributions nearly or exactly cancel --
+    the same kind of near-cancellation `_energy_drift_scale` already
+    detects for energy -- using `characteristic` as the scale gives a
+    stable fractional drift instead of an unscaled, hard-to-interpret
+    absolute one. The absolute fallback is reserved for the case where
+    there is genuinely no such quantity to divide by (`characteristic` is
+    zero, absent, or every body is exactly still).
+    """
     if not np.all(np.isfinite(reference)):
         raise ValueError("Conservation vectors must contain finite values.")
     scale = float(np.hypot.reduce(reference))
@@ -297,6 +333,14 @@ def _vector_drift_metadata(reference: np.ndarray) -> tuple[Optional[float], str]
         raise ValueError(
             "Conservation-vector norm is outside the floating-point range."
         )
+    if characteristic is not None:
+        if not np.isfinite(characteristic) or characteristic < 0.0:
+            raise ValueError(
+                "Conservation-vector characteristic scale is outside the "
+                "floating-point range."
+            )
+        if characteristic > 0.0 and scale <= ENERGY_CANCELLATION_TOLERANCE * characteristic:
+            return characteristic, "characteristic_scale"
     if scale == 0.0:
         return None, "absolute_scaled"
     return scale, "initial_norm"
@@ -341,11 +385,19 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
         initial_cons["kinetic_energy"],
         initial_cons["potential_energy"],
     )
+    momentum_characteristic = phys.scaled_characteristic_momentum(
+        velocities, masses
+    )
+    angular_characteristic = phys.scaled_characteristic_angular_momentum(
+        positions, velocities, masses
+    )
     momentum_drift_scale, momentum_drift_normalization = (
-        _vector_drift_metadata(initial_cons["momentum"])
+        _vector_drift_metadata(initial_cons["momentum"], momentum_characteristic)
     )
     angular_drift_scale, angular_drift_normalization = (
-        _vector_drift_metadata(initial_cons["angular_momentum"])
+        _vector_drift_metadata(
+            initial_cons["angular_momentum"], angular_characteristic
+        )
     )
     max_energy_drift = 0.0
     max_momentum_drift = 0.0
@@ -517,7 +569,8 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
         max_momentum_drift = _checked_maximum_drift(
             max_momentum_drift,
             _vector_drift(
-                current_cons["momentum"], initial_cons["momentum"]
+                current_cons["momentum"], initial_cons["momentum"],
+                momentum_drift_scale,
             ),
             "momentum",
         )
@@ -526,6 +579,7 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
             _vector_drift(
                 current_cons["angular_momentum"],
                 initial_cons["angular_momentum"],
+                angular_drift_scale,
             ),
             "angular-momentum",
         )

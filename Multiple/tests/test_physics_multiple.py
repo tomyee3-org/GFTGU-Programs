@@ -9,13 +9,17 @@ The locator intentionally supports both repository layouts used for review:
 import ast
 import contextlib
 import hashlib
+from html import unescape
+from html.parser import HTMLParser
 import io
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
+from typing import Optional
 import unittest
 from unittest import mock
 
@@ -68,14 +72,29 @@ def find_help_file(module_dir):
     )
 
 
+BEATS_HELP_FILENAME = "Multiple-claude.html"
+
+
+def find_beats_help_file(help_file: Path) -> Optional[Path]:
+    """Return the Beats-format tutorial Help beside the classic Help, if any.
+
+    The Beats file is optional in a flattened upload, so its tests skip
+    rather than fail when it is absent.
+    """
+    candidate = help_file.parent / BEATS_HELP_FILENAME
+    return candidate if candidate.is_file() else None
+
+
 MODULE_DIR = find_module_dir(Path(__file__))
 HELP_PATH = find_help_file(MODULE_DIR)
+BEATS_HELP_FILE = find_beats_help_file(HELP_PATH)
 if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 
 os.environ.setdefault("MPLBACKEND", "Agg")
 
 import driver_multiple as driver  # noqa: E402
+import main as entry  # noqa: E402
 import physics_multiple as phys  # noqa: E402
 import plot_multiple as plotting  # noqa: E402
 
@@ -331,6 +350,37 @@ class TestConservationFunctions(unittest.TestCase):
             [2, 5],
         )
         np.testing.assert_array_equal(angular, [0, 0, 46])
+
+    def test_characteristic_momentum_sums_individual_magnitudes(self):
+        # Exactly cancelling total momentum: m=[1,2], v=[(0,-1000,0),(0,500,0)].
+        characteristic = phys.scaled_characteristic_momentum(
+            [[0, -1000, 0], [0, 500, 0]], [1, 2]
+        )
+        self.assertAlmostEqual(characteristic, 1 * 1000.0 + 2 * 500.0)
+        total = phys.scaled_total_momentum(
+            [[0, -1000, 0], [0, 500, 0]], [1, 2]
+        )
+        np.testing.assert_allclose(total, [0.0, 0.0, 0.0])
+        # The characteristic scale is always at least the norm of the total
+        # (triangle inequality); here the total is exactly zero.
+        self.assertGreaterEqual(characteristic, float(np.hypot.reduce(total)))
+
+    def test_characteristic_angular_momentum_sums_individual_magnitudes(self):
+        characteristic = phys.scaled_characteristic_angular_momentum(
+            [[1, 0, 0], [-1, 0, 0]],
+            [[0, 3, 0], [0, 3, 0]],
+            [2, 5],
+        )
+        # Body 1: |r x v| = |(1,0,0)x(0,3,0)| = 3; body 2: |(-1,0,0)x(0,3,0)| = 3.
+        self.assertAlmostEqual(characteristic, 2 * 3.0 + 5 * 3.0)
+
+    def test_characteristic_momentum_validates_like_total_momentum(self):
+        for velocities, masses in (
+            ([[1, 2]], [1]), ([[1, 2, 3]], [0]), ([[np.inf, 0, 0]], [1]),
+        ):
+            with self.subTest(velocities=velocities, masses=masses):
+                with self.assertRaises(ValueError):
+                    phys.scaled_characteristic_momentum(velocities, masses)
 
     def test_conservation_state_keys_and_values(self):
         positions = [[-1, 0, 0], [1, 0, 0]]
@@ -600,9 +650,21 @@ class TestDriverHelpers(unittest.TestCase):
     def test_vector_drift_avoids_large_finite_norm_overflow(self):
         reference = np.array([1.0e308, 1.0e308, 0.0])
         value = np.array([9.0e307, 1.0e308, 0.0])
-        drift = driver._vector_drift(value, reference)
+        # The caller is expected to pass the scale decided once at the
+        # initial state (as run_simulation does via _vector_drift_metadata),
+        # not have _vector_drift recompute norm(reference) on every call.
+        scale = float(np.hypot.reduce(reference))
+        self.assertTrue(np.isfinite(scale))
+        drift = driver._vector_drift(value, reference, scale)
         self.assertTrue(np.isfinite(drift))
         self.assertAlmostEqual(drift, 1.0 / np.sqrt(200.0), places=15)
+
+    def test_vector_drift_with_no_scale_is_absolute(self):
+        reference = np.array([1.0e308, 1.0e308, 0.0])
+        value = np.array([9.0e307, 1.0e308, 0.0])
+        drift = driver._vector_drift(value, reference)
+        self.assertTrue(np.isfinite(drift))
+        np.testing.assert_allclose(drift, 1.0e307, rtol=1.0e-12)
 
     def test_vector_drift_rejects_out_of_range_difference(self):
         reference = np.array([-1.0e308, 0.0, 0.0])
@@ -626,6 +688,51 @@ class TestDriverHelpers(unittest.TestCase):
         scale, mode = driver._energy_drift_scale(1.0, -0.9)
         self.assertEqual(mode, "initial_energy")
         self.assertAlmostEqual(scale, 0.1)
+
+    def test_vector_drift_metadata_detects_near_cancellation(self):
+        # Reference exactly zero, but individual contributions are not:
+        # the scale-aware criterion should use the characteristic scale,
+        # not fall back to an unscaled absolute drift.
+        scale, mode = driver._vector_drift_metadata(
+            np.zeros(3), characteristic=2000.0
+        )
+        self.assertEqual(mode, "characteristic_scale")
+        self.assertAlmostEqual(scale, 2000.0)
+
+        # A reference norm just barely inside the cancellation tolerance of
+        # a large characteristic is treated the same way.
+        tiny = driver.ENERGY_CANCELLATION_TOLERANCE * 2000.0 * 0.5
+        scale, mode = driver._vector_drift_metadata(
+            np.array([tiny, 0.0, 0.0]), characteristic=2000.0
+        )
+        self.assertEqual(mode, "characteristic_scale")
+        self.assertAlmostEqual(scale, 2000.0)
+
+        # A reference norm well outside the tolerance uses its own norm,
+        # exactly as before this criterion was added.
+        scale, mode = driver._vector_drift_metadata(
+            np.array([500.0, 0.0, 0.0]), characteristic=2000.0
+        )
+        self.assertEqual(mode, "initial_norm")
+        self.assertAlmostEqual(scale, 500.0)
+
+    def test_vector_drift_metadata_falls_back_to_absolute_when_characteristic_is_zero(self):
+        # No characteristic at all (every body exactly still, or no
+        # characteristic supplied): the original absolute-drift fallback
+        # is preserved for a genuinely zero reference.
+        scale, mode = driver._vector_drift_metadata(np.zeros(3), characteristic=0.0)
+        self.assertEqual(mode, "absolute_scaled")
+        self.assertIsNone(scale)
+
+        scale, mode = driver._vector_drift_metadata(np.zeros(3))
+        self.assertEqual(mode, "absolute_scaled")
+        self.assertIsNone(scale)
+
+        # A nonzero reference with no characteristic behaves exactly as
+        # the pre-existing initial-norm path did.
+        scale, mode = driver._vector_drift_metadata(np.array([3.0, 4.0, 0.0]))
+        self.assertEqual(mode, "initial_norm")
+        self.assertAlmostEqual(scale, 5.0)
 
 
 class TestSimulation(unittest.TestCase):
@@ -651,10 +758,16 @@ class TestSimulation(unittest.TestCase):
             result["max_angular_momentum_drift"],
             result["max_fractional_angular_momentum_drift"],
         )
+        # make_params()'s two bodies have exactly cancelling momentum
+        # (m=[1,2], v=[(0,-1000,0),(0,500,0)] -> P=(0,0,0) exactly), but the
+        # individual body momenta are not zero, so the scale-aware
+        # near-cancellation criterion uses the characteristic momentum
+        # scale (sum_A m_A|v_A| = 1*1000 + 2*500 = 2000) rather than the
+        # unscaled absolute drift.
         self.assertEqual(
-            result["momentum_drift_normalization"], "absolute_scaled"
+            result["momentum_drift_normalization"], "characteristic_scale"
         )
-        self.assertIsNone(result["momentum_drift_scale"])
+        self.assertAlmostEqual(result["momentum_drift_scale"], 2000.0)
         self.assertEqual(
             result["angular_momentum_drift_normalization"], "initial_norm"
         )
@@ -860,6 +973,17 @@ class TestPlotting(unittest.TestCase):
     def tearDown(self):
         plotting.plt.close("all")
 
+    def test_non_dict_result_is_rejected_with_a_clear_error(self):
+        # All three public plotting entry points must reject a non-dict
+        # result the same way plot_energy_drift already did, rather than
+        # letting the first result.get(...) raise a bare AttributeError.
+        for fn in (plotting.plot_trajectories, plotting.plot_energy_drift,
+                   plotting.animate_multiple):
+            for bad_result in ("not a dict", ["type", "trajectories"], None, 3.0):
+                with self.subTest(fn=fn.__name__, bad_result=bad_result):
+                    with self.assertRaisesRegex(ValueError, "must be a dict"):
+                        fn(bad_result)
+
     def test_projection_indices(self):
         self.assertEqual(plotting._projection_indices("XY"), (0, 1, "x", "y"))
         self.assertEqual(plotting._projection_indices("xz"), (0, 2, "x", "z"))
@@ -880,6 +1004,22 @@ class TestPlotting(unittest.TestCase):
     def test_plot_trajectories_rejects_wrong_result_type(self):
         with self.assertRaisesRegex(ValueError, "trajectories result"):
             plotting.plot_trajectories({"type": "animation"})
+
+    def test_plot_trajectories_validates_positions(self):
+        malformed = (
+            {"type": "trajectories"},
+            {"type": "trajectories", "positions": []},
+            {"type": "trajectories", "positions": [[1.0, 2.0, 3.0]]},
+            {
+                "type": "trajectories",
+                "positions": [[[1.0, np.inf, 0.0], [0.0, 0.0, 0.0]]],
+                "display_frame": "user",
+            },
+        )
+        for result in malformed:
+            with self.subTest(result=result):
+                with self.assertRaises(ValueError):
+                    plotting.plot_trajectories(result)
 
     def test_plot_energy_rejects_wrong_result_type(self):
         with self.assertRaisesRegex(ValueError, "trajectories mode"):
@@ -933,6 +1073,53 @@ class TestPlotting(unittest.TestCase):
             plotting.animate_multiple(
                 {"type": "animation", "frame_times": [], "frame_positions": []}
             )
+
+    def test_animate_validates_frame_arrays_before_other_fields(self):
+        # Missing/malformed frame_times or frame_positions is diagnosed
+        # without requiring the other animation fields to be present.
+        malformed_frames = (
+            {"type": "animation"},
+            {"type": "animation", "frame_times": [0.0], "frame_positions": []},
+            {
+                "type": "animation",
+                "frame_times": [0.0, 1.0],
+                "frame_positions": [[[0.0, 0.0, 0.0]]],
+            },
+            {
+                "type": "animation",
+                "frame_times": [0.0, np.inf],
+                "frame_positions": [[[0.0, 0.0, 0.0]], [[1.0, 0.0, 0.0]]],
+            },
+        )
+        for result in malformed_frames:
+            with self.subTest(result=result):
+                with self.assertRaises(ValueError):
+                    plotting.animate_multiple(result)
+
+    def test_animate_validates_remaining_scalar_and_selector_fields(self):
+        base = {
+            "type": "animation",
+            "frame_times": [0.0, 1.0],
+            "frame_positions": [[[0.0, 0.0, 0.0]], [[1.0, 0.0, 0.0]]],
+            "animation_mode": "trails",
+            "frame_time": 1.0,
+            "frame_interval_ms": 50,
+            "trail_time": 1.0,
+            "projection": "xy",
+            "axis_mode": "fixed",
+            "display_frame": "user",
+        }
+        for key, bad_value in (
+            ("animation_mode", "orbits"),
+            ("frame_time", 0.0),
+            ("frame_interval_ms", 0),
+            ("trail_time", -1.0),
+            ("axis_mode", "zoom"),
+        ):
+            with self.subTest(key=key, bad_value=bad_value):
+                broken = dict(base, **{key: bad_value})
+                with self.assertRaises(ValueError):
+                    plotting.animate_multiple(broken)
 
     @mock.patch.object(plotting.plt, "show")
     def test_static_plot_functions_run(self, show):
@@ -1282,6 +1469,164 @@ class TestBuildDocumentationAndCompatibility(unittest.TestCase):
         self.assertNotIn("KE=", text)
         energy = float(state["energy"])
         self.assertIn(f"{energy:.4e}", text)
+
+
+class _HelpInspector(HTMLParser):
+    """Collect the small amount of HTML structure used by documentation tests."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.ids = []
+        self.fragment_links = []
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        attributes = dict(attrs)
+        if "id" in attributes:
+            self.ids.append(attributes["id"])
+        href = attributes.get("href", "")
+        if tag == "a" and href.startswith("#"):
+            self.fragment_links.append(href[1:])
+
+
+@unittest.skipIf(BEATS_HELP_FILE is None, "Beats-format Help not present")
+class BeatsHelpTests(unittest.TestCase):
+    """Structural checks on the Beats-format tutorial Help."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        assert BEATS_HELP_FILE is not None
+        cls.text = BEATS_HELP_FILE.read_text(encoding="utf-8")
+
+    def _section(self, section_id: str) -> str:
+        match = re.search(rf'<section id="{section_id}">(.*?)</section>',
+                          self.text, flags=re.DOTALL)
+        self.assertIsNotNone(match)
+        assert match is not None
+        return match.group(1)
+
+    def _commands(self):
+        pre_pattern = r'<pre class="code-block"><code>(.*?)</code></pre>'
+        lines = []
+        for block in re.findall(pre_pattern, self.text, flags=re.DOTALL):
+            lines.extend(unescape(block).splitlines())
+        commands = []
+        for line in lines:
+            line = " ".join(line.split())
+            if (line.startswith("python main.py")
+                    and line not in ("python main.py --help",
+                                     "python main.py --version")):
+                commands.append(line)
+        return commands
+
+    def test_version_and_build_match_program(self) -> None:
+        match = re.search(
+            r'<p\s+id="version_build"[^>]*>\s*'
+            r'Version\s+([0-9]+\.[0-9]+\.[0-9]+)'
+            r'(?:&nbsp;|\s)+Build\s+([0-9a-f]{12})',
+            self.text,
+        )
+        self.assertIsNotNone(match)
+        assert match is not None
+        self.assertEqual(match.group(1), phys.MODEL_VERSION)
+        self.assertEqual(match.group(2), phys.BUILD_ID)
+
+    def test_internal_links_and_ids_are_consistent(self) -> None:
+        inspector = _HelpInspector()
+        inspector.feed(self.text)
+        self.assertEqual(len(inspector.ids), len(set(inspector.ids)))
+        self.assertTrue(set(inspector.fragment_links).issubset(inspector.ids))
+        for number in range(9):
+            self.assertIn(f"beat{number}", inspector.ids)
+        for number in range(1, 11):
+            self.assertIn(f"exp{number}", inspector.ids)
+
+    def test_numbered_equations_appear_once_and_in_order(self) -> None:
+        numbers = [int(n) for n in re.findall(r"Eq\. (\d+) —", self.text)]
+        self.assertEqual(numbers, list(range(1, 17)))
+
+    def test_student_help_has_no_development_history(self) -> None:
+        lowered = self.text.lower()
+        for phrase in ("copilot", "gemini", "codex", "grok", "audit",
+                       "ai-generated", "ported from java",
+                       "development history"):
+            with self.subTest(phrase=phrase):
+                self.assertNotIn(phrase, lowered)
+
+    def test_documents_every_command_line_option(self) -> None:
+        for name in entry.DEFAULTS:
+            self.assertIn("--" + name, self.text)
+        for flag in ("--output_type", "--animation_mode", "--projection",
+                     "--axis_mode", "--display_frame",
+                     "--show_energy_diagnostic"):
+            self.assertIn(flag, self.text)
+
+    def test_every_tutorial_command_is_accepted_by_the_parser(self) -> None:
+        commands = self._commands()
+        self.assertGreater(len(commands), 20)
+        for command in commands:
+            with self.subTest(command=command), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                entry.parse_args(shlex.split(command)[2:])
+
+    def test_beat1_acceleration_one_liner_matches_claimed_magnitudes(self) -> None:
+        # Live-verifies the numbers Beat 1's inline python3 -c snippet
+        # reports for the three-body initial-acceleration cross-check.
+        pos = np.array([[4.6e10, 0., 0.], [-4.6e10, 0., 0.], [0., 4.6e10, 0.]])
+        masses = np.array([2., 1., 0.5])
+        magnitudes = np.linalg.norm(phys.compute_accelerations(pos, masses), axis=1)
+        for actual, claimed in zip(magnitudes, (0.028972, 0.043871, 0.070121)):
+            self.assertAlmostEqual(actual, claimed, places=5)
+        beat1 = self._section("beat1")
+        for claimed in ("0.028972", "0.043871", "0.070121"):
+            self.assertIn(claimed, beat1)
+
+    def test_beat4_momentum_and_angular_momentum_fallback_labels(self) -> None:
+        # Live-verifies Beat 4's characteristic-scale near-cancellation
+        # demonstration, the centerpiece maintenance-item fix for 1.4.0.
+        params = driver.SimulationParams(
+            n_bodies=2, masses_solar=[1, 1],
+            positions_init=[[5e10, 0, 0], [-5e10, 0, 0]],
+            velocities_init=[[0, 25760, 0], [0, -25760, 0]],
+            dt=2000., max_steps=3000, eps1=.005, eps2=1e-7,
+            output_type="trajectories", animation_mode="trails",
+            frame_time=2e5, frame_interval_ms=50, trail_time=6e5,
+            projection="xy", axis_mode="fixed", display_frame="com",
+        )
+        result = driver.run_simulation(params)
+        self.assertEqual(result["momentum_drift_normalization"], "characteristic_scale")
+        self.assertAlmostEqual(result["momentum_drift_scale"], 51520.0, places=1)
+        self.assertEqual(result["angular_momentum_drift_normalization"], "initial_norm")
+        self.assertAlmostEqual(
+            result["angular_momentum_drift_scale"], 2576000000000000.0, delta=1.0
+        )
+        beat4 = self._section("beat4")
+        self.assertIn("characteristic_scale", beat4)
+        self.assertIn("51520.0", beat4)
+        self.assertIn("initial_norm", beat4)
+
+    def test_galaxy_collision_singularity_command_actually_crashes(self) -> None:
+        # Beat 8 / Experiment 10 quote an exact error message from a
+        # deliberately over-extended head-on point-mass encounter; confirm
+        # the quoted command still raises it (parser-valid, runtime crash).
+        beat8 = " ".join(self._section("beat8").split())
+        self.assertIn(
+            "Multiple error: The adaptive timestep became too small to "
+            "advance simulation time in floating-point arithmetic.",
+            beat8,
+        )
+        params = driver.SimulationParams(
+            n_bodies=2, masses_solar=[1e11, 1e11],
+            positions_init=[[-7.7e20, 0, 0], [7.7e20, 0, 0]],
+            velocities_init=[[50000, 0, 0], [-50000, 0, 0]],
+            dt=1e12, max_steps=17800,
+            eps1=.005, eps2=1e-7, output_type="trajectories",
+            animation_mode="trails", frame_time=2e5, frame_interval_ms=50,
+            trail_time=6e5, projection="xy", axis_mode="fixed",
+            display_frame="com",
+        )
+        with self.assertRaises(RuntimeError) as failure:
+            driver.run_simulation(params)
+        self.assertIn("too small to advance simulation time", str(failure.exception))
 
 
 if __name__ == "__main__":

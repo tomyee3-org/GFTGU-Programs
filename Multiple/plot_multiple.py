@@ -36,6 +36,22 @@ def _normalized_display_frame(value) -> str:
     return frame
 
 
+def _require_result_mapping(result: Any, expected_type: str) -> None:
+    """Reject a non-dict result before any ``.get``/``[...]`` access.
+
+    ``run_simulation()`` always returns a ``dict``, so this only fires on a
+    caller error (e.g. passing a raw array or a string). Without it, the
+    first field lookup below raises a bare ``AttributeError`` instead of the
+    same clear ``ValueError`` every other malformed-result case already
+    gets.
+    """
+    if not isinstance(result, dict):
+        raise ValueError(
+            f"{expected_type} result must be a dict, as returned by "
+            "run_simulation()."
+        )
+
+
 def _resolve_display_frame(result: Dict[str, Any]) -> str:
     """
     Choose a display frame that can actually be computed from result.
@@ -88,16 +104,38 @@ def _fixed_limits(projected):
     return (xmid - half, xmid + half), (ymid - half, ymid + half)
 
 
+def _validated_result_positions(result: Dict[str, Any]) -> np.ndarray:
+    """Return result['positions'] as a finite (n_states, n_bodies, 3) array."""
+    try:
+        raw_positions = result["positions"]
+    except KeyError as exc:
+        raise ValueError("Trajectory results must contain positions.") from exc
+    try:
+        positions = np.asarray(raw_positions, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("positions must be a numeric array.") from exc
+    if positions.ndim != 3 or positions.shape[0] == 0 or positions.shape[2] != 3:
+        raise ValueError(
+            "positions must have shape (number of states, number of "
+            "bodies, 3), with at least one state."
+        )
+    if not np.all(np.isfinite(positions)):
+        raise ValueError("positions must contain only finite values.")
+    return positions
+
+
 def plot_trajectories(
     result: Dict[str, Any],
     projection: str = "xy",
 ) -> None:
     """Plot complete trajectories in the selected 2-D projection."""
+    _require_result_mapping(result, "plot_trajectories")
     if result.get("type") != "trajectories":
         raise ValueError("plot_trajectories requires a trajectories result.")
 
+    raw_positions = _validated_result_positions(result)
     frame = _resolve_display_frame(result)
-    positions = _positions_for_display(result, result["positions"], frame)
+    positions = _positions_for_display(result, raw_positions, frame)
     _, n_bodies, _ = positions.shape
     i1, i2, label1, label2 = _projection_indices(projection)
 
@@ -124,6 +162,7 @@ def plot_trajectories(
 
 def plot_energy_drift(result: Dict[str, Any]) -> None:
     """Plot fractional total-energy drift for trajectory output."""
+    _require_result_mapping(result, "plot_energy_drift")
     if result.get("type") != "trajectories":
         raise ValueError(
             "Energy-drift history is available in trajectories mode."
@@ -222,21 +261,81 @@ def animate_multiple(result: Dict[str, Any]):
     Space resumes from the currently displayed frame. If the final frame is
     displayed, Space replays from the beginning.
     """
+    _require_result_mapping(result, "animate_multiple")
     if result.get("type") != "animation":
         raise ValueError("animate_multiple requires an animation result.")
 
-    frame_times = np.asarray(result["frame_times"], dtype=float)
-    source_positions = np.asarray(result["frame_positions"], dtype=float)
+    try:
+        raw_frame_times = result["frame_times"]
+        raw_frame_positions = result["frame_positions"]
+    except KeyError as exc:
+        raise ValueError(
+            "Animation results must contain frame_times and frame_positions."
+        ) from exc
+
+    try:
+        frame_times = np.asarray(raw_frame_times, dtype=float)
+        source_positions = np.asarray(raw_frame_positions, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "frame_times and frame_positions must be numeric arrays."
+        ) from exc
 
     if frame_times.size == 0 or source_positions.shape[0] == 0:
         raise ValueError("No animation frames are available.")
+    if (
+        frame_times.ndim != 1
+        or source_positions.ndim != 3
+        or source_positions.shape[0] != frame_times.shape[0]
+        or source_positions.shape[2] != 3
+    ):
+        raise ValueError(
+            "frame_positions must have shape (number of frame_times, "
+            "number of bodies, 3)."
+        )
+    if not (
+        np.all(np.isfinite(frame_times))
+        and np.all(np.isfinite(source_positions))
+    ):
+        raise ValueError(
+            "frame_times and frame_positions must contain only finite "
+            "values."
+        )
 
-    mode = result["animation_mode"]
-    frame_time = float(result["frame_time"])
-    interval_ms = int(result["frame_interval_ms"])
-    trail_time = float(result["trail_time"])
-    projection = result["projection"]
-    axis_mode = result["axis_mode"]
+    try:
+        mode = result["animation_mode"]
+        raw_frame_time = result["frame_time"]
+        raw_interval_ms = result["frame_interval_ms"]
+        raw_trail_time = result["trail_time"]
+        projection = result["projection"]
+        axis_mode = result["axis_mode"]
+    except KeyError as exc:
+        raise ValueError(
+            "Animation results must contain animation_mode, frame_time, "
+            "frame_interval_ms, trail_time, projection, and axis_mode."
+        ) from exc
+
+    try:
+        frame_time = float(raw_frame_time)
+        interval_ms = int(raw_interval_ms)
+        trail_time = float(raw_trail_time)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "frame_time, frame_interval_ms, and trail_time must be "
+            "numeric."
+        ) from exc
+    if not (np.isfinite(frame_time) and frame_time > 0.0):
+        raise ValueError("frame_time must be a positive finite number.")
+    if interval_ms <= 0:
+        raise ValueError("frame_interval_ms must be a positive integer.")
+    if not (np.isfinite(trail_time) and trail_time >= 0.0):
+        raise ValueError("trail_time must be a non-negative finite number.")
+    if not isinstance(mode, str) or mode not in ("current positions", "trails"):
+        raise ValueError(
+            'animation_mode must be "current positions" or "trails".'
+        )
+    if not isinstance(axis_mode, str) or axis_mode not in ("fixed", "auto"):
+        raise ValueError('axis_mode must be "fixed" or "auto".')
     display_frame = _resolve_display_frame(result)
     i1, i2, label1, label2 = _projection_indices(projection)
     n_frames, n_bodies, _ = source_positions.shape

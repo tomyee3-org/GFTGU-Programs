@@ -7,7 +7,7 @@ import numpy as np
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.3.1"
+MODEL_VERSION = "1.4.0"
 BUILD_ID_COVERS = (
     "physics_multiple.py",
     "driver_multiple.py",
@@ -288,6 +288,74 @@ def scaled_total_angular_momentum(
             "Total angular momentum is outside the floating-point range."
         )
     return angular_momentum
+
+
+def scaled_characteristic_momentum(
+    velocities: np.ndarray,
+    masses_solar: np.ndarray,
+) -> float:
+    """
+    Return the sum of individual-body momentum magnitudes, sum_A m_A|v_A|.
+
+    This is always at least as large as the norm of the total momentum
+    (triangle inequality), and it is strictly positive whenever any body
+    moves. It gives a stable, nonzero denominator for momentum-drift
+    normalization even when the *total* momentum is exactly or nearly zero
+    because individually nonzero body momenta cancel.
+    """
+    velocities = _as_finite_float_array(velocities, "velocities")
+    masses_solar = _as_finite_float_array(masses_solar, "masses_solar")
+    if masses_solar.ndim != 1 or masses_solar.size < 2:
+        raise ValueError(
+            "masses_solar must be a one-dimensional array with at least "
+            "two values."
+        )
+    if np.any(masses_solar <= 0.0):
+        raise ValueError("All masses must be positive.")
+    if velocities.shape != (masses_solar.size, 3):
+        raise ValueError("velocities must have shape (number of masses, 3).")
+
+    with np.errstate(over="ignore", invalid="ignore"):
+        characteristic = float(
+            np.sum(masses_solar * np.hypot.reduce(velocities, axis=1))
+        )
+    if not np.isfinite(characteristic):
+        raise ValueError(
+            "Characteristic momentum scale is outside the floating-point "
+            "range."
+        )
+    return characteristic
+
+
+def scaled_characteristic_angular_momentum(
+    positions: np.ndarray,
+    velocities: np.ndarray,
+    masses_solar: np.ndarray,
+) -> float:
+    """
+    Return the sum of individual-body angular-momentum magnitudes,
+    sum_A m_A|r_A x v_A|.
+
+    This is always at least as large as the norm of the total angular
+    momentum (triangle inequality), and gives a stable, nonzero denominator
+    for angular-momentum-drift normalization even when the *total* angular
+    momentum is exactly or nearly zero because individually nonzero
+    body contributions cancel.
+    """
+    positions, velocities, masses_solar = _validated_state(
+        positions, velocities, masses_solar
+    )
+    with np.errstate(over="ignore", invalid="ignore"):
+        per_body = np.cross(positions, velocities)
+        characteristic = float(
+            np.sum(masses_solar * np.hypot.reduce(per_body, axis=1))
+        )
+    if not np.isfinite(characteristic):
+        raise ValueError(
+            "Characteristic angular-momentum scale is outside the "
+            "floating-point range."
+        )
+    return characteristic
 
 
 def conservation_state(
