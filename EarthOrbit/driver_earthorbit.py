@@ -235,7 +235,18 @@ def _segment_dips_inside_earth(x0, y0, x1, y1):
     cut through the disk of radius R_EARTH and back out again -- a single
     fixed-step update whose start and end points are both above the surface
     but whose connecting chord passes through it.
+
+    Coordinates are rescaled by the largest magnitude present (endpoints or
+    R_EARTH) before any products are formed. Classroom-scale displacements
+    (order 1e6-1e7 m) are unaffected to floating-point precision, but the
+    rescaling also keeps this finite for wildly unphysical inputs -- e.g. a
+    single-step displacement of order 1e155 m -- where squaring the raw
+    coordinates would overflow to inf/nan and silently return False for a
+    segment that does cross the sphere.
     """
+    scale = max(abs(x0), abs(y0), abs(x1), abs(y1), R_EARTH, 1.0)
+    x0, y0, x1, y1 = x0 / scale, y0 / scale, x1 / scale, y1 / scale
+
     dx = x1 - x0
     dy = y1 - y0
     segment_length_squared = dx * dx + dy * dy
@@ -252,7 +263,7 @@ def _segment_dips_inside_earth(x0, y0, x1, y1):
 
     closest_x = x0 + closest_fraction * dx
     closest_y = y0 + closest_fraction * dy
-    return math.hypot(closest_x, closest_y) < R_EARTH
+    return math.hypot(closest_x, closest_y) < (R_EARTH / scale)
 
 
 def _surface_crossing_fraction(x0, y0, x1, y1):

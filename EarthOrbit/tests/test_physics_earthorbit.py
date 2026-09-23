@@ -178,7 +178,7 @@ class VersionAndBuildTests(unittest.TestCase):
 
     def test_version_is_semantic(self):
         self.assertRegex(physics.MODEL_VERSION, r"^\d+\.\d+\.\d+$")
-        self.assertEqual(physics.MODEL_VERSION, "1.3.0")
+        self.assertEqual(physics.MODEL_VERSION, "1.4.0")
 
     def test_build_coverage_is_exactly_the_four_core_modules(self):
         self.assertEqual(physics.BUILD_ID_COVERS, CORE_MODULE_FILENAMES)
@@ -434,11 +434,68 @@ class DriverValidationTests(unittest.TestCase):
             h0=300_000.0, uInit=7725.72, vInit=0.0, dt=1.0,
             maxSteps=7000, force_law="inverse_square",
         )
-        # An eccentric orbit with a perigee only ~200 m above the surface,
-        # integrated at a realistic (not artificially coarse) timestep.
-        driver.run_earth_orbit(
-            h0=200.0, uInit=7900.0, vInit=0.0, dt=0.1,
-            maxSteps=20000, force_law="inverse_square",
+        # A genuinely non-impacting close-perigee orbit at a realistic dt.
+        # uInit=7636.511278627493 gives an osculating (launch-state) perigee
+        # altitude of +200.0 m at h0=300 km; verified directly against
+        # driver._inverse_square_elements before use here. This differs from
+        # an earlier version of this test that used h0=200, uInit=7900,
+        # dt=0.1 -- that combination's own osculating perigee is actually
+        # about -16,564 m (an impacting trajectory), so it did not exercise
+        # a near-miss at all. See test_close_perigee_elements_match_target
+        # below for the perigee-altitude check, and Experiment 6 in
+        # EarthOrbit-claude.html for why the analytic (launch-state) perigee
+        # and the numerically integrated outcome are not the same question.
+        result = driver.run_earth_orbit(
+            h0=300_000.0, uInit=7636.511278627493, vInit=0.0, dt=1.0,
+            maxSteps=7000, force_law="inverse_square", return_diagnostics=True,
+        )
+        xs, ys, _, _, ts, us, vs = result
+        summary = driver.analyze_earth_orbit(
+            xs, ys, ts, us, vs, force_law="inverse_square", max_steps=7000
+        )
+        self.assertFalse(summary["impact"])
+        self.assertTrue(summary["reached_orbit"])
+
+    def test_close_perigee_elements_match_target(self):
+        """The uInit used above really does target a +200 m osculating
+        perigee altitude, independently of the integrated trajectory."""
+        elements = driver._inverse_square_elements(
+            0.0, physics.R_EARTH + 300_000.0, 7636.511278627493, 0.0
+        )
+        self.assertAlmostEqual(elements["perigee_altitude"], 200.0, places=3)
+
+    def test_segment_dips_inside_earth_true_for_chord_grazing_under_surface(self):
+        """Direct geometric check: a vertical chord whose closest approach
+        to the origin is R_EARTH - 200 m must be reported as dipping inside
+        Earth, independent of any full integration run."""
+        x = physics.R_EARTH - 200.0
+        self.assertTrue(
+            driver._segment_dips_inside_earth(x, -1000.0, x, 1000.0)
+        )
+
+    def test_segment_dips_inside_earth_false_for_chord_clearing_surface(self):
+        """Direct geometric check: a vertical chord whose closest approach
+        to the origin is R_EARTH + 200 m must NOT be reported as dipping
+        inside Earth -- the counterpart to the case immediately above, and
+        the case Codex Audit22 #4 asked to see tested directly."""
+        x = physics.R_EARTH + 200.0
+        self.assertFalse(
+            driver._segment_dips_inside_earth(x, -1000.0, x, 1000.0)
+        )
+
+    def test_segment_dips_inside_earth_handles_extreme_finite_inputs(self):
+        """Squaring raw, wildly non-physical coordinates (far beyond any
+        launch condition this program accepts) must not overflow to
+        inf/nan and silently miss a crossing. Codex Audit22 #5."""
+        self.assertTrue(
+            driver._segment_dips_inside_earth(0.0, 1.0e155, 0.0, -1.0e155)
+        )
+        # A displacement of the same extreme magnitude that does NOT pass
+        # near the origin must still read False, not nan-propagate to a
+        # wrong answer in either direction.
+        far = 1.0e155
+        self.assertFalse(
+            driver._segment_dips_inside_earth(far, far, far, far + 1.0e150)
         )
 
 
