@@ -281,6 +281,17 @@ def animate_multiple(result: Dict[str, Any]):
             "frame_times and frame_positions must be numeric arrays."
         ) from exc
 
+    # Reject a 0-d array before indexing .shape[0]: a scalar or None
+    # frame_times/frame_positions (e.g. frame_positions=7) becomes a 0-d
+    # array whose .shape is (), so indexing .shape[0] below would raise a
+    # bare IndexError instead of the clear ValueError every other
+    # malformed case gets. Anything with ndim >= 1 is safe to index and is
+    # still fully checked by the two blocks below, unchanged.
+    if frame_times.ndim == 0 or source_positions.ndim == 0:
+        raise ValueError(
+            "frame_positions must have shape (number of frame_times, "
+            "number of bodies, 3)."
+        )
     if frame_times.size == 0 or source_positions.shape[0] == 0:
         raise ValueError("No animation frames are available.")
     if (

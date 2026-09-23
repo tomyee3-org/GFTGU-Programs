@@ -1090,6 +1090,16 @@ class TestPlotting(unittest.TestCase):
                 "frame_times": [0.0, np.inf],
                 "frame_positions": [[[0.0, 0.0, 0.0]], [[1.0, 0.0, 0.0]]],
             },
+            # A scalar or otherwise wrong-ndim frame_positions becomes a
+            # 0-d/2-d array: indexing .shape[0] before checking .ndim would
+            # raise a bare IndexError instead of ValueError here.
+            {"type": "animation", "frame_times": [0.0], "frame_positions": 7},
+            {"type": "animation", "frame_times": [0.0], "frame_positions": None},
+            {
+                "type": "animation",
+                "frame_times": [0.0],
+                "frame_positions": [[1.0, 2.0]],
+            },
         )
         for result in malformed_frames:
             with self.subTest(result=result):
