@@ -1012,8 +1012,11 @@ def test_help_describes_surface_estimate_as_extrapolation_not_bracket() -> None:
     assert "generally falls between two stored radial samples" not in html
     assert "estimates where between the last two samples" not in html
     # The independent q-reference is a well-converged numerical estimate,
-    # not an exact q=0 crossing.
-    assert "well-converged fine-grid numerical reference, not the exact physical surface" in html
+    # not an exact q=0 crossing (reworded in Audit23 to "fixed benchmark"
+    # once its own provenance and grid-doubling precision were spelled out;
+    # check the substance rather than one exact phrasing of it).
+    assert "well-converged" in html
+    assert "not the exact physical surface" in html
     assert "stops when \\(q\\) crosses zero" not in html
 
 
@@ -1022,6 +1025,47 @@ def test_help_labels_the_step_doubling_agreement_as_relative() -> None:
     not absolute differences in a physical quantity (Audit22 Codex #4)."""
     html = _help_text()
     assert "agree to a relative 1.4" in html
+
+
+def test_help_scopes_the_interior_ranking_to_where_it_holds() -> None:
+    """The pressure corrections dominate only close to the center; compactness
+    overtakes each of them in turn and stays largest out to the surface, where
+    the pressure corrections (not compactness) fall to zero. The old claim
+    that 'none of the three corrections is close to negligible' at the
+    surface contradicted this and is gone (Audit23 Codex #1)."""
+    html = _help_text()
+    assert "none of the three corrections is close to negligible" not in html
+    assert "r/R" in html and "0.287" in html and "0.420" in html
+    assert "0.3700" in html and "0.1091" in html and "0.2092" in html
+    # The toy equation of state's limitations are already emphasized
+    # elsewhere on this page; the interior demonstration should not imply
+    # this ranking is a fact about real neutron-star matter.
+    assert "real stellar interior" not in html
+    assert "toy-star model" in html
+
+
+def test_help_calls_the_surface_extrapolation_second_order_not_first() -> None:
+    """A tangent-line estimate of a smooth function's zero is second-order
+    accurate in the remaining distance, even though the extrapolation
+    formula itself is linear; the page must not call it first-order, and
+    must not claim sole proven causation for the observed convergence rates
+    without a controlled comparison (Audit23 Codex #2)."""
+    html = _help_text()
+    assert "linear (first-order) extrapolation" not in html
+    assert "second-order accurate" in html or "second-order" in html
+    assert "would need its own controlled comparison" in html
+
+
+def test_help_states_the_surface_reference_constants_provenance() -> None:
+    """REF_R is a fixed benchmark shared with the test suite's own
+    regression check, not something a literal steps_per_scale=8000 run of
+    the shown reference integrator reproduces bit-for-bit; the page should
+    say so and quantify the reference's own grid-doubling convergence
+    instead of implying the printed digits are exact (Audit23 Codex #3)."""
+    html = _help_text()
+    assert "REFERENCE_RADIUS_M" in html
+    assert "does not reproduce it bit-for-bit" in html
+    assert "0.99, 0.26 and 0.065 micrometres" in html
 
 
 def test_help_exercises_are_numbered_in_increasing_difficulty() -> None:
