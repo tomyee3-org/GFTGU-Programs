@@ -924,9 +924,54 @@ def test_help_contains_no_development_history_commentary() -> None:
         "forward-euler march",
         "fixed 2000-element",
         "resolution-degrading step doubling",
+        "earlier release",
+        "previous release",
+        "previous version",
     )
     for phrase in forbidden:
         assert phrase not in lowered
+
+
+def test_help_tags_the_equation_of_state_as_closure() -> None:
+    """The polytropic equation of state (Eq. 3) is a physically motivated but
+    chosen relation, not a quantity defined purely by a formula, so it carries
+    a distinct CLOSURE tag rather than DEFINITION (Audit21 Codex #4)."""
+    html = _help_text()
+    assert 'Eq. 3 &mdash; Polytropic equation of state <span class="kind kind-clo">CLOSURE</span>' in html
+    assert '<tr><td>Eq. 3</td><td><span class="kind kind-clo">CLOSURE</span></td>' in html
+    assert "kind-clo" in html
+    # The unnumbered Newtonian comparison equation is never integrated by the
+    # program, so it must not carry the ODE tag (which the legend defines as
+    # "a differential equation the program integrates").
+    assert 'Newtonian hydrostatic equilibrium (for later comparison, unnumbered, untagged' in html
+
+
+def test_help_beat3_states_the_correct_radius_ratio() -> None:
+    """16.375 m / 1 m = 16.375, not 'ten times closer' (Audit21 Codex #7)."""
+    html = _help_text()
+    assert "16.375 times closer" in html
+    assert "ten times closer" not in html.lower()
+
+
+def test_help_beat4_quotes_digits_the_console_actually_prints() -> None:
+    """Beat 4's headline numbers must match what the console's .3f/.6f
+    formatting shows, with the extra precision clearly attributed to a
+    script that prints the result dictionary directly (Audit21 Grok item 1)."""
+    html = _help_text()
+    assert "7.804, 7.804, 7.804 and 7.803 km" in html
+    assert "0.962591 solar masses all four times" in html
+    assert "convergence_check.py" in html
+    assert 'd["surface_radius_km"]' in html or "surface_radius_km" in html
+
+
+def test_help_distinguishes_rk4_local_and_global_error_order() -> None:
+    """A single RK4 step's local error is O(h^5); the accumulated error over
+    a fixed interval is O(h^4) (Audit21 Codex #6)."""
+    html = _help_text()
+    assert "local truncation error" in html
+    assert "global error over that span" in html
+    assert "factor of about 32" in html
+    assert "factor of about 16 per halving" in html
 
 
 def test_help_exercises_are_numbered_in_increasing_difficulty() -> None:
