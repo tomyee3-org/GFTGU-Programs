@@ -26,7 +26,7 @@ import math
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.5.0"
+MODEL_VERSION = "1.5.1"
 BUILD_ID_COVERS = (
     "planck2_physics.py",
     "planck2_driver.py",

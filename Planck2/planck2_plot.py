@@ -170,6 +170,9 @@ def plot_planck2(
         # frequencies, which have no physical meaning.
         xlim = (coords[0], coords[-1])
     ax.set_xlim(xlim)
+    # Every spectral value is nonnegative, so start the vertical axis at
+    # zero instead of Matplotlib's default margin below it.
+    ax.set_ylim(bottom=0.0)
 
     ax.set_xlabel(result.x_label)
     ax.set_ylabel(result.y_label)

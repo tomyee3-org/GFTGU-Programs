@@ -2041,6 +2041,41 @@ class Audit23Tests(unittest.TestCase):
         self.assertEqual(limits, (min(result.coord_values), max(result.coord_values)))
 
 
+class Audit24Tests(unittest.TestCase):
+    """No half-step peak claim; vertical axis starts at zero."""
+
+    def test_nearest_grid_point_is_not_always_the_sampled_maximum(self):
+        x_true = peak_root(5)
+        step = 0.05
+        x_min = x_true - step / 2 + 1e-5 - 50 * step
+        x_max = x_min + 200 * step
+        domain = phys.PlanckDomain(x_min=x_min, x_max=x_max, x_low=x_min, x_high=x_max)
+        result = driver.run_planck2(5900.0, "wavelength", 200, domain)
+        error = abs(result.x_peak - x_true)
+        self.assertGreater(error, step / 2)       # half-step bound fails ...
+        self.assertLess(error, step)              # ... the one-step bound holds
+        nearest = min(result.x_values, key=lambda x: abs(x - x_true))
+        self.assertNotEqual(result.x_peak, nearest)
+
+    def test_help_makes_no_half_step_claim(self):
+        text = html_text(HELP_HTML)
+        self.assertNotIn("half a step", text)
+        self.assertNotIn("half-step", text)
+        self.assertIn("often, but not always", html_text(section_html(HELP_HTML, "beat6")))
+
+    def test_vertical_axis_starts_at_zero_for_every_quantity_and_window(self):
+        for quantity in phys.QUANTITY_SPECS:
+            result = driver.run_planck2(5900.0, quantity, 2000)
+            for window in (0.003, 0.0):
+                with self.subTest(quantity=quantity, window=window):
+                    with mock.patch.object(plt, "show"):
+                        plotter.plot_planck2(result, y_frac_window=window)
+                    bottom, top = plt.gca().get_ylim()
+                    plt.close("all")
+                    self.assertEqual(bottom, 0.0)
+                    self.assertGreaterEqual(top, result.y_peak)
+
+
 class HelpOriginalCompatibilityTests(unittest.TestCase):
     """The Reference Guide version is optional; these tests never require it."""
 
