@@ -974,6 +974,56 @@ def test_help_distinguishes_rk4_local_and_global_error_order() -> None:
     assert "factor of about 16 per halving" in html
 
 
+def test_help_does_not_generalize_the_weak_field_ranking() -> None:
+    """The weak-field state's ranking (compactness >> pressure corrections)
+    is specific to that hand-picked, low-pressure state; the default star's
+    interior shows the opposite ranking through most of its volume
+    (Audit22 Codex #1)."""
+    html = _help_text()
+    assert "typically the largest of the three corrections" not in html
+    # The interior factors at r=16.375 m and r~1637.5 m must be shown so the
+    # reversed ranking is demonstrated from the actual model, not asserted.
+    assert "0.2113" in html and "0.6340" in html
+    assert "0.10076" in html and "0.53470" in html
+    assert "ranking reverses" in html or "the ranking reverses" in html
+
+
+def test_help_does_not_claim_the_sweep_measures_rk4_global_order() -> None:
+    """The steps_per_scale sweep's radius/mass errors do not shrink by the
+    textbook O(h^4) factor of 16 per halving -- that convergence is masked
+    by the lower-order surface-location estimate near the star's edge
+    (Audit22 Codex #2)."""
+    html = _help_text()
+    assert (
+        "steps_per_scale</code> sweep above or Beat 5's error table actually "
+        "show" in html
+    )
+    # The actually observed, non-uniform ratios must be stated explicitly.
+    assert "1.5, 1.0 and 2.1" in html
+    assert "4.2, 4.4 and 4.2" in html
+
+
+def test_help_describes_surface_estimate_as_extrapolation_not_bracket() -> None:
+    """The usual surface estimate extrapolates from the last positive-
+    pressure sample using its local slope; it does not bracket the surface
+    between two already-stored samples (Audit22 Codex #3)."""
+    html = _help_text()
+    assert "extrapolates forward from the last positive-pressure sample" in html
+    assert "generally falls between two stored radial samples" not in html
+    assert "estimates where between the last two samples" not in html
+    # The independent q-reference is a well-converged numerical estimate,
+    # not an exact q=0 crossing.
+    assert "well-converged fine-grid numerical reference, not the exact physical surface" in html
+    assert "stops when \\(q\\) crosses zero" not in html
+
+
+def test_help_labels_the_step_doubling_agreement_as_relative() -> None:
+    """The 1.4e-13 / 9.2e-13 step-doubling figures are relative differences,
+    not absolute differences in a physical quantity (Audit22 Codex #4)."""
+    html = _help_text()
+    assert "agree to a relative 1.4" in html
+
+
 def test_help_exercises_are_numbered_in_increasing_difficulty() -> None:
     """The Beats file lists experiments as ``experiment-card`` blocks rather
     than the classic Reference Guide's numbered ``<h3>`` headings; check the
