@@ -70,20 +70,22 @@ def find_help_file(module_dir: Path) -> Path:
     Help files live under the sibling ``GFTGU-Documentation`` repository
     rather than beside the program modules inside ``GFTGU-Programs``.
     """
-    help_filename = "Orbit-claude.html"
+    # The Beats Help is named Orbit-claude.html until it is adopted as the
+    # live Help, when it is renamed Orbit.html; either name is accepted.  The
+    # Reference Guide version, Orbit-original.html, is never used here.
+    help_filenames = ("Orbit-claude.html", "Orbit.html")
     program_name = "Orbit"
-    candidates = [module_dir / help_filename]
+    candidates = [module_dir / name for name in help_filenames]
     for ancestor in (module_dir, *module_dir.parents):
-        candidates.append(
-            ancestor / "GFTGU-Documentation" / program_name / help_filename
-        )
-        if ancestor.name != program_name:
-            candidates.append(ancestor / program_name / help_filename)
+        for name in help_filenames:
+            candidates.append(ancestor / "GFTGU-Documentation" / program_name / name)
+            if ancestor.name != program_name:
+                candidates.append(ancestor / program_name / name)
     for candidate in candidates:
         if candidate.is_file():
             return candidate
     raise FileNotFoundError(
-        "Could not find Orbit-claude.html beside the program or in "
+        "Could not find Orbit-claude.html (or Orbit.html) beside the program or in "
         "GFTGU-Documentation/Orbit/."
     )
 
@@ -891,6 +893,8 @@ class NumericalConstantTests(unittest.TestCase):
     def test_angular_step_constant_controls_the_safeguard(self) -> None:
         baseline = circular_result(dt0=0.5)
         self.assertEqual(baseline.angular_step_rejections, 0)
+        # 0.001 rad (not the value that a student could reach with ordinary settings) makes the
+        # guard act on this small circular orbit, so its effect can be observed.
         with mock.patch.object(driver, "MAX_ANGULAR_STEP", 0.001):
             limited = circular_result(dt0=0.5)
         self.assertGreater(limited.angular_step_rejections, 0)
@@ -983,7 +987,8 @@ VOID_TAGS = {"meta", "br", "hr", "img", "link", "input"}
 
 def html_text(fragment: str) -> str:
     """Visible text of an HTML fragment, with entities decoded and spaces collapsed."""
-    return " ".join(html_module.unescape(re.sub(r"<[^>]+>", "", fragment)).split())
+    # Only real tags are removed: a "<" followed by a digit or space is text (e.g. "e<1").
+    return " ".join(html_module.unescape(re.sub(r"</?[A-Za-z!][^>]*>", "", fragment)).split())
 
 
 def section_html(html: str, section_id: str) -> str:
@@ -1443,7 +1448,9 @@ class HelpReferenceTests(unittest.TestCase):
         self.assertGreater(len(labels), 15)
         for label in ("termination", "accepted steps", "elapsed simulated time",
                       "azimuthal revolutions", "angular-step rejections",
-                      "endpoint refinement trials", "Keplerian elements at initial state"):
+                      "endpoint refinement trials", "Keplerian elements at initial state",
+                      "acceleration evaluations", "shortest accepted step",
+                      "longest accepted step", "specific energy"):
             self.assertIn(label, text)
         for label in ("final radius", "final speed", "n/a"):
             self.assertIn(label, text)
@@ -1572,6 +1579,8 @@ class HelpQuantitativeClaimTests(unittest.TestCase):
         rotated = run_cli(("--vxInit", "41705.15", "--vyInit", "41705.15")).result
         a, b = self.default.orbital_elements, rotated.orbital_elements
         self.assertAlmostEqual(math.sqrt(2) * 41705.15, 58980.0, delta=0.02)
+        # Tolerance 2e-6 relative (not tighter) because the Help's rotated-orbit inputs,
+        # 41705.15, are rounded to seven digits and differ from 58980/sqrt(2) by ~6e-7.
         self.assertAlmostEqual(a.specific_energy, b.specific_energy, delta=abs(a.specific_energy) * 2e-6)
         self.assertAlmostEqual(a.semimajor_axis, b.semimajor_axis, delta=a.semimajor_axis * 2e-6)
         self.assertAlmostEqual(a.orbital_period, b.orbital_period, delta=a.orbital_period * 2e-6)
@@ -1607,7 +1616,7 @@ class HelpQuantitativeClaimTests(unittest.TestCase):
         far = run_cli(("--xInit", "6.9832e10", "--vyInit", "38851.5")).result
         near, far_elements = self.default.orbital_elements, far.orbital_elements
         for name in ("eccentricity", "semimajor_axis", "orbital_period", "periapsis_radius"):
-            self.assertAlmostEqual(getattr(far_elements, name) / getattr(near, name), 1.0, places=4)
+            self.assertAlmostEqual(getattr(far_elements, name) / getattr(near, name), 1.0, places=4)  # 1.0e-5 differences: the Help's apoapsis speed has five digits
         self.assertAlmostEqual(far_elements.periapsis_longitude_degrees, 180.0, places=1)
         self.assertAlmostEqual(far_elements.initial_true_anomaly_degrees, 180.0, places=1)
         self.assertAlmostEqual(58980.0 / 38851.5, 1.52, places=2)
@@ -1807,6 +1816,175 @@ class HelpQuantitativeClaimTests(unittest.TestCase):
         self.assertLess(max(abs(low / expected - 1.0), abs(high / expected - 1.0)), 5e-5)
 
 
+class RunDiagnosticTests(unittest.TestCase):
+    """The summary lines that let a student see the cost and the step sizes of a run."""
+
+    def test_acceleration_evaluations_equal_the_calls_the_driver_makes(self) -> None:
+        for arguments in ((), ("--eps2", "1e-8"), ("--dt0", "1e6", "--eps1", "10")):
+            with self.subTest(arguments=arguments):
+                run = run_cli(arguments)
+                self.assertEqual(run.result.acceleration_evaluations, run.acceleration_calls)
+                self.assertIn(
+                    f"acceleration evaluations : {run.acceleration_calls}\n", run.stdout
+                )
+
+    def test_step_extremes_are_those_of_the_accepted_time_steps(self) -> None:
+        run = run_cli(("--dt0", "1e5"))
+        steps = np.diff(run.result.ts)
+        self.assertEqual(run.result.shortest_accepted_step, steps.min())
+        self.assertEqual(run.result.longest_accepted_step, steps.max())
+        self.assertIn(f"longest accepted step    : {orbit_main._five_significant(steps.max())} s", run.stdout)
+        self.assertIn(f"shortest accepted step   : {orbit_main._five_significant(steps.min())} s", run.stdout)
+        self.assertLessEqual(run.result.longest_accepted_step, 1.0e5)
+
+    def test_step_extremes_are_not_available_without_an_accepted_step(self) -> None:
+        import dataclasses
+
+        empty = dataclasses.replace(circular_result(), ts=np.array([0.0]), accepted_steps=0)
+        self.assertIsNone(empty.shortest_accepted_step)
+        self.assertIsNone(empty.longest_accepted_step)
+        lines = "\n".join(orbit_main._summary_lines(empty))
+        self.assertIn("accepted timestep range  : n/a (no step accepted)", lines)
+
+    def test_specific_energy_of_the_starting_state_is_printed(self) -> None:
+        expectations = {
+            (): "-1.1457e+09",
+            ("--vyInit", "70000"): "-4.3505e+08",
+            ("--vyInit", "75961", "--maxSteps", "600"): "-16283",
+            ("--vyInit", "85000", "--maxSteps", "600"): "7.2745e+08",
+        }
+        for arguments, printed in expectations.items():
+            with self.subTest(arguments=arguments):
+                run = run_cli(arguments)
+                self.assertIn(f"    specific energy            : {printed} J/kg\n", run.stdout)
+                self.assertEqual(
+                    orbit_main._five_significant(run.result.orbital_elements.specific_energy),
+                    printed,
+                )
+
+    def test_the_hodograph_marks_the_origin_and_the_initial_velocity(self) -> None:
+        result = circular_result(maxOrbits=0.1)
+        with mock.patch.object(plotting.plt, "show"):
+            plotting.plot_orbit(result, output="velocity")
+            axis = plotting.plt.gcf().axes[0]
+            offsets = [tuple(map(float, collection.get_offsets()[0])) for collection in axis.collections]
+            plotting.plt.close("all")
+        self.assertIn((0.0, 0.0), offsets)
+        self.assertIn((float(result.vxs[0]), float(result.vys[0])), offsets)
+
+
+class AuditFixClaimTests(unittest.TestCase):
+    """Help statements that were corrected after review, checked against the program."""
+
+    mu = physics.GM_SUN
+
+    def test_hodograph_radii_use_the_magnitude_of_h_for_either_orientation(self) -> None:
+        for arguments, sign in ((("--output", "velocity"), 1.0), (("--vyInit", "-58980", "--output", "velocity"), -1.0)):
+            with self.subTest(arguments=arguments):
+                result = run_cli(arguments).result
+                elements = result.orbital_elements
+                h = result.Hs[0]
+                self.assertEqual(math.copysign(1.0, h), sign)
+                radius = self.mu / abs(h)
+                offset = elements.eccentricity * self.mu / abs(h)
+                self.assertAlmostEqual(radius, 48916.0, delta=1.0)
+                self.assertAlmostEqual(offset, 10064.0, delta=1.0)
+                # The centre sits on the +vy side for h > 0 and on the -vy side for h < 0.
+                centre = (result.vys.max() + result.vys.min()) / 2.0
+                self.assertAlmostEqual(centre, sign * offset, delta=5.0)
+                self.assertAlmostEqual((result.vys.max() - result.vys.min()) / 2.0, radius, delta=5.0)
+                distance = np.hypot(result.vxs, result.vys - centre)
+                self.assertLess(np.max(np.abs(distance / radius - 1.0)), 2e-4)
+                # The origin lies inside the circle for a bound orbit.
+                self.assertLess(abs(centre), radius)
+
+    def test_clockwise_run_has_the_same_closure_residuals_as_counter_clockwise(self) -> None:
+        ccw, cw = run_cli(()).result, run_cli(("--vyInit", "-58980", "--output", "velocity")).result
+        self.assertEqual(cw.accepted_steps, ccw.accepted_steps)
+        self.assertAlmostEqual(cw.closure_radius_residual, ccw.closure_radius_residual, delta=1e-12)
+        self.assertAlmostEqual(cw.closure_velocity_residual, ccw.closure_velocity_residual, delta=1e-9)
+        self.assertAlmostEqual(cw.vys.max(), 38850.0, delta=5.0)
+        self.assertEqual(cw.vys.min(), -58980.0)
+
+    def test_near_escape_run_loses_the_sign_of_its_energy(self) -> None:
+        run = run_cli(("--vyInit", "75961", "--maxSteps", "600"))
+        result = run.result
+        initial = result.orbital_elements.specific_energy
+        last = 0.5 * (result.vxs[-1] ** 2 + result.vys[-1] ** 2) - self.mu / math.hypot(result.xs[-1], result.ys[-1])
+        self.assertLess(initial, 0.0)
+        self.assertAlmostEqual(initial, -16283.0, delta=0.5)
+        self.assertGreater(last, 0.0)
+        self.assertAlmostEqual(last, 82138.0, delta=1.0)
+        self.assertGreater(result.max_absolute_specific_energy_drift, 5.0 * abs(initial))
+        self.assertAlmostEqual(result.revolutions_completed, 0.35591, places=5)
+        self.assertIs(result.termination_reason, driver.TerminationReason.MAX_STEPS)
+        self.assertIn("0.35591", run.stdout)
+
+    def test_tight_control_makes_the_near_escape_drift_small_compared_with_its_binding_energy(self) -> None:
+        result = run_cli(("--vyInit", "75961", "--dt0", "100", "--eps1", "0.001")).result
+        self.assertAlmostEqual(result.max_absolute_specific_energy_drift, 9.8799, places=3)
+        self.assertLess(result.max_absolute_specific_energy_drift, 1e-3 * 16283.0)
+        self.assertAlmostEqual(result.max_fractional_energy_drift, 0.00060676, places=8)
+        self.assertAlmostEqual(result.revolutions_completed, 0.27184, places=5)
+        self.assertEqual(result.accepted_steps, 20000)
+
+    def test_apoapsis_formula_is_negative_for_an_unbound_orbit_and_the_program_says_n_a(self) -> None:
+        run = run_cli(("--vyInit", "85000", "--maxSteps", "600"))
+        elements = run.result.orbital_elements
+        formula = elements.semilatus_rectum / (1.0 - elements.eccentricity)
+        self.assertGreater(elements.eccentricity, 1.0)
+        self.assertAlmostEqual(formula, -2.2844e11, delta=1e7)
+        self.assertIsNone(elements.apoapsis_radius)
+        self.assertIsNone(elements.orbital_period)
+        self.assertIn("apoapsis radius            : n/a (unbound)", run.stdout)
+        self.assertIn("Keplerian period           : n/a (unbound)", run.stdout)
+        text = html_text(section_html(HELP_HTML, "beat2"))
+        self.assertIn("r_a", section_html(HELP_HTML, "beat2"))
+        self.assertIn("(e<1\\ \\text{only})", section_html(HELP_HTML, "beat2"))
+        self.assertIn("An unbound orbit has no apoapsis", text)
+
+    def test_eps2_can_change_the_accepted_steps_when_the_corrector_hits_its_pass_limit(self) -> None:
+        default = run_cli(("--dt0", "1e6", "--eps1", "10")).result
+        strict = run_cli(("--dt0", "1e6", "--eps1", "10", "--eps2", "1e-12")).result
+        self.assertEqual((default.accepted_steps, strict.accepted_steps), (14, 24))
+        with mock.patch.object(driver, "MAX_CORRECTOR_ITERATIONS", 1000):
+            unlimited = run_result(dt0=1.0e6, eps1=10.0, eps2=1.0e-12)
+        self.assertEqual(unlimited.accepted_steps, 14)
+
+    def test_documented_commands_reach_the_corrector_pass_limit_only_where_the_help_says(self) -> None:
+        """Beats 5 to 8: the ten-pass limit acts in exactly the two commands the Help names."""
+        commands: list[str] = []
+        for number in (5, 6, 7, 8):
+            commands += [c for c in documented_commands(section_html(HELP_HTML, f"beat{number}")) if not is_template(c)]
+        reached = []
+        for command in dict.fromkeys(commands):
+            arguments = command_arguments(command)
+            baseline = run_cli(arguments).result
+            with mock.patch.object(driver, "MAX_CORRECTOR_ITERATIONS", 1000):
+                relaxed = run_cli_uncached(arguments)
+            if (baseline.accepted_steps, baseline.acceleration_evaluations) != (
+                relaxed.accepted_steps, relaxed.acceleration_evaluations
+            ):
+                reached.append(" ".join(arguments))
+        self.assertEqual(
+            sorted(reached),
+            sorted(["--dt0 1e6 --eps1 10", "--dt0 1e6 --eps1 10 --eps2 1e-12"]),
+        )
+        beat6 = html_text(section_html(HELP_HTML, "beat6"))
+        self.assertIn("ten passes", beat6)
+
+
+def run_cli_uncached(arguments: tuple[str, ...]) -> driver.OrbitResult:
+    """Run the command line once, bypassing (and not filling) the cache."""
+    saved = dict(_CLI_CACHE)
+    _CLI_CACHE.clear()
+    try:
+        return run_cli(arguments).result
+    finally:
+        _CLI_CACHE.clear()
+        _CLI_CACHE.update(saved)
+
+
 @unittest.skipUnless(
     ORIGINAL_HELP_PATH.is_file(),
     "Orbit-original.html (the Reference Guide Help) is not present; nothing else depends on it",
@@ -1837,10 +2015,91 @@ class ReferenceGuideHelpTests(unittest.TestCase):
 
 
 # ``ReleaseNotes`` and ``SampleOutputs_Guide`` are revised only after the audit
-# rounds are complete.  Until then they legitimately describe the release named
-# here.  Set this to ``None`` when they are updated, and the synchronization
-# checks below apply in full.
-COMPANION_DOCS_FROZEN_AT = "1.4.0"
+# rounds are complete.  Until then each legitimately still describes the release
+# named here.  Set this to ``None`` when they are updated; the synchronization
+# checks then apply in full.  While it is set, the checks require the documents
+# to still be at exactly that version, so the freeze cannot outlive the change
+# it stands for.
+COMPANION_DOCS_FROZEN_AT: str | None = "1.4.0"
+
+RELEASE_NOTES_ACTIVE = re.compile(
+    r"<b>Version:</b>\s*(?P<version>\d+\.\d+\.\d+)\s*<br>\s*<b>Build:</b>\s*(?P<build>[0-9a-f]{12})"
+)
+SAMPLE_OUTPUTS_ACTIVE = re.compile(
+    r"<p>Version\s+(?P<version>\d+\.\d+\.\d+)(?:\s|&nbsp;)*\|(?:\s|&nbsp;)*"
+    r"Build\s+(?P<build>[0-9a-f]{12})"
+)
+
+
+def active_version_and_build(pattern: re.Pattern[str], text: str) -> tuple[str, str]:
+    """The FIRST match is the document's header, which names the active release.
+
+    Later occurrences (release history, embedded examples) are deliberately ignored.
+    """
+    match = pattern.search(text)
+    if match is None:
+        raise AssertionError("could not find the active version/build header")
+    return match["version"], match["build"]
+
+
+def companion_status(
+    active: tuple[str, str],
+    current: tuple[str, str],
+    frozen_at: str | None,
+) -> str:
+    """Return ``"current"``, ``"pending"`` or a message describing the failure."""
+    if frozen_at is not None:
+        if frozen_at == current[0]:
+            return (
+                f"COMPANION_DOCS_FROZEN_AT equals the current version {current[0]}; "
+                "set it to None"
+            )
+        if active[0] != frozen_at:
+            return (
+                f"document is at {active[0]}, no longer the frozen {frozen_at}; "
+                "set COMPANION_DOCS_FROZEN_AT = None and synchronise it"
+            )
+        return "pending"
+    if active != current:
+        return (
+            f"document header says version {active[0]} build {active[1]}, "
+            f"program is version {current[0]} build {current[1]}"
+        )
+    return "current"
+
+
+class CompanionStatusTests(unittest.TestCase):
+    CURRENT = ("1.6.0", "aaaaaaaaaaaa")
+
+    def test_release_history_below_the_header_does_not_hide_a_stale_header(self) -> None:
+        stale = (
+            "<b>Version:</b> 1.4.0<br>\n<b>Build:</b> bbbbbbbbbbbb<br>\n"
+            "<p><b>Version:</b> 1.6.0<br><b>Build:</b> aaaaaaaaaaaa</p>"
+        )
+        self.assertEqual(
+            active_version_and_build(RELEASE_NOTES_ACTIVE, stale), ("1.4.0", "bbbbbbbbbbbb")
+        )
+        self.assertEqual(
+            active_version_and_build(
+                SAMPLE_OUTPUTS_ACTIVE,
+                "<p>Version 1.4.0 &nbsp;|&nbsp; Build bbbbbbbbbbbb</p> ... Version 1.6.0 Build aaaaaaaaaaaa",
+            ),
+            ("1.4.0", "bbbbbbbbbbbb"),
+        )
+
+    def test_frozen_documents_are_pending_only_while_still_at_the_frozen_version(self) -> None:
+        old = ("1.4.0", "bbbbbbbbbbbb")
+        self.assertEqual(companion_status(old, self.CURRENT, "1.4.0"), "pending")
+        self.assertIn("no longer the frozen", companion_status(self.CURRENT, self.CURRENT, "1.4.0"))
+        self.assertIn("no longer the frozen", companion_status(("1.5.0", "cccccccccccc"), self.CURRENT, "1.4.0"))
+
+    def test_stale_freeze_constant_is_reported(self) -> None:
+        self.assertIn("set it to None", companion_status(self.CURRENT, self.CURRENT, "1.6.0"))
+
+    def test_without_a_freeze_the_header_must_match_version_and_build(self) -> None:
+        self.assertEqual(companion_status(self.CURRENT, self.CURRENT, None), "current")
+        self.assertIn("program is version", companion_status(("1.6.0", "bbbbbbbbbbbb"), self.CURRENT, None))
+        self.assertIn("program is version", companion_status(("1.4.0", "bbbbbbbbbbbb"), self.CURRENT, None))
 
 
 @unittest.skipUnless(
@@ -1853,35 +2112,31 @@ class DocumentationSetTests(unittest.TestCase):
         cls.release_notes = RELEASE_NOTES_PATH.read_text(encoding="utf-8")
         cls.samples = SAMPLE_OUTPUTS_PATH.read_text(encoding="utf-8")
 
-    def skip_if_deliberately_not_yet_updated(self, text: str) -> None:
-        if (
-            COMPANION_DOCS_FROZEN_AT is not None
-            and COMPANION_DOCS_FROZEN_AT != physics.MODEL_VERSION
-            and f"Version {COMPANION_DOCS_FROZEN_AT}" in text
-        ):
+    def require_synchronised_or_pending(self, pattern: re.Pattern[str], text: str) -> None:
+        status = companion_status(
+            active_version_and_build(pattern, text),
+            (physics.MODEL_VERSION, physics.BUILD_ID),
+            COMPANION_DOCS_FROZEN_AT,
+        )
+        if status == "pending":
             self.skipTest(
-                f"companion document still describes {COMPANION_DOCS_FROZEN_AT}; "
+                f"companion document is intentionally still at {COMPANION_DOCS_FROZEN_AT}; "
                 "it is updated after the audit rounds"
             )
+        self.assertEqual(status, "current")
 
     def test_documentation_files_exist(self) -> None:
         self.assertTrue(RELEASE_NOTES_PATH.is_file())
         self.assertTrue(SAMPLE_OUTPUTS_PATH.is_file())
 
     def test_release_notes_match_current_version_and_build(self) -> None:
-        self.skip_if_deliberately_not_yet_updated(self.release_notes)
-        self.assertIn(f"Version {physics.MODEL_VERSION}", self.release_notes)
-        self.assertIn(f"<b>Build:</b> {physics.BUILD_ID}", self.release_notes)
+        self.require_synchronised_or_pending(RELEASE_NOTES_ACTIVE, self.release_notes)
         self.assertIn("command-line", self.release_notes)
         self.assertIn("five significant digits", self.release_notes)
         self.assertIn("Keplerian Elements", self.release_notes)
 
     def test_sample_outputs_match_current_version_and_build(self) -> None:
-        self.skip_if_deliberately_not_yet_updated(self.samples)
-        self.assertIn(f"Version {physics.MODEL_VERSION}", self.samples)
-        self.assertIn(f"Build {physics.BUILD_ID}", self.samples)
-        self.assertNotIn("Version 1.3.1", self.samples)
-        self.assertNotIn("Build 93380f960f8e", self.samples)
+        self.require_synchronised_or_pending(SAMPLE_OUTPUTS_ACTIVE, self.samples)
 
     def test_sample_outputs_demonstrate_cli_and_requested_summary(self) -> None:
         for text in (

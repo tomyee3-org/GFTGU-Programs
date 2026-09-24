@@ -3,7 +3,7 @@ Plotting routine for Orbit.
 
 Five display modes are available:
   "orbit"          -- x-y trajectory
-  "velocity"       -- velocity-space hodograph
+  "velocity"       -- velocity-space hodograph, with the origin and start marked
   "position_time"  -- x(t), y(t)
   "velocity_time"  -- vx(t), vy(t)
   "energy"         -- specific kinetic, potential, and total energy
@@ -33,6 +33,10 @@ def plot_orbit(result: OrbitResult, output: OutputType = "orbit") -> None:
 
     elif output == "velocity":
         ax.plot(result.vxs, result.vys, linewidth=2, label="Velocity")
+        ax.scatter([0], [0], s=35, marker="x", color="black", zorder=3,
+                   label="Zero velocity (origin)")
+        ax.scatter([result.vxs[0]], [result.vys[0]], s=35, zorder=3,
+                   label="Initial velocity")
         ax.set_xlabel(r"$v_x$ (m/s)")
         ax.set_ylabel(r"$v_y$ (m/s)")
         ax.set_title("Orbit — Velocity Space (Hodograph)")

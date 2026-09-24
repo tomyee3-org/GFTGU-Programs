@@ -102,6 +102,17 @@ class OrbitResult:
     closure_velocity_residual: float | None
     angular_step_rejections: int
     event_refinement_trials: int
+    acceleration_evaluations: int = 0
+
+    @property
+    def shortest_accepted_step(self) -> float | None:
+        """Shortest accepted timestep in seconds, or None if no step was accepted."""
+        return float(np.min(np.diff(self.ts))) if len(self.ts) > 1 else None
+
+    @property
+    def longest_accepted_step(self) -> float | None:
+        """Longest accepted timestep in seconds, or None if no step was accepted."""
+        return float(np.max(np.diff(self.ts))) if len(self.ts) > 1 else None
 
 
 def _validate_inputs(
@@ -335,6 +346,12 @@ def run_orbit(
     closure_velocity_residual = None
     angular_step_rejections = 0
     event_refinement_trials = 0
+    acceleration_evaluations = 0
+
+    def evaluate_acceleration(x_eval: float, y_eval: float) -> tuple[float, float]:
+        nonlocal acceleration_evaluations
+        acceleration_evaluations += 1
+        return compute_acceleration(x_eval, y_eval, k)
 
     # Event refinement always re-integrates from the current accepted state.
     # These variables bracket the final timestep and its angular advance.
@@ -353,7 +370,7 @@ def run_orbit(
         accepted = False
 
         for _retry in range(MAX_RETRIES_PER_STEP):
-            ax0, ay0 = compute_acceleration(x, y, k)
+            ax0, ay0 = evaluate_acceleration(x, y)
 
             # Constant-acceleration predictor.
             vx_pred = vx + ax0 * dt_work
@@ -371,7 +388,7 @@ def run_orbit(
                 dt_work *= TIMESTEP_SHRINK_FACTOR
                 continue
 
-            ax_pred, ay_pred = compute_acceleration(x_pred, y_pred, k)
+            ax_pred, ay_pred = evaluate_acceleration(x_pred, y_pred)
 
             if _relative_vector_change(ax0, ay0, ax_pred, ay_pred) > eps1:
                 dt_work *= TIMESTEP_SHRINK_FACTOR
@@ -427,7 +444,7 @@ def run_orbit(
                     converged = True
                     break
 
-                ax_end, ay_end = compute_acceleration(x_guess, y_guess, k)
+                ax_end, ay_end = evaluate_acceleration(x_guess, y_guess)
 
             if trial_hits_guard:
                 dt_work *= TIMESTEP_SHRINK_FACTOR
@@ -589,7 +606,7 @@ def run_orbit(
                 _fractional_drift(h_now, h0),
             )
 
-        if termination_reason is TerminationReason.MAX_ORBITS:
+        if termination_reason == TerminationReason.MAX_ORBITS:
             # Closure residuals compare the final state with the initial state
             # and are meaningful only after an integral number of revolutions.
             nearest_integer_orbits = round(maxOrbits)
@@ -632,4 +649,5 @@ def run_orbit(
         closure_velocity_residual=closure_velocity_residual,
         angular_step_rejections=angular_step_rejections,
         event_refinement_trials=event_refinement_trials,
+        acceleration_evaluations=acceleration_evaluations,
     )

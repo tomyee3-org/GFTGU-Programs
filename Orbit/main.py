@@ -177,7 +177,19 @@ def _summary_lines(result: OrbitResult) -> list[str]:
         f"  angular-step rejections : {result.angular_step_rejections}",
         "  endpoint refinement trials: "
         f"{result.event_refinement_trials}",
+        f"  acceleration evaluations : {result.acceleration_evaluations}",
     ]
+    if result.shortest_accepted_step is None:
+        lines.append("  accepted timestep range  : n/a (no step accepted)")
+    else:
+        lines.append(
+            "  shortest accepted step   : "
+            f"{_five_significant(result.shortest_accepted_step)} s"
+        )
+        lines.append(
+            "  longest accepted step    : "
+            f"{_five_significant(result.longest_accepted_step)} s"
+        )
 
     if result.max_fractional_energy_drift is None:
         lines.append(
@@ -226,6 +238,7 @@ def _summary_lines(result: OrbitResult) -> list[str]:
     lines.extend((
         "  Keplerian elements at initial state:",
         f"    conic classification       : {elements.classification}",
+        f"    specific energy            : {_five_significant(elements.specific_energy)} J/kg",
         f"    eccentricity              : {_five_significant(elements.eccentricity)}",
     ))
     if elements.semimajor_axis is None:
