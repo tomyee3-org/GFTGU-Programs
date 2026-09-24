@@ -19,13 +19,14 @@ and p=3 for the two frequency-based quantities.
 """
 
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Literal
 import math
 
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.2.0"
+MODEL_VERSION = "1.3.0"
 BUILD_ID_COVERS = (
     "planck2_physics.py",
     "planck2_driver.py",
@@ -120,6 +121,7 @@ class QuantitySpec:
     shape_exponent: int
     coordinate: str
     coordinate_symbol: str
+    coordinate_unit: str
     prefactor_scale: float
     exact_integral_scale: float
     x_label: str
@@ -127,12 +129,13 @@ class QuantitySpec:
     integral_units: str
 
 
-QUANTITY_SPECS = {
+_SPEC_TABLE = {
     "wavelength": QuantitySpec(
         name="wavelength",
         shape_exponent=5,
         coordinate="wavelength",
         coordinate_symbol="\u03bb",
+        coordinate_unit="m",
         prefactor_scale=WAVELENGTH_PREFACTOR_SCALE,
         exact_integral_scale=SIGMA_SB / math.pi,
         x_label="Wavelength (m)",
@@ -144,6 +147,7 @@ QUANTITY_SPECS = {
         shape_exponent=3,
         coordinate="frequency",
         coordinate_symbol="\u03bd",
+        coordinate_unit="Hz",
         prefactor_scale=FREQUENCY_PREFACTOR_SCALE,
         exact_integral_scale=SIGMA_SB / math.pi,
         x_label="Frequency (Hz)",
@@ -155,6 +159,7 @@ QUANTITY_SPECS = {
         shape_exponent=3,
         coordinate="frequency",
         coordinate_symbol="\u03bd",
+        coordinate_unit="Hz",
         prefactor_scale=ENERGY_DENSITY_PREFACTOR_SCALE,
         exact_integral_scale=4.0 * SIGMA_SB / C_LIGHT,
         x_label="Frequency (Hz)",
@@ -163,8 +168,14 @@ QUANTITY_SPECS = {
     ),
 }
 
-# Read-only view kept for callers that only need the shape exponent.
-SHAPE_EXPONENT = {name: spec.shape_exponent for name, spec in QUANTITY_SPECS.items()}
+# Both mappings are read-only, so no caller can make one part of the program
+# disagree with another about a quantity.
+QUANTITY_SPECS = MappingProxyType(_SPEC_TABLE)
+
+# Read-only snapshot for callers that only need the shape exponent.
+SHAPE_EXPONENT = MappingProxyType(
+    {name: spec.shape_exponent for name, spec in _SPEC_TABLE.items()}
+)
 
 
 def quantity_spec(quantity: str) -> QuantitySpec:
@@ -358,7 +369,9 @@ def ln_shape_function(x: float, p: int, domain: PlanckDomain) -> float:
 def shape_function(x: float, quantity: PlanckQuantity, domain: PlanckDomain) -> float:
     """Return the dimensionless shape function for the selected quantity."""
     validate_quantity(quantity)
-    return math.exp(ln_shape_function(x, SHAPE_EXPONENT[quantity], domain))
+    return math.exp(
+        ln_shape_function(x, QUANTITY_SPECS[quantity].shape_exponent, domain)
+    )
 
 
 def prefactor(quantity: PlanckQuantity, T: float) -> float:
@@ -379,7 +392,7 @@ def coordinate_jacobian(quantity: PlanckQuantity, x: float, T: float) -> float:
     _validate_temperature(T)
     _validate_x(x)
 
-    if quantity == "wavelength":
+    if QUANTITY_SPECS[quantity].coordinate == "wavelength":
         # |d(lambda)/dx| = (hc/k) x^-2 T^-1
         factors = ((WIEN_SCALE, 1), (x, -2), (T, -1))
     else:

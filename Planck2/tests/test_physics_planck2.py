@@ -24,6 +24,7 @@ import tempfile
 from typing import NamedTuple
 import unittest
 import warnings
+from types import MappingProxyType
 from unittest import mock
 
 
@@ -66,27 +67,31 @@ import planck2_physics as phys  # noqa: E402
 import planck2_plot as plotter  # noqa: E402
 
 
+HELP_FILENAMES = ("Planck2-claude.html", "Planck2.html")
+
+
 def find_help_file(module_dir: Path) -> Path:
     """Find the Beats Help in a flattened upload or the GFTGU-Documentation tree.
 
-    Only ``Planck2-claude.html`` is ever returned.  The Reference Guide
-    version, ``Planck2-original.html``, is optional and is never required by
-    the suite; the tests that mention it skip when it is absent.
+    The live Beats Help is accepted under either of its names,
+    ``Planck2-claude.html`` or ``Planck2.html``.  The Reference Guide version,
+    ``Planck2-original.html``, is never returned, and no test requires it.
     """
-    help_filename = "Planck2-claude.html"
     program_name = "Planck2"
-    candidates = [module_dir / help_filename]
-    for ancestor in (module_dir, *module_dir.parents):
-        candidates.append(
-            ancestor / "GFTGU-Documentation" / program_name / help_filename
-        )
-        if ancestor.name != program_name:
-            candidates.append(ancestor / program_name / help_filename)
+    candidates = []
+    for help_filename in HELP_FILENAMES:
+        candidates.append(module_dir / help_filename)
+        for ancestor in (module_dir, *module_dir.parents):
+            candidates.append(
+                ancestor / "GFTGU-Documentation" / program_name / help_filename
+            )
+            if ancestor.name != program_name:
+                candidates.append(ancestor / program_name / help_filename)
     for candidate in candidates:
         if candidate.is_file():
             return candidate
     raise FileNotFoundError(
-        f"Could not find {help_filename} beside the program or in "
+        f"Could not find {' or '.join(HELP_FILENAMES)} beside the program or in "
         "GFTGU-Documentation/Planck2/."
     )
 
@@ -1225,7 +1230,9 @@ class HelpStructureTests(unittest.TestCase):
         self.assertEqual(STRUCTURE.ids.count("version_build"), 1)
 
     def test_help_file_is_the_beats_version_and_not_the_original(self):
-        self.assertEqual(HELP_FILE.name, "Planck2-claude.html")
+        self.assertIn(HELP_FILE.name, HELP_FILENAMES)
+        self.assertIn("Beat 0", HELP_HTML)
+        self.assertNotIn("Reference Guide version", HELP_HTML)
 
     def test_tags_are_balanced_and_ids_are_unique(self):
         self.assertEqual(STRUCTURE.errors, [])
@@ -1433,9 +1440,10 @@ class HelpCommandTests(unittest.TestCase):
                 else:
                     self.assertIn(run.exit_code, (None, 0), run.stderr)
                     lines = run.stdout.splitlines()
-                    self.assertEqual(len(lines), 4)
+                    self.assertEqual(len(lines), 5)
                     self.assertTrue(lines[0].startswith(f"Planck2 {phys.MODEL_VERSION} "))
-                    self.assertIn("Exact 0..infinity bolometric value", lines[3])
+                    self.assertRegex(lines[1], r"^Peak (wavelength|frequency) = \d\.\d{6}e[+-]\d\d (m|Hz)$")
+                    self.assertIn("Exact 0..infinity bolometric value", lines[4])
                     self.assertIn("Peak", run.annotation)
 
     def test_rejected_commands_are_documented_as_rejected(self):
@@ -1520,15 +1528,24 @@ class HelpReferenceTests(unittest.TestCase):
         )
 
     def test_every_summary_label_printed_by_main_is_described_in_the_help(self):
-        described = set(re.findall(r"<li><code>([^<]+)</code>:", section_html(HELP_HTML, "summary")))
+        bullets = re.findall(r"<li>(.*?)</li>", section_html(HELP_HTML, "summary"), re.DOTALL)
+        described = set()
+        for bullet in bullets:
+            head = bullet.split(":", 1)[0]
+            described.update(re.findall(r"<code>([^<]+)</code>", head))
         self.assertEqual(
             described,
-            {"peak at x", "Dimensionless area", "Physical integral",
-             "Exact 0..infinity bolometric value"},
+            {"peak at x", "Peak wavelength", "Peak frequency", "Dimensionless area",
+             "Physical integral", "Exact 0..infinity bolometric value"},
         )
-        default = run_cli(()).stdout
-        for label in described:
-            self.assertIn(label, default)
+        for arguments, labels in (
+            ((), ("peak at x", "Peak wavelength", "Dimensionless area",
+                  "Physical integral", "Exact 0..infinity bolometric value")),
+            (("--quantity", "frequency"), ("Peak frequency",)),
+        ):
+            output = run_cli(arguments).stdout
+            for label in labels:
+                self.assertIn(label, output)
 
     def test_every_annotation_line_is_described_in_the_help(self):
         annotation = run_cli(()).annotation
@@ -1785,6 +1802,91 @@ class HelpQuantitativeClaimTests(unittest.TestCase):
         run = run_cli(("--x_max", "10"))
         self.assertEqual(run.exit_code, 2)
         self.assertIn("x_min=0.01, x_low=0.05, x_high=20, x_max=10", run.stderr)
+
+
+class Audit21Tests(unittest.TestCase):
+    """Console peak line, qualified peak bound, scaling-versus-accuracy, descriptor integrity."""
+
+    def test_console_peak_line_matches_the_result_for_every_quantity(self):
+        for name, spec in phys.QUANTITY_SPECS.items():
+            run = run_cli(("--quantity", name, "--T", "4321"))
+            with self.subTest(quantity=name):
+                self.assertEqual(
+                    run.stdout.splitlines()[1],
+                    f"Peak {spec.coordinate} = {run.result.coord_peak:.6e} {spec.coordinate_unit}",
+                )
+                self.assertIn(f"{run.result.coord_peak:.4e}", run.annotation)
+
+    def test_eq17_bound_holds_for_an_interior_unaltered_peak(self):
+        for n_steps in (100, 1000, 2000):
+            result = driver.run_planck2(5900.0, "wavelength", n_steps)
+            with self.subTest(n_steps=n_steps):
+                self.assertLess(abs(result.x_peak - peak_root(5)), (100.0 - 0.01) / n_steps)
+
+    def test_eq17_bound_fails_when_the_range_excludes_the_peak(self):
+        run = run_cli(("--x_max", "4", "--x_high", "3"))
+        step = (4.0 - 0.01) / 2000
+        self.assertEqual(run.result.x_peak, 4.0)
+        self.assertGreater(abs(run.result.x_peak - peak_root(5)), 400 * step)
+
+    def test_eq17_bound_fails_when_the_switches_reshape_the_curve_at_the_peak(self):
+        run = run_cli(("--quantity", "frequency", "--x_low", "5", "--x_high", "6"))
+        step = (100.0 - 0.01) / 2000
+        self.assertEqual(round(run.result.x_peak, 6), 4.959505)
+        self.assertGreater(abs(run.result.x_peak - peak_root(3)), 40 * step)
+
+    def test_doubling_temperature_gives_sixteen_even_for_a_badly_wrong_sum(self):
+        for quantity in phys.QUANTITY_SPECS:
+            for extra in ((), ("--x_low", "5", "--x_high", "6")):
+                low = run_cli(("--quantity", quantity, "--T", "3000", *extra)).result
+                high = run_cli(("--quantity", quantity, "--T", "6000", *extra)).result
+                with self.subTest(quantity=quantity, extra=extra):
+                    self.assertLess(relative_error(high.physical_integral / low.physical_integral, 16.0), 1e-12)
+        wrong = run_cli(("--x_low", "5", "--x_high", "6")).result
+        self.assertGreater(wrong.physical_integral / wrong.exact_physical_integral, 6.0)
+
+    def test_help_separates_radiance_integral_from_emitted_flux(self):
+        beat0 = html_text(section_html(HELP_HTML, "beat0"))
+        beat4 = section_html(HELP_HTML, "beat4")
+        self.assertNotIn("total power", beat0)
+        self.assertNotIn("the same power", html_text(beat4))
+        self.assertIn(r"M=\pi\int_{0}^{\infty}B_\nu\,d\nu=\sigma T^{4}", beat4)
+        self.assertIn("stored energy per unit volume", html_text(beat4))
+        flux = math.pi * run_cli(()).result.exact_physical_integral
+        self.assertLess(relative_error(flux, phys.SIGMA_SB * 5900.0**4), 1e-12)
+
+    def test_descriptor_mappings_are_read_only(self):
+        with self.assertRaises(TypeError):
+            phys.SHAPE_EXPONENT["wavelength"] = 3
+        with self.assertRaises(TypeError):
+            phys.QUANTITY_SPECS["wavelength"] = phys.QUANTITY_SPECS["frequency"]
+
+    def test_every_helper_and_the_driver_follow_the_descriptor(self):
+        altered = dict(phys.QUANTITY_SPECS)
+        altered["wavelength"] = replace(altered["wavelength"], shape_exponent=3)
+        domain = phys.PlanckDomain()
+        baseline = phys.shape_function(2.0, "wavelength", domain)
+        with mock.patch.object(phys, "QUANTITY_SPECS", MappingProxyType(altered)):
+            self.assertEqual(
+                phys.shape_function(2.0, "wavelength", domain),
+                phys.shape_function(2.0, "frequency", domain),
+            )
+            self.assertNotEqual(phys.shape_function(2.0, "wavelength", domain), baseline)
+            self.assertEqual(
+                driver.run_planck2(5900.0, "wavelength", 20).y_values[3] / phys.prefactor("wavelength", 5900.0),
+                phys.shape_function(driver.run_planck2(5900.0, "wavelength", 20).x_values[3], "wavelength", domain),
+            )
+            frequency_like = replace(
+                phys.QUANTITY_SPECS["wavelength"], coordinate="frequency"
+            )
+        altered["wavelength"] = frequency_like
+        with mock.patch.object(phys, "QUANTITY_SPECS", MappingProxyType(altered)):
+            self.assertEqual(
+                phys.coordinate_jacobian("wavelength", 2.0, 5900.0),
+                phys.coordinate_jacobian("frequency", 2.0, 5900.0),
+            )
+            result = driver.run_planck2(5900.0, "wavelength", 20)
+            self.assertEqual(result.coord_values[3], phys.x_to_frequency(result.x_values[3], 5900.0))
 
 
 class HelpOriginalCompatibilityTests(unittest.TestCase):

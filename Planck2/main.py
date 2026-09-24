@@ -21,6 +21,10 @@ Inputs (use `python main.py --help` for their current defaults):
     displayed physical coordinate (0 to 1). Zero shows the whole domain;
     this setting does not alter integration or peak search.
 
+The program prints a five-line summary (peak at x, the physical peak wavelength
+or frequency, the dimensionless area with its exact value, the physical
+integral, and the exact 0..infinity value) and then shows the plot.
+
 Examples:
     python main.py --quantity wavelength --T 5900
     python main.py --quantity frequency --T 2.725
@@ -181,10 +185,15 @@ def main(argv=None):
     except (ValueError, OverflowError, RuntimeError) as exc:
         raise SystemExit(f"Planck2 input/model error: {exc}") from exc
 
-    exact_shape = _exact_dimensionless_area(quantity_spec(args.quantity).shape_exponent)
+    spec = quantity_spec(args.quantity)
+    exact_shape = _exact_dimensionless_area(spec.shape_exponent)
     print(
         f"Planck2 {result.model_version} (build {result.build_id}) — "
         f"peak at x = {result.x_peak:.6f}"
+    )
+    print(
+        f"Peak {spec.coordinate} = {result.coord_peak:.6e} "
+        f"{spec.coordinate_unit}"
     )
     print(
         f"Dimensionless area = {result.dimensionless_area:.6f} "
