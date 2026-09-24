@@ -5,13 +5,17 @@ Plotting routines for Random2.
 from dataclasses import dataclass
 import math
 from numbers import Real
-from typing import List, Tuple
-import statistics
+from typing import Sequence, Tuple
 
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
 
-from random2_driver import Walk2DResult
+from random2_driver import Walk2DResult, escape_statistics
+from random2_physics import (
+    fitted_loglog_slope,
+    require_finite_point,
+    require_positive_finite_number,
+)
 
 
 _WALK_COLORS = [
@@ -31,8 +35,8 @@ _WALK_COLORS = [
 
 
 def plot_scaled_distance(
-    lengths: List[float],
-    avg_dist: List[float],
+    lengths: Sequence[float],
+    avg_dist: Sequence[float],
 ) -> None:
     """Plot average scaled distance against step count on log-log axes."""
     if len(lengths) != len(avg_dist) or not lengths:
@@ -62,6 +66,18 @@ def plot_scaled_distance(
     ax.set_title("Random2: Scaled Distance vs Number of Steps")
     ax.grid(True, which="both", ls="--", alpha=0.5)
 
+    if len(set(lengths)) >= 2:
+        ax.annotate(
+            f"fitted log-log slope = {fitted_loglog_slope(lengths, avg_dist):.4f}",
+            xy=(0.03, 0.97),
+            xycoords="axes fraction",
+            ha="left",
+            va="top",
+            fontsize=9,
+            family="monospace",
+            bbox=dict(boxstyle="round", facecolor="white", edgecolor="gray", alpha=0.9),
+        )
+
     plt.tight_layout()
     plt.show()
 
@@ -82,29 +98,9 @@ _CORNER_TO_ANCHOR = {
 }
 
 
-def _require_positive_finite_number(name: str, value: Real) -> float:
-    """Validate a positive finite real value supplied to the plot layer."""
-    if isinstance(value, bool) or not isinstance(value, Real):
-        raise ValueError(f"{name} must be a positive finite number.")
-    numeric = float(value)
-    if not math.isfinite(numeric) or numeric <= 0.0:
-        raise ValueError(f"{name} must be a positive finite number.")
-    return numeric
-
-
 def _require_finite_point(name: str, value: Tuple[float, float]) -> None:
     """Validate a two-coordinate point in a constructed plot result."""
-    try:
-        x, y = value
-    except (TypeError, ValueError):
-        raise ValueError(f"{name} must contain exactly two finite numbers.") from None
-    if any(
-        isinstance(coordinate, bool)
-        or not isinstance(coordinate, Real)
-        or not math.isfinite(float(coordinate))
-        for coordinate in (x, y)
-    ):
-        raise ValueError(f"{name} must contain exactly two finite numbers.")
+    require_finite_point(name, value)
 
 
 def _validate_walk2d_result(result: Walk2DResult) -> float:
@@ -112,8 +108,8 @@ def _validate_walk2d_result(result: Walk2DResult) -> float:
     if not isinstance(result, Walk2DResult):
         raise ValueError("result must be a Walk2DResult.")
 
-    radius = _require_positive_finite_number("result.radius", result.radius)
-    _require_positive_finite_number(
+    radius = require_positive_finite_number("result.radius", result.radius)
+    require_positive_finite_number(
         "result.mean_free_path", result.mean_free_path
     )
     for name, value in (
@@ -123,13 +119,13 @@ def _validate_walk2d_result(result: Walk2DResult) -> float:
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise ValueError(f"{name} must be a positive integer.")
 
-    if not isinstance(result.walks, list) or not result.walks:
-        raise ValueError("result.walks must be a non-empty list.")
+    if not isinstance(result.walks, (list, tuple)) or not result.walks:
+        raise ValueError("result.walks must be a non-empty sequence.")
 
     for walk_index, walk in enumerate(result.walks):
-        if not isinstance(walk.points, list) or not walk.points:
+        if not isinstance(walk.points, (list, tuple)) or not walk.points:
             raise ValueError(
-                f"result.walks[{walk_index}].points must be a non-empty list."
+                f"result.walks[{walk_index}].points must be a non-empty sequence."
             )
         for point_index, point in enumerate(walk.points):
             _require_finite_point(
@@ -158,7 +154,12 @@ def _validate_walk2d_result(result: Walk2DResult) -> float:
                 f"result.walks[{walk_index}].ray[1]", ray_end
             )
 
+    # Leave room for the star and for the longest outgoing ray.
     span = radius * 1.8
+    for walk in result.walks:
+        if walk.ray is not None:
+            (_, _), (rx, ry) = walk.ray
+            span = max(span, 1.05 * math.hypot(rx, ry))
     if not math.isfinite(span) or span <= 0.0:
         raise ValueError("result.radius is outside the plot's finite display range.")
     return span
@@ -194,8 +195,7 @@ def plot_walk2d(
     ax.add_patch(star)
     ax.plot(0, 0, marker="*", color="#b5811a", markersize=14, zorder=3)
 
-    n_escaped = 0
-    escaped_steps = []
+    stats = escape_statistics(result)
 
     for i, walk in enumerate(result.walks):
         color = _WALK_COLORS[i % len(_WALK_COLORS)]
@@ -204,8 +204,6 @@ def plot_walk2d(
         ax.plot(xs, ys, color=color, linewidth=0.8, zorder=2)
 
         if walk.escaped:
-            n_escaped += 1
-            escaped_steps.append(walk.steps_taken)
             if walk.ray is not None:
                 (ex, ey), (rx, ry) = walk.ray
                 ax.plot(
@@ -242,14 +240,12 @@ def plot_walk2d(
         f"radius = {result.radius:.2f}",
         f"mean free path = {result.mean_free_path:g}",
         f"reference steps = {result.reference_steps}",
-        f"walks = {len(result.walks)}  (escaped: {n_escaped})",
+        f"walks = {stats.n_walks}  (escaped: {stats.n_escaped})",
     ]
-    if n_escaped < len(result.walks):
+    if stats.n_escaped < stats.n_walks:
         text_lines.append("x = step cap reached")
-    if escaped_steps:
-        text_lines.append(
-            f"median escape steps = {statistics.median(escaped_steps):.0f}"
-        )
+    if stats.median is not None:
+        text_lines.append(f"median escape steps = {stats.median:.1f}")
 
     ax.annotate(
         "\n".join(text_lines),

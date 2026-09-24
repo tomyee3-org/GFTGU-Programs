@@ -36,23 +36,45 @@ Every user-facing input can be set at the command line:
     Location of the results annotation on the two-dimensional plot. Underscore
     spellings are command-line-safe; they map to the plotter's spaced labels.
 
+``--seed``
+    Nonnegative integer that makes a run repeatable. Omit it (the default) and
+    every run uses different random numbers.
+
+Every run prints a summary before it opens the plot: for scaled_distance, the
+mean scaled distance, its standard error and its ratio to sqrt(N) at each step
+count, the large-N prediction for that ratio, and the fitted log-log slope; for
+walk2d, the star radius, (R / mean free path)^2, each walk's escape step count
+(for at most 12 walks) and the escape-step statistics.
+
 Examples
 --------
   python main.py --display scaled_distance --max_steps 8192 --n_trials 500
   python main.py --display scaled_distance --step_distribution gaussian
   python main.py --display walk2d --n_walks 6 --radius 50 --step_cap 100000
   python main.py --display walk2d --corner lower_left --ray_length_factor 0
+  python main.py --seed 1
 """
 
 import argparse
 import math
 
 import random2_physics
-from random2_driver import run_scaled_distance_experiment, run_walk2d
+from random2_driver import (
+    escape_statistics,
+    run_scaled_distance_statistics,
+    run_walk2d,
+)
+from random2_physics import (
+    fitted_loglog_slope,
+    large_n_scaled_distance_ratio,
+    seed_generator,
+)
 from random2_plot import plot_scaled_distance, plot_walk2d
 
 
 DISPLAY_CHOICES = ("scaled_distance", "walk2d")
+# Walks are listed one per line in the summary only up to this many.
+MAX_LISTED_WALKS = 12
 STEP_DISTRIBUTIONS = ("uniform", "gaussian")
 CORNER_CHOICES = {
     "upper_right": "upper right",
@@ -70,6 +92,27 @@ def _positive_int(text):
         raise argparse.ArgumentTypeError(f"{text!r} is not an integer.") from exc
     if value <= 0:
         raise argparse.ArgumentTypeError("value must be a positive integer.")
+    return value
+
+
+def _step_count_at_least_two(text):
+    """Parse the largest scaled-distance step count (at least 2)."""
+    value = _positive_int(text)
+    if value < 2:
+        raise argparse.ArgumentTypeError(
+            "max_steps must be at least 2, because the smallest walk has 2 steps."
+        )
+    return value
+
+
+def _seed(text):
+    """Parse a nonnegative integer seed."""
+    try:
+        value = int(text)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(f"{text!r} is not an integer.") from exc
+    if value < 0:
+        raise argparse.ArgumentTypeError("seed must be a nonnegative integer.")
     return value
 
 
@@ -97,7 +140,8 @@ def _nonnegative_float(text):
     return value
 
 
-def parse_args(argv=None):
+def build_parser():
+    """Return the command-line parser (separate so tests can inspect it)."""
     parser = argparse.ArgumentParser(
         prog="Random2",
         description=(
@@ -129,10 +173,13 @@ def parse_args(argv=None):
         "--max_steps",
         "--maxSteps",
         dest="max_steps",
-        type=_positive_int,
+        type=_step_count_at_least_two,
         default=4096,
         metavar="N",
-        help="largest step count; successive plotted counts are integer halves",
+        help=(
+            "largest step count (at least 2); successive plotted counts are "
+            "integer halves"
+        ),
     )
     scaled.add_argument(
         "--n_trials",
@@ -214,7 +261,92 @@ def parse_args(argv=None):
             "lower_left"
         ),
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--seed",
+        type=_seed,
+        default=None,
+        metavar="N",
+        help=(
+            "nonnegative integer that makes a run repeatable; omit it for "
+            "different random numbers on every run"
+        ),
+    )
+    return parser
+
+
+def parse_args(argv=None):
+    return build_parser().parse_args(argv)
+
+
+def _seed_text(seed):
+    return "none (results differ from run to run)" if seed is None else str(seed)
+
+
+def scaled_distance_summary(result, seed=None):
+    """Return the console summary lines for a scaled-distance run."""
+    prediction = large_n_scaled_distance_ratio(result.step_distribution)
+    lines = [
+        "display: scaled_distance",
+        f"step components: {result.step_distribution}",
+        f"trials per step count: {result.n_trials}",
+        f"seed: {_seed_text(seed)}",
+        f"{'N':>8}  {'mean scaled distance':>20}  {'standard error':>14}  "
+        f"{'ratio to sqrt(N)':>16}",
+    ]
+    for n_steps, mean, error in zip(
+        result.lengths, result.averages, result.standard_errors
+    ):
+        error_text = "n/a" if error is None else f"{error:.4f}"
+        lines.append(
+            f"{int(n_steps):>8}  {mean:>20.4f}  {error_text:>14}  "
+            f"{mean / math.sqrt(n_steps):>16.4f}"
+        )
+    lines.append(f"large-N prediction for ratio to sqrt(N): {prediction:.4f}")
+    if len(result.lengths) >= 2:
+        slope = fitted_loglog_slope(result.lengths, result.averages)
+        lines.append(f"fitted log-log slope: {slope:.4f}")
+    else:
+        lines.append("fitted log-log slope: n/a (only one step count)")
+    return lines
+
+
+def walk2d_summary(result, seed=None):
+    """Return the console summary lines for a two-dimensional star run."""
+    stats = escape_statistics(result)
+    diffusion_steps = (result.radius / result.mean_free_path) ** 2
+    lines = [
+        "display: walk2d",
+        f"star radius R: {result.radius:.4f}",
+        f"mean free path: {result.mean_free_path:g}",
+        f"(R / mean free path)^2: {diffusion_steps:.1f}",
+        f"step cap: {result.step_cap}",
+        f"seed: {_seed_text(seed)}",
+    ]
+    if len(result.walks) <= MAX_LISTED_WALKS:
+        for number, walk in enumerate(result.walks, start=1):
+            if walk.escaped:
+                lines.append(f"walk {number}: escaped after {walk.steps_taken} steps")
+            else:
+                lines.append(
+                    f"walk {number}: stopped at the step cap after "
+                    f"{walk.steps_taken} steps, not escaped"
+                )
+    lines.append(f"escaped walks: {stats.n_escaped} of {stats.n_walks}")
+    if stats.mean is None:
+        lines.append("escape steps: n/a (no walk escaped)")
+        return lines
+    error_text = (
+        "n/a" if stats.standard_error is None else f"{stats.standard_error:.1f}"
+    )
+    lines.append(
+        f"escape steps: mean {stats.mean:.1f} (standard error {error_text}), "
+        f"median {stats.median:.1f}, min {stats.minimum}, max {stats.maximum}"
+    )
+    lines.append(
+        f"mean escape steps / (R / mean free path)^2: "
+        f"{stats.mean / diffusion_steps:.4f}"
+    )
+    return lines
 
 
 def main(argv=None):
@@ -226,13 +358,15 @@ def main(argv=None):
     )
 
     try:
+        seed_generator(args.seed)
         if args.display == "scaled_distance":
-            lengths, avg_dist = run_scaled_distance_experiment(
+            result = run_scaled_distance_statistics(
                 args.max_steps,
                 args.n_trials,
                 step_distribution=args.step_distribution,
             )
-            plot_scaled_distance(lengths, avg_dist)
+            print("\n".join(scaled_distance_summary(result, args.seed)))
+            plot_scaled_distance(result.lengths, result.averages)
         else:
             result = run_walk2d(
                 reference_steps=args.reference_steps,
@@ -243,6 +377,7 @@ def main(argv=None):
                 ray_length_factor=args.ray_length_factor,
                 step_cap=args.step_cap,
             )
+            print("\n".join(walk2d_summary(result, args.seed)))
             plot_walk2d(result, corner=CORNER_CHOICES[args.corner])
     except (ValueError, RuntimeError) as exc:
         raise SystemExit(f"Random2 input/model error: {exc}") from exc

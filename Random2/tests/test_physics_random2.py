@@ -8,17 +8,26 @@ test file sits beside the four program modules.
 from __future__ import annotations
 
 import ast
+import contextlib
 import hashlib
+import html as html_module
+import io
 import math
+import os
 import random
 import re
+import shlex
+import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
 import unittest
 from contextlib import contextmanager
+from dataclasses import FrozenInstanceError
 from html.parser import HTMLParser
 from pathlib import Path
+from typing import NamedTuple
 from unittest import mock
 
 
@@ -28,7 +37,9 @@ CORE_MODULE_FILES = (
     "main.py",
     "random2_plot.py",
 )
-HELP_FILENAME = "Random2.html"
+# The Beats Help is accepted under either of its names; the Reference Guide
+# version, Random2-original.html, is optional and never required.
+HELP_FILENAMES = ("Random2-claude.html", "Random2.html")
 
 
 def find_module_dir(start: Path) -> Path:
@@ -103,23 +114,34 @@ class _HelpSemanticParser(HTMLParser):
             self._cell_text.append(data)
 
 
+def find_help_file(module_dir: Path) -> Path:
+    """Find the Beats Help beside the modules or in GFTGU-Documentation/Random2/."""
+    program_name = "Random2"
+    candidates = []
+    for help_filename in HELP_FILENAMES:
+        candidates.append(module_dir / help_filename)
+        for ancestor in (module_dir, *module_dir.parents):
+            candidates.append(
+                ancestor / "GFTGU-Documentation" / program_name / help_filename
+            )
+            if ancestor.name != program_name:
+                candidates.append(ancestor / program_name / help_filename)
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(
+        f"Could not find {' or '.join(HELP_FILENAMES)} beside the modules or in "
+        "GFTGU-Documentation/Random2/."
+    )
+
+
+HELP_FILE = find_help_file(MODULE_DIR)
+HELP_HTML = HELP_FILE.read_text(encoding="utf-8")
+
+
 def parse_help_file() -> _HelpSemanticParser:
     parser = _HelpSemanticParser()
-    program_name = Path(HELP_FILENAME).stem
-    candidates = [MODULE_DIR / HELP_FILENAME]
-    for ancestor in (MODULE_DIR, *MODULE_DIR.parents):
-        candidates.append(
-            ancestor / "GFTGU-Documentation" / program_name / HELP_FILENAME
-        )
-        if ancestor.name != program_name:
-            candidates.append(ancestor / program_name / HELP_FILENAME)
-    help_path = next((path for path in candidates if path.is_file()), None)
-    if help_path is None:
-        raise FileNotFoundError(
-            "Could not find Random2.html beside the modules or in "
-            "GFTGU-Documentation/Random2/."
-        )
-    parser.feed(help_path.read_text(encoding="utf-8"))
+    parser.feed(HELP_HTML)
     parser.close()
     return parser
 
@@ -216,6 +238,7 @@ class TestReleaseMetadataAndCompatibility(unittest.TestCase):
                 "--ray_length_factor",
                 "--step_cap",
                 "--corner",
+                "--seed",
             )},
             {
                 "--display": "scaled_distance",
@@ -230,6 +253,7 @@ class TestReleaseMetadataAndCompatibility(unittest.TestCase):
                 "--ray_length_factor": "0.6",
                 "--step_cap": "200000",
                 "--corner": "upper_right",
+                "--seed": "omitted",
             },
         )
 
@@ -271,6 +295,7 @@ class TestCommandLine(unittest.TestCase):
         self.assertEqual(args.ray_length_factor, 0.6)
         self.assertEqual(args.step_cap, 200_000)
         self.assertEqual(args.corner, "upper_right")
+        self.assertIsNone(args.seed)
 
     def test_selector_choices_and_numeric_values_parse(self):
         args = cli.parse_args([
@@ -297,28 +322,38 @@ class TestCommandLine(unittest.TestCase):
         self.assertEqual(args.corner, "lower_left")
 
     def test_scaled_distance_arguments_are_forwarded(self):
+        result = driver.ScaledDistanceResult(
+            physics.MODEL_VERSION, physics.BUILD_ID, "gaussian", 7,
+            (2.0,), (1.0,), (0.1,),
+        )
         with (
             mock.patch.object(
                 cli,
-                "run_scaled_distance_experiment",
-                return_value=([2.0], [1.0]),
+                "run_scaled_distance_statistics",
+                return_value=result,
             ) as run,
             mock.patch.object(cli, "plot_scaled_distance") as draw,
+            mock.patch.object(cli, "seed_generator") as seed,
+            contextlib.redirect_stdout(io.StringIO()),
         ):
             cli.main([
                 "--display", "scaled_distance",
                 "--max_steps", "32",
                 "--n_trials", "7",
                 "--step_distribution", "gaussian",
+                "--seed", "5",
             ])
+        seed.assert_called_once_with(5)
         run.assert_called_once_with(32, 7, step_distribution="gaussian")
-        draw.assert_called_once_with([2.0], [1.0])
+        draw.assert_called_once_with((2.0,), (1.0,))
 
     def test_walk_arguments_and_corner_are_forwarded(self):
         result = object()
         with (
             mock.patch.object(cli, "run_walk2d", return_value=result) as run,
+            mock.patch.object(cli, "walk2d_summary", return_value=["summary"]),
             mock.patch.object(cli, "plot_walk2d") as draw,
+            contextlib.redirect_stdout(io.StringIO()),
         ):
             cli.main([
                 "--display", "walk2d",
@@ -349,6 +384,9 @@ class TestCommandLine(unittest.TestCase):
             ["--ray_length_factor", "-1"],
             ["--step_distribution", "normal"],
             ["--corner", "upper right"],
+            ["--max_steps", "1"],
+            ["--seed", "-1"],
+            ["--seed", "1.5"],
         ):
             with self.subTest(arguments=arguments), self.assertRaises(SystemExit):
                 cli.parse_args(arguments)
@@ -489,10 +527,19 @@ class TestDriver(unittest.TestCase):
                     driver._perform_trials_3d(2, 1)
 
     def test_scaled_experiment_uses_integer_halving_and_returns_ascending_counts(self):
-        with mock.patch.object(driver, "_perform_trials_3d", side_effect=lambda n, *_: n + 0.5):
+        with mock.patch.object(
+            driver, "_perform_trials_3d_with_error", side_effect=lambda n, *_: (n + 0.5, n / 10)
+        ) as trials:
             lengths, averages = driver.run_scaled_distance_experiment(10, 3)
+        self.assertEqual([call.args[0] for call in trials.call_args_list], [10, 5, 2])
         self.assertEqual(lengths, [2.0, 5.0, 10.0])
         self.assertEqual(averages, [2.5, 5.5, 10.5])
+        with mock.patch.object(
+            driver, "_perform_trials_3d_with_error", side_effect=lambda n, *_: (n + 0.5, n / 10)
+        ):
+            result = driver.run_scaled_distance_statistics(10, 3)
+        self.assertEqual(result.lengths, (2.0, 5.0, 10.0))
+        self.assertEqual(result.standard_errors, (0.2, 0.5, 1.0))
 
     def test_scaled_experiment_validates_inputs(self):
         invalid_cases = (
@@ -725,6 +772,895 @@ class TestPlotting(unittest.TestCase):
         )
         with mock.patch.object(plot.plt, "show"):
             plot.plot_walk2d(result)
+
+
+BEAT_NUMBERS = tuple(range(0, 9))
+VOID_TAGS = {
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link",
+    "meta", "param", "source", "track", "wbr",
+}
+# Commands that the Help documents as being rejected by the program.
+REJECTED_COMMANDS = {"python main.py --max_steps 1"}
+SEED = ("--seed", "12")
+
+
+def html_text(fragment: str) -> str:
+    """Visible text of an HTML fragment, with entities decoded and spaces collapsed."""
+    return " ".join(
+        html_module.unescape(re.sub(r"</?[A-Za-z!][^>]*>", "", fragment)).split()
+    )
+
+
+def section_html(html: str, section_id: str) -> str:
+    match = re.search(
+        rf'<section id="{re.escape(section_id)}">(.*?)</section>', html, re.DOTALL
+    )
+    if match is None:
+        raise AssertionError(f"section {section_id!r} not found in the Help file")
+    return match.group(1)
+
+
+def documented_commands(fragment: str) -> list:
+    """Every ``python main.py ...`` command shown in a <pre> block."""
+    commands = []
+    for block in re.findall(r"<pre[^>]*>(.*?)</pre>", fragment, re.DOTALL):
+        text = html_module.unescape(re.sub(r"<[^>]+>", "", block)).replace("\\\n", " ")
+        for line in text.splitlines():
+            line = " ".join(line.split())
+            if line.startswith("python main.py"):
+                commands.append(line)
+    return commands
+
+
+def command_arguments(command: str) -> tuple:
+    return tuple(shlex.split(command)[2:])
+
+
+def is_seeded(arguments) -> bool:
+    return "--seed" in arguments
+
+
+class CliRun(NamedTuple):
+    stdout: str
+    stderr: str
+    exit_code: object
+    result: object
+
+
+_CLI_CACHE = {}
+
+
+def run_cli(arguments=()) -> CliRun:
+    """Run ``main.main()`` in-process with the plots suppressed.
+
+    Seeded commands are cached, because they always print the same thing.
+    """
+    key = tuple(arguments)
+    if key in _CLI_CACHE:
+        return _CLI_CACHE[key]
+    captured = {}
+    real_scaled = cli.run_scaled_distance_statistics
+    real_walk = cli.run_walk2d
+
+    def capture_scaled(*args, **kwargs):
+        captured["result"] = real_scaled(*args, **kwargs)
+        return captured["result"]
+
+    def capture_walk(*args, **kwargs):
+        captured["result"] = real_walk(*args, **kwargs)
+        return captured["result"]
+
+    out, err = io.StringIO(), io.StringIO()
+    exit_code = None
+    state = random.getstate()
+    try:
+        with (
+            mock.patch.object(cli, "run_scaled_distance_statistics", new=capture_scaled),
+            mock.patch.object(cli, "run_walk2d", new=capture_walk),
+            mock.patch.object(cli, "plot_scaled_distance"),
+            mock.patch.object(cli, "plot_walk2d"),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            try:
+                cli.main(list(key))
+            except SystemExit as exc:
+                exit_code = exc.code
+    finally:
+        random.setstate(state)
+    run = CliRun(out.getvalue(), err.getvalue(), exit_code, captured.get("result"))
+    if is_seeded(key):
+        _CLI_CACHE[key] = run
+    return run
+
+
+class HelpStructure(HTMLParser):
+    """Ids, links and tag balance of a Help page."""
+
+    def __init__(self, html: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self.ids = []
+        self.hrefs = []
+        self.sidebar_hrefs = []
+        self.section_ids = []
+        self.scripts = []
+        self.errors = []
+        self._stack = []
+        self._in_nav = False
+        self.feed(html)
+        self.close()
+        if self._stack:
+            self.errors.append(f"unclosed tags: {self._stack}")
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if "id" in attributes:
+            self.ids.append(attributes["id"] or "")
+        if tag == "section" and attributes.get("id"):
+            self.section_ids.append(attributes["id"])
+        if tag == "script" and attributes.get("src"):
+            self.scripts.append(attributes["src"])
+        if tag == "nav":
+            self._in_nav = True
+        href = attributes.get("href")
+        if tag == "a" and href:
+            self.hrefs.append(href)
+            if self._in_nav and href.startswith("#"):
+                self.sidebar_hrefs.append(href[1:])
+        if tag not in VOID_TAGS:
+            self._stack.append(tag)
+
+    def handle_endtag(self, tag):
+        if tag == "nav":
+            self._in_nav = False
+        if tag in VOID_TAGS:
+            return
+        if not self._stack or self._stack[-1] != tag:
+            self.errors.append(f"unexpected </{tag}> with open {self._stack[-3:]}")
+            if tag in self._stack:
+                while self._stack and self._stack.pop() != tag:
+                    pass
+            return
+        self._stack.pop()
+
+
+STRUCTURE = HelpStructure(HELP_HTML)
+
+
+class HelpStructureTests(unittest.TestCase):
+    def test_help_file_is_html5_utf8_with_one_version_build(self):
+        self.assertIn("<!DOCTYPE html>", HELP_HTML[:100])
+        self.assertRegex(HELP_HTML[:500], r'<meta charset="utf-8"\s*/?>')
+        self.assertEqual(STRUCTURE.ids.count("version_build"), 1)
+
+    def test_help_file_is_the_beats_version_and_not_the_original(self):
+        self.assertIn(HELP_FILE.name, HELP_FILENAMES)
+        self.assertIn("Beat 0", HELP_HTML)
+
+    def test_tags_are_balanced_and_ids_are_unique(self):
+        self.assertEqual(STRUCTURE.errors, [])
+        duplicates = sorted({i for i in STRUCTURE.ids if STRUCTURE.ids.count(i) > 1})
+        self.assertEqual(duplicates, [])
+
+    def test_every_internal_link_and_sidebar_entry_resolves(self):
+        targets = set(STRUCTURE.ids)
+        internal = [h[1:] for h in STRUCTURE.hrefs if h.startswith("#")]
+        self.assertGreater(len(internal), 20)
+        for target in internal:
+            with self.subTest(target=target):
+                self.assertIn(target, targets)
+        for target in STRUCTURE.sidebar_hrefs:
+            with self.subTest(sidebar=target):
+                self.assertIn(target, STRUCTURE.section_ids)
+
+    def test_page_has_the_beats_layout_in_order(self):
+        expected = (
+            ["overview", "beats"]
+            + [f"beat{n}" for n in BEAT_NUMBERS]
+            + ["equations", "algorithm", "modules", "quickstart", "parameters",
+               "output", "summary", "experiments", "related", "license"]
+        )
+        self.assertEqual(STRUCTURE.section_ids, expected)
+        self.assertEqual(STRUCTURE.sidebar_hrefs, expected)
+
+    def test_mathjax_is_the_only_external_script(self):
+        self.assertEqual(len(STRUCTURE.scripts), 1)
+        self.assertRegex(STRUCTURE.scripts[0], r"^https://cdn\.jsdelivr\.net/npm/mathjax@3/")
+        self.assertIn("needs no internet access to run", html_text(section_html(HELP_HTML, "overview")))
+
+    def test_mathjax_source_has_no_text_mode_underscores(self):
+        for block in re.findall(r"\\\[(.*?)\\\]", HELP_HTML, re.DOTALL):
+            with self.subTest(block=block[:40]):
+                self.assertNotIn("\\texttt", block)
+
+    def test_student_content_contains_no_ai_or_review_history(self):
+        student_text = HELP_HTML.split('<section id="license">', 1)[0]
+        for term in ("Claude", "Copilot", "Gemini", "ChatGPT", "Anthropic", "Codex", "Grok",
+                     "AI-generated", "audit", "Kickoff", "previous version", "reviewer"):
+            with self.subTest(term=term):
+                self.assertNotIn(term, student_text)
+
+    def test_java_provenance_is_confined_to_license(self):
+        before_license, license_and_after = HELP_HTML.split('<section id="license">', 1)
+        self.assertNotIn("Java", before_license)
+        self.assertIn("Java", license_and_after)
+
+    def test_relative_links_resolve_when_the_documentation_tree_is_present(self):
+        docs_root = HELP_FILE.parent.parent
+        if docs_root.name != "GFTGU-Documentation" or not (docs_root / "Star").is_dir():
+            self.skipTest("the sibling documentation folders are not present in this layout")
+        for href in STRUCTURE.hrefs:
+            if href.startswith(("#", "http://", "https://", "mailto:")):
+                continue
+            with self.subTest(href=href):
+                self.assertTrue((HELP_FILE.parent / href).is_file(), href)
+
+
+class HelpBeatTests(unittest.TestCase):
+    TAGS = {"MODEL": "law", "DEFINITION": "def", "DERIVED": "der",
+            "ALGORITHM": "alg", "PRESCRIPTION": "pre"}
+
+    def equations(self):
+        found = {}
+        for number in BEAT_NUMBERS:
+            body = section_html(HELP_HTML, f"beat{number}")
+            for match in re.finditer(
+                r'<span class="eq-label">\((\d+)\)</span>\s*<div class="eq-kind">.*?'
+                r'<span class="kind kind-(\w+)">(\w+)</span>',
+                body, re.DOTALL,
+            ):
+                found[int(match.group(1))] = (match.group(3), number, match.group(2))
+        return found
+
+    def test_every_beat_follows_the_same_pattern(self):
+        for number in BEAT_NUMBERS:
+            body = section_html(HELP_HTML, f"beat{number}")
+            with self.subTest(beat=number):
+                self.assertIn(f"<h2>Beat {number} · ", body)
+                self.assertGreaterEqual(body.count("<pre>"), 1)
+                self.assertRegex(body, r"<p>Look[ ,]")
+                self.assertIn("Three tasks, in order.", body)
+                self.assertIn("<p><em>Then</em>", body)
+                self.assertIn("<p><em>Experiments that go with this beat:</em>", body)
+                self.assertLess(body.index("<pre>"), body.index("Three tasks, in order."))
+                self.assertLess(body.index("Three tasks, in order."), body.index("<em>Then</em>"))
+                self.assertLess(body.index("<em>Then</em>"), body.index("Experiments that go with"))
+                self.assertGreaterEqual(body.count('class="eq"'), 1)
+
+    def test_sidebar_titles_match_the_beat_headings(self):
+        for number in BEAT_NUMBERS:
+            heading = re.search(
+                rf"<h2>Beat {number} · (.*?)</h2>", section_html(HELP_HTML, f"beat{number}")
+            ).group(1)
+            link = re.search(rf'<a href="#beat{number}">(.*?)</a>', HELP_HTML).group(1)
+            with self.subTest(beat=number):
+                self.assertEqual(html_text(link), f"{number} · {html_text(heading)}")
+
+    def test_equations_are_numbered_in_order_and_tagged_consistently(self):
+        found = self.equations()
+        self.assertEqual(sorted(found), list(range(1, 21)))
+        beats = [found[n][1] for n in sorted(found)]
+        self.assertEqual(beats, sorted(beats))
+        for number, (kind, _, css) in found.items():
+            with self.subTest(equation=number):
+                self.assertEqual(self.TAGS[kind], css)
+        self.assertIn("Twenty equations are numbered", html_text(section_html(HELP_HTML, "beats")))
+
+    def test_tag_counts_match_the_reading_note(self):
+        found = self.equations()
+        by_kind = {}
+        for number, (kind, _, _) in found.items():
+            by_kind.setdefault(kind, []).append(number)
+        self.assertEqual(sorted(by_kind["MODEL"]), [1, 12])
+        self.assertEqual(sorted(by_kind["ALGORITHM"]), [8, 15, 19])
+        self.assertEqual(sorted(by_kind["PRESCRIPTION"]), [14])
+        note = html_text(section_html(HELP_HTML, "beats"))
+        self.assertIn("Eqs. (1) and (12) are the only ones", note)
+        self.assertIn("Eqs. (8), (15) and (19)", note)
+        self.assertIn("Eq. (14)", note)
+
+    def test_equation_citations_refer_to_numbered_equations(self):
+        for section in STRUCTURE.section_ids:
+            if section in ("related", "license"):
+                continue
+            text = html_text(section_html(HELP_HTML, section))
+            for group in re.findall(r"Eqs?\.\s*\(([\d\s,and()to]+?)\)(?=[\s.,;:]|$)", text):
+                for number in re.findall(r"\d+", group):
+                    with self.subTest(section=section, equation=number):
+                        self.assertIn(int(number), range(1, 21))
+
+    def test_equation_index_lists_every_numbered_equation_once_with_its_kind_and_beat(self):
+        found = self.equations()
+        rows = re.findall(
+            r"<tr><td>\((\d+)\)</td><td><span class=\"kind kind-\w+\">(\w+)</span></td>"
+            r"<td>.*?</td><td>(\d+)</td>",
+            section_html(HELP_HTML, "equations"),
+        )
+        self.assertEqual([int(r[0]) for r in rows], list(range(1, 21)))
+        for number, kind, beat in rows:
+            with self.subTest(equation=number):
+                self.assertEqual((kind, int(beat)), found[int(number)][:2])
+
+    def test_every_experiment_is_cited_by_a_beat_and_every_citation_exists(self):
+        experiments = re.findall(r'<h3 id="exp(\d+)">', section_html(HELP_HTML, "experiments"))
+        self.assertEqual(experiments, [str(n) for n in range(1, 12)])
+        cited = set()
+        for number in BEAT_NUMBERS:
+            body = section_html(HELP_HTML, f"beat{number}")
+            tail = body[body.index("Experiments that go with this beat:"):]
+            links = re.findall(r'href="#exp(\d+)"', tail)
+            with self.subTest(beat=number):
+                self.assertTrue(links)
+            cited.update(links)
+        self.assertEqual(cited, set(experiments))
+
+    def test_experiments_are_ranked_from_introductory_to_advanced(self):
+        rank = {"Introductory": 0, "Introductory to Intermediate": 1, "Intermediate": 2,
+                "Intermediate Programming": 2, "Intermediate to Advanced": 3,
+                "Advanced": 4, "Advanced Programming": 4}
+        levels = [
+            rank[html_text(title).rsplit("— ", 1)[1]]
+            for title in re.findall(r'<h3 id="exp\d+">(.*?)</h3>', section_html(HELP_HTML, "experiments"))
+        ]
+        self.assertEqual(levels, sorted(levels))
+
+    def test_python_snippet_in_the_experiments_runs_and_matches_beats_0_and_4(self):
+        blocks = [
+            html_module.unescape(re.sub(r"<[^>]+>", "", b))
+            for b in re.findall(r"<pre>(.*?)</pre>", section_html(HELP_HTML, "experiments"), re.DOTALL)
+            if "random2_driver import" in b
+        ]
+        self.assertEqual(len(blocks), 1)
+        completed = subprocess.run(
+            [sys.executable, "-c", blocks[0]], cwd=MODULE_DIR,
+            text=True, capture_output=True, timeout=120,
+            env={**os.environ, "MPLBACKEND": "Agg"},
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        first, second = completed.stdout.splitlines()
+        length, average, error = (float(v) for v in first.split())
+        self.assertEqual(length, 4096.0)
+        beat0 = run_cli(SEED).stdout
+        self.assertIn(f"{average:.4f}", beat0)
+        self.assertIn(f"{error:.4f}", beat0)
+        escaped, mean = second.split()
+        beat4 = run_cli(("--display", "walk2d", "--radius", "30", "--n_walks", "200", *SEED)).stdout
+        self.assertEqual(int(escaped), 200)
+        self.assertIn(f"mean {float(mean):.1f}", beat4)
+
+
+class HelpCommandTests(unittest.TestCase):
+    def test_the_help_documents_a_meaningful_number_of_commands(self):
+        self.assertGreaterEqual(len(dict.fromkeys(documented_commands(HELP_HTML))), 25)
+
+    def test_every_beat_command_except_the_seed_demonstrations_is_seeded(self):
+        for number in BEAT_NUMBERS:
+            for command in documented_commands(section_html(HELP_HTML, f"beat{number}")):
+                if number == 8 and command in ("python main.py", *REJECTED_COMMANDS):
+                    continue
+                with self.subTest(command=command):
+                    self.assertTrue(is_seeded(command_arguments(command)))
+
+    def test_every_documented_command_parses_and_runs_to_a_summary(self):
+        for command in dict.fromkeys(documented_commands(HELP_HTML)):
+            arguments = command_arguments(command)
+            if "--help" in arguments:
+                continue
+            with self.subTest(command=command):
+                run = run_cli(arguments)
+                if command in REJECTED_COMMANDS:
+                    self.assertEqual(run.exit_code, 2)
+                    self.assertIn("max_steps must be at least 2", run.stderr)
+                    self.assertEqual(run.stdout, "")
+                else:
+                    self.assertIn(run.exit_code, (None, 0), run.stderr)
+                    lines = run.stdout.splitlines()
+                    self.assertEqual(lines[0], f"Random2 {physics.MODEL_VERSION} (build {physics.BUILD_ID})")
+                    self.assertTrue(lines[1].startswith("display: "))
+                    self.assertTrue(lines[-1].startswith(("fitted log-log slope", "mean escape steps", "escape steps")))
+
+    def test_documented_options_are_real_options(self):
+        parser = cli.build_parser()
+        real = {s for action in parser._actions for s in action.option_strings}
+        used = set(re.findall(r"(?<![\w-])(--[A-Za-z_]+)", "\n".join(documented_commands(HELP_HTML))))
+        self.assertTrue(used)
+        self.assertLessEqual(used, real)
+
+
+class HelpReferenceTests(unittest.TestCase):
+    def test_parameter_table_matches_the_parser_options_and_defaults(self):
+        rows = {
+            row[0]: row[1]
+            for row in parse_help_file().table_rows
+            if len(row) == 3 and row[0].startswith("--")
+        }
+        options = {
+            action.option_strings[0]: action
+            for action in cli.build_parser()._actions
+            if action.option_strings and action.option_strings[0] not in ("-h", "--version")
+        }
+        self.assertEqual(set(rows), set(options))
+        for name, action in options.items():
+            expected = "omitted" if action.default is None else str(action.default)
+            with self.subTest(option=name):
+                self.assertEqual(rows[name], expected)
+
+    def test_printed_summary_blocks_are_exactly_what_beats_0_and_3_print(self):
+        blocks = re.findall(r"<pre>(Random2 .*?)</pre>", section_html(HELP_HTML, "summary"), re.DOTALL)
+        self.assertEqual(len(blocks), 2)
+        self.assertEqual(html_module.unescape(blocks[0]).strip(), run_cli(SEED).stdout.strip())
+        self.assertEqual(
+            html_module.unescape(blocks[1]).strip(),
+            run_cli(("--display", "walk2d", *SEED)).stdout.strip(),
+        )
+
+    def test_every_summary_label_is_described_in_the_help(self):
+        text = html_text(section_html(HELP_HTML, "summary"))
+        scaled = run_cli(SEED).stdout
+        walk = run_cli(("--display", "walk2d", "--radius", "30", "--n_walks", "200",
+                        "--step_cap", "900", *SEED)).stdout
+        labels = set()
+        for output in (scaled, walk):
+            for line in output.splitlines()[1:]:
+                if ":" in line:
+                    labels.add(line.split(":", 1)[0])
+        labels = {label for label in labels if not label.startswith("walk ")}
+        for label in sorted(labels):
+            with self.subTest(label=label):
+                self.assertIn(label, text)
+        for column in ("mean scaled distance", "standard error", "ratio to sqrt(N)"):
+            self.assertIn(column, scaled)
+            self.assertIn(column, text)
+
+    def test_constant_table_matches_the_program(self):
+        rows = {
+            row[0]: row[1]
+            for row in parse_help_file().table_rows
+            if len(row) == 3 and not row[0].startswith("--") and row[0] != "Name"
+        }
+        self.assertEqual(rows["UNIFORM_MEAN_STEP_LENGTH"], f"{physics.UNIFORM_MEAN_STEP_LENGTH:.6f}")
+        self.assertEqual(rows["MAX_LISTED_WALKS"], str(cli.MAX_LISTED_WALKS))
+
+    def test_code_identifiers_named_in_the_help_exist_in_the_program(self):
+        modules = (physics, driver, plot, cli)
+        names = set()
+        for body in re.findall(r"<code>([^<]+)</code>", HELP_HTML):
+            body = html_module.unescape(body)
+            match = re.fullmatch(r"([A-Za-z_][A-Za-z_0-9]*)\((?:\"\w+\")?\)", body)
+            if match:
+                names.add(match.group(1))
+            elif re.fullmatch(r"[A-Z][A-Z_0-9]{3,}", body):
+                names.add(body)
+        for class_name in re.findall(r"<code>([A-Z][a-z]\w+)</code>", HELP_HTML):
+            names.add(class_name)
+        self.assertGreater(len(names), 15)
+        for name in sorted(names):
+            with self.subTest(name=name):
+                self.assertTrue(any(hasattr(module, name) for module in modules), name)
+
+
+class HelpQuotedNumberTests(unittest.TestCase):
+    """Every number the Help quotes from a seeded run must be the number printed."""
+
+    FOUR_DECIMALS = re.compile(r"(?<![\w.])\d+\.\d{4}(?![\w%])")
+    ONE_DECIMAL = re.compile(r"(?<![\w.])\d+\.\d(?![\w%])")
+    # Numbers that a student computes by hand from printed values or that are
+    # constants of the equations; each is checked in HelpQuantitativeClaimTests.
+    DERIVED_OK = {"0.9213", "1.5958", "0.5", "1.0", "2.0", "0.6", "16.4"}
+    # The runs of Beats 0, 3 and 4, which later beats compare with.
+    REFERENCE_RUNS = (
+        SEED,
+        ("--display", "walk2d", *SEED),
+        ("--display", "walk2d", "--radius", "30", "--n_walks", "200", *SEED),
+    )
+
+    def printed_for(self, fragment):
+        chunks = [run_cli(arguments).stdout for arguments in self.REFERENCE_RUNS]
+        for command in documented_commands(fragment):
+            arguments = command_arguments(command)
+            if command not in REJECTED_COMMANDS and is_seeded(arguments):
+                chunks.append(run_cli(arguments).stdout)
+        return "\n".join(chunks)
+
+    def tokens(self, fragment):
+        text = html_text(re.sub(r"\\\[.*?\\\]", "", fragment, flags=re.DOTALL))
+        found = set(self.FOUR_DECIMALS.findall(text)) | set(self.ONE_DECIMAL.findall(text))
+        return found - self.DERIVED_OK
+
+    def test_numbers_quoted_in_each_beat_are_printed_by_that_beat_s_commands(self):
+        for number in BEAT_NUMBERS:
+            body = section_html(HELP_HTML, f"beat{number}")
+            printed = self.printed_for(body)
+            tokens = self.tokens(body)
+            with self.subTest(beat=number):
+                self.assertTrue(tokens)
+                self.assertEqual(sorted(t for t in tokens if t not in printed), [])
+
+    # Whole numbers in Beats 3 to 7 that are inputs or bounds rather than output.
+    WHOLE_NUMBERS_NOT_PRINTED = {"2000", "961", "256", "200000"}
+
+    def test_whole_numbers_quoted_in_beats_3_to_7_are_printed(self):
+        for number in range(3, 8):
+            body = section_html(HELP_HTML, f"beat{number}")
+            text = html_text(re.sub(r"\\\[.*?\\\]", "", body, flags=re.DOTALL))
+            printed = self.printed_for(body)
+            counts = set(re.findall(r"(?<![\w.])\d{3,6}(?![\w.])", text)) - self.WHOLE_NUMBERS_NOT_PRINTED
+            with self.subTest(beat=number):
+                self.assertTrue(counts)
+                for count in sorted(counts):
+                    self.assertRegex(printed, rf"(?<![\d.]){count}(?![\d])", count)
+
+    def test_numbers_quoted_in_the_reference_sections_are_printed_by_some_command(self):
+        every_output = "\n".join(
+            run_cli(command_arguments(c)).stdout
+            for c in dict.fromkeys(documented_commands(HELP_HTML))
+            if c not in REJECTED_COMMANDS and is_seeded(command_arguments(c))
+        )
+        for section in ("overview", "beats", "algorithm", "modules", "quickstart",
+                        "parameters", "output", "summary"):
+            with self.subTest(section=section):
+                tokens = set(self.FOUR_DECIMALS.findall(html_text(section_html(HELP_HTML, section))))
+                tokens -= {"0.9213", "1.5958"}
+                self.assertEqual(sorted(t for t in tokens if t not in every_output), [])
+
+
+class HelpQuantitativeClaimTests(unittest.TestCase):
+    """Independent checks of statements in the beats that go beyond the printed digits."""
+
+    @staticmethod
+    def scaled(*arguments):
+        return run_cli((*arguments, *SEED)).result
+
+    @staticmethod
+    def walk(*arguments):
+        return run_cli(("--display", "walk2d", *arguments, *SEED)).result
+
+    def test_uniform_mean_step_length_closed_form_matches_numerical_integration(self):
+        cells = 120
+        centres = (np.arange(cells) + 0.5) / cells  # the octant [0, 1]^3 is enough by symmetry
+        x, y, z = np.meshgrid(centres, centres, centres, indexing="ij")
+        numeric = float(np.sqrt(x * x + y * y + z * z).mean())
+        self.assertAlmostEqual(numeric, physics.UNIFORM_MEAN_STEP_LENGTH, delta=2e-5)
+        self.assertAlmostEqual(physics.UNIFORM_MEAN_STEP_LENGTH, 0.960592, places=6)
+        self.assertAlmostEqual(math.sqrt(8 / (3 * math.pi)), 0.92132, places=5)
+        self.assertAlmostEqual(physics.large_n_scaled_distance_ratio("uniform"), 0.9591, places=4)
+        self.assertEqual(physics.large_n_scaled_distance_ratio("gaussian"), 1.0)
+        self.assertAlmostEqual(math.sqrt(8 / math.pi), 1.5958, places=4)
+
+    def test_large_n_prediction_agrees_with_a_vectorised_simulation(self):
+        rng = np.random.default_rng(2026)
+        for distribution, draw in (
+            ("uniform", lambda size: rng.uniform(-1.0, 1.0, size)),
+            ("gaussian", lambda size: rng.standard_normal(size)),
+        ):
+            steps = draw((4000, 256, 3))
+            net = np.linalg.norm(steps.sum(axis=1), axis=1)
+            mean_step = np.linalg.norm(steps, axis=2).mean(axis=1)
+            ratio = float((net / mean_step).mean()) / 16.0
+            with self.subTest(distribution=distribution):
+                self.assertAlmostEqual(
+                    ratio, physics.large_n_scaled_distance_ratio(distribution), delta=0.03
+                )
+
+    def test_relative_spread_of_the_scaled_distance_is_0_42(self):
+        self.assertAlmostEqual(math.sqrt(3 * math.pi / 8 - 1), 0.42, places=2)
+        result = self.scaled("--n_trials", "1000")
+        spread = result.standard_errors[-1] * math.sqrt(1000) / result.averages[-1]
+        self.assertAlmostEqual(spread, 0.42, delta=0.03)
+
+    def test_beat0_ratios_and_factors(self):
+        result = self.scaled()
+        ratios = [a / math.sqrt(n) for n, a in zip(result.lengths, result.averages)]
+        self.assertAlmostEqual(min(ratios), 0.9074, places=4)
+        self.assertAlmostEqual(max(ratios), 1.0237, places=4)
+        self.assertAlmostEqual(result.averages[-1] / result.averages[-3], 2.05, places=2)
+        self.assertAlmostEqual(result.averages[-3] / result.averages[-5], 2.05, places=2)
+
+    def test_beat1_standard_errors_ranges_and_slope_uncertainty(self):
+        few, default, many = self.scaled("--n_trials", "25"), self.scaled(), self.scaled("--n_trials", "1000")
+        self.assertAlmostEqual(few.standard_errors[-1] / default.standard_errors[-1], 1.82, places=2)
+        self.assertAlmostEqual(default.standard_errors[-1] / many.standard_errors[-1], 2.85, places=2)
+        self.assertAlmostEqual(many.standard_errors[-1] / many.standard_errors[3], 16.4, places=1)
+        prediction = physics.large_n_scaled_distance_ratio("uniform")
+        late = [a / math.sqrt(n) for n, a in zip(many.lengths, many.averages) if n >= 16]
+        self.assertLessEqual(max(abs(r - prediction) for r in late), 0.008)
+        few_ratios = [a / math.sqrt(n) for n, a in zip(few.lengths, few.averages)]
+        self.assertAlmostEqual(min(few_ratios), 0.8211, places=4)
+        self.assertAlmostEqual(max(few_ratios), 1.0326, places=4)
+        spacing = math.log(2.0)
+        spread = sum((k * spacing - 5.5 * spacing) ** 2 for k in range(12))
+        for trials, expected in ((25, 0.01), (1000, 0.002)):
+            self.assertAlmostEqual(0.42 / math.sqrt(trials) / math.sqrt(spread), expected, delta=0.0006)
+
+    def test_beat1_short_walk_bias_lowers_the_expected_slope(self):
+        rng = np.random.default_rng(7)
+        means = []
+        lengths = [2 ** k for k in range(1, 13)]
+        for n_steps in lengths:
+            trials = max(400, 400_000 // n_steps)
+            steps = rng.uniform(-1.0, 1.0, (trials, n_steps, 3))
+            net = np.linalg.norm(steps.sum(axis=1), axis=1)
+            means.append(float((net / np.linalg.norm(steps, axis=2).mean(axis=1)).mean()))
+        self.assertGreater(means[0] / math.sqrt(2), 0.97)
+        self.assertAlmostEqual(physics.fitted_loglog_slope(lengths, means), 0.498, delta=0.003)
+
+    def test_beat2_gaussian_ranges_and_comparison(self):
+        gaussian, uniform = self.scaled("--step_distribution", "gaussian"), self.scaled()
+        late = [a / math.sqrt(n) for n, a in zip(gaussian.lengths, gaussian.averages) if n >= 64]
+        self.assertAlmostEqual(min(late), 0.9408, places=4)
+        self.assertAlmostEqual(max(late), 1.0502, places=4)
+        difference = gaussian.averages[-1] - uniform.averages[-1]
+        combined = math.hypot(gaussian.standard_errors[-1], uniform.standard_errors[-1])
+        self.assertAlmostEqual(difference, 2.16, places=2)
+        self.assertAlmostEqual(difference / combined, 0.54, places=2)
+        self.assertAlmostEqual(1 / physics.large_n_scaled_distance_ratio("uniform") - 1, 0.04, places=2)
+
+    def test_beat3_default_star(self):
+        result = self.walk()
+        self.assertAlmostEqual(result.radius, 2 * math.sqrt(2000), places=12)
+        steps = [w.steps_taken for w in result.walks]
+        self.assertEqual(steps, [11564, 7519, 8246, 2479])
+        self.assertAlmostEqual(max(steps) / min(steps), 4.66, places=2)
+        stats = driver.escape_statistics(result)
+        self.assertAlmostEqual(stats.standard_error / stats.mean, 0.25, places=2)
+        self.assertEqual(math.ceil(result.radius), 90)
+
+    def test_beat4_mean_escape_bound_and_spread(self):
+        stats = driver.escape_statistics(self.walk("--radius", "30", "--n_walks", "200"))
+        self.assertEqual((stats.n_escaped, stats.minimum, stats.maximum), (200, 132, 3797))
+        self.assertLessEqual(900 - 3 * stats.standard_error, stats.mean)
+        self.assertLessEqual(stats.mean, 961 + 3 * stats.standard_error)
+        self.assertGreater(stats.mean, stats.median)
+
+    def test_eq16_bound_holds_for_a_large_sample(self):
+        with isolated_rng(4242):
+            result = driver.run_walk2d(n_walks=4000, radius=6.0, ray_length_factor=0)
+        stats = driver.escape_statistics(result)
+        self.assertEqual(stats.n_escaped, 4000)
+        self.assertLessEqual(36.0 - 3 * stats.standard_error, stats.mean)
+        self.assertLessEqual(stats.mean, 49.0 + 3 * stats.standard_error)
+
+    def test_beat5_ratio_and_its_uncertainty(self):
+        small = driver.escape_statistics(self.walk("--radius", "15", "--n_walks", "200"))
+        large = driver.escape_statistics(self.walk("--radius", "30", "--n_walks", "200"))
+        ratio = large.mean / small.mean
+        self.assertAlmostEqual(ratio, 3.96, places=2)
+        self.assertAlmostEqual(large.median / small.median, 3.99, places=2)
+        relative = math.hypot(large.standard_error / large.mean, small.standard_error / small.mean)
+        self.assertAlmostEqual(relative, 0.068, places=3)
+        self.assertAlmostEqual(ratio * relative, 0.27, places=2)
+        self.assertAlmostEqual(900 / 256, 3.52, places=2)
+        self.assertAlmostEqual(961 / 225, 4.27, places=2)
+        self.assertTrue(900 / 256 <= ratio <= 961 / 225)
+
+    def test_beat6_step_counts_are_identical_for_factors_of_two(self):
+        reference = [w.steps_taken for w in self.walk().walks]
+        for length in ("0.5", "2"):
+            result = self.walk("--mean_free_path", length)
+            with self.subTest(mean_free_path=length):
+                self.assertEqual([w.steps_taken for w in result.walks], reference)
+                self.assertAlmostEqual((result.radius / result.mean_free_path) ** 2, 8000.0, places=6)
+
+    def test_beat7_step_cap_bias(self):
+        capped = self.walk("--radius", "30", "--n_walks", "200", "--step_cap", "900")
+        loose = self.walk("--radius", "30", "--n_walks", "200", "--step_cap", "3000")
+        capped_stats, loose_stats = driver.escape_statistics(capped), driver.escape_statistics(loose)
+        self.assertEqual((capped_stats.n_escaped, capped_stats.maximum), (130, 897))
+        self.assertEqual(loose_stats.n_escaped, 196)
+        self.assertTrue(all(w.steps_taken == 900 for w in capped.walks if not w.escaped))
+        self.assertLess(capped_stats.mean, loose_stats.mean)
+
+    def test_beat8_seed_comparison(self):
+        a, b = self.scaled(), run_cli(("--seed", "28")).result
+        difference = abs(a.averages[-1] - b.averages[-1])
+        combined = math.hypot(a.standard_errors[-1], b.standard_errors[-1])
+        self.assertAlmostEqual(difference, 0.79, places=2)
+        self.assertAlmostEqual(combined, 3.47, places=2)
+        self.assertAlmostEqual(difference / combined, 0.23, places=2)
+        single = run_cli(("--max_steps", "2", *SEED)).stdout
+        self.assertIn("fitted log-log slope: n/a (only one step count)", single)
+
+
+class NewFeatureTests(unittest.TestCase):
+    """The seed option, printed summaries, frozen results and shared helpers."""
+
+    def test_same_seed_repeats_and_different_seeds_differ(self):
+        first = run_cli(("--max_steps", "64", "--seed", "3")).stdout
+        _CLI_CACHE.clear()
+        second = run_cli(("--max_steps", "64", "--seed", "3")).stdout
+        other = run_cli(("--max_steps", "64", "--seed", "4")).stdout
+        self.assertEqual(first, second)
+        self.assertNotEqual(first.splitlines()[5:], other.splitlines()[5:])
+
+    def test_unseeded_runs_say_so(self):
+        output = run_cli(("--max_steps", "8")).stdout
+        self.assertIn("seed: none (results differ from run to run)", output)
+
+    def test_seed_generator_validates_and_seeds(self):
+        for bad in (-1, 1.5, True, "3"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                physics.seed_generator(bad)
+        state = random.getstate()
+        try:
+            physics.seed_generator(9)
+            first = random.random()
+            physics.seed_generator(9)
+            self.assertEqual(random.random(), first)
+            physics.seed_generator(None)
+            random.random()
+        finally:
+            random.setstate(state)
+
+    def test_fitted_slope_is_exact_for_a_power_law_and_validates(self):
+        xs = [2.0, 4.0, 8.0, 16.0]
+        self.assertAlmostEqual(physics.fitted_loglog_slope(xs, [3 * x ** 0.5 for x in xs]), 0.5, places=12)
+        for bad in (([1.0], [1.0]), ([1.0, 1.0], [1.0, 2.0]), ([1.0, 2.0], [1.0]), ([0.0, 1.0], [1.0, 1.0])):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                physics.fitted_loglog_slope(*bad)
+
+    def test_standard_errors_match_the_sample_definition(self):
+        values = [(6.0, 2.0), (9.0, 3.0), (4.0, 1.0), (5.0, 2.0)]
+        with mock.patch.object(driver, "_perform_single_walk_3d", side_effect=values):
+            mean, error = driver._perform_trials_3d_with_error(4, 4)
+        scaled = [a / b for a, b in values]
+        self.assertAlmostEqual(mean, statistics.fmean(scaled))
+        self.assertAlmostEqual(error, statistics.stdev(scaled) / 2.0)
+        with mock.patch.object(driver, "_perform_single_walk_3d", return_value=(3.0, 1.0)):
+            self.assertEqual(driver._perform_trials_3d_with_error(4, 1), (3.0, None))
+
+    def test_single_trial_prints_n_a_standard_error(self):
+        output = run_cli(("--max_steps", "4", "--n_trials", "1", *SEED)).stdout
+        self.assertRegex(output, r"\n +2 +\d+\.\d{4} +n/a +\d+\.\d{4}\n")
+
+    def test_results_are_frozen_tuples(self):
+        result = driver.run_walk2d(n_walks=2, radius=3.0)
+        self.assertIsInstance(result.walks, tuple)
+        self.assertIsInstance(result.walks[0].points, tuple)
+        with self.assertRaises(FrozenInstanceError):
+            result.radius = 1.0
+        with self.assertRaises(FrozenInstanceError):
+            result.walks[0].steps_taken = 0
+        table = driver.run_scaled_distance_statistics(8, 3)
+        self.assertIsInstance(table.lengths, tuple)
+        with self.assertRaises(FrozenInstanceError):
+            table.n_trials = 1
+
+    def test_escape_statistics(self):
+        walks = (
+            driver.WalkPath(((0.0, 0.0),), True, 10),
+            driver.WalkPath(((0.0, 0.0),), True, 20),
+            driver.WalkPath(((0.0, 0.0),), False, 50),
+        )
+        result = driver.Walk2DResult("v", "b", 1.0, 1.0, 1, 50, walks)
+        stats = driver.escape_statistics(result)
+        self.assertEqual((stats.n_walks, stats.n_escaped, stats.minimum, stats.maximum), (3, 2, 10, 20))
+        self.assertEqual((stats.mean, stats.median), (15.0, 15.0))
+        self.assertAlmostEqual(stats.standard_error, statistics.stdev([10, 20]) / math.sqrt(2))
+        none = driver.escape_statistics(driver.Walk2DResult("v", "b", 1.0, 1.0, 1, 50, walks[2:]))
+        self.assertEqual((none.n_escaped, none.mean, none.standard_error), (0, None, None))
+
+    def test_walk_summary_lists_capped_walks_and_omits_lists_above_twelve(self):
+        capped = run_cli(("--display", "walk2d", "--radius", "30", "--n_walks", "3",
+                          "--step_cap", "5", *SEED)).stdout
+        self.assertIn("walk 1: stopped at the step cap after 5 steps, not escaped", capped)
+        self.assertIn("escape steps: n/a (no walk escaped)", capped)
+        many = run_cli(("--display", "walk2d", "--radius", "3", "--n_walks", "13", *SEED)).stdout
+        self.assertNotIn("walk 1:", many)
+        self.assertIn("escaped walks: 13 of 13", many)
+
+    def test_driver_and_plot_use_the_shared_physics_validators(self):
+        self.assertIs(driver.require_positive_int, physics.require_positive_int)
+        self.assertIs(plot.require_positive_finite_number, physics.require_positive_finite_number)
+        for name in ("_require_positive_finite_number", "_require_nonnegative_finite_number",
+                     "_require_positive_int"):
+            self.assertFalse(hasattr(driver, name), name)
+
+    def test_scaled_plot_shows_the_fitted_slope(self):
+        with mock.patch.object(plot.plt, "show"):
+            plot.plot_scaled_distance((2.0, 4.0, 8.0), (1.0, 2.0 ** 0.5, 2.0))
+        text = "\n".join(t.get_text() for t in plt.gca().texts)
+        plt.close("all")
+        self.assertIn("fitted log-log slope = 0.5000", text)
+        with mock.patch.object(plot.plt, "show"):
+            plot.plot_scaled_distance((2.0,), (1.0,))
+        self.assertEqual(len(plt.gca().texts), 0)
+        plt.close("all")
+
+    def test_walk_plot_annotation_median_matches_the_summary(self):
+        with isolated_rng(12):
+            result = driver.run_walk2d(n_walks=4, radius=10.0)
+        with mock.patch.object(plot.plt, "show"):
+            plot.plot_walk2d(result)
+        text = "\n".join(t.get_text() for t in plt.gca().texts)
+        plt.close("all")
+        median = driver.escape_statistics(result).median
+        self.assertIn(f"median escape steps = {median:.1f}", text)
+        self.assertIn(f"median {median:.1f}", "\n".join(cli.walk2d_summary(result)))
+
+    def test_walk_plot_leaves_room_for_long_rays(self):
+        with isolated_rng(5):
+            result = driver.run_walk2d(n_walks=3, radius=5.0, ray_length_factor=2.0)
+        with mock.patch.object(plot.plt, "show"):
+            plot.plot_walk2d(result)
+        low, high = plt.gca().get_xlim()
+        plt.close("all")
+        for walk in result.walks:
+            (_, _), (rx, ry) = walk.ray
+            self.assertLess(abs(rx), high)
+            self.assertLess(abs(ry), high)
+            self.assertGreater(high, 1.8 * result.radius)
+
+
+class EndToEndSubprocessTests(unittest.TestCase):
+    """Both displays run as a student would run them, with a non-interactive backend."""
+
+    def run_main(self, *arguments):
+        environment = {**os.environ, "MPLBACKEND": "Agg"}
+        return subprocess.run(
+            [sys.executable, "main.py", *arguments], cwd=MODULE_DIR, env=environment,
+            capture_output=True, text=True, timeout=120,
+        )
+
+    def test_scaled_distance_display_runs(self):
+        completed = self.run_main("--max_steps", "64", "--n_trials", "20", "--seed", "1")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("display: scaled_distance", completed.stdout)
+        self.assertIn("fitted log-log slope:", completed.stdout)
+        in_process = run_cli(("--max_steps", "64", "--n_trials", "20", "--seed", "1")).stdout
+        self.assertEqual(completed.stdout, in_process)
+
+    def test_walk2d_display_runs(self):
+        completed = self.run_main("--display", "walk2d", "--radius", "10", "--seed", "1")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("escaped walks: 4 of 4", completed.stdout)
+
+    def test_rejected_input_exits_with_a_message(self):
+        completed = self.run_main("--max_steps", "1")
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("max_steps must be at least 2", completed.stderr)
+
+
+class HelpOriginalCompatibilityTests(unittest.TestCase):
+    """The Reference Guide version is optional; these tests never require it."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.original = HELP_FILE.with_name("Random2-original.html")
+        if not cls.original.is_file():
+            raise unittest.SkipTest("Random2-original.html is not present in this layout")
+        cls.text = cls.original.read_text(encoding="utf-8")
+
+    def test_original_stamp_matches_the_program(self):
+        match = re.search(
+            r'<p id="version_build"[^>]*>\s*Version\s+([^&<\s]+)(?:&nbsp;)+Build\s+([0-9a-f]{12})',
+            self.text,
+        )
+        self.assertIsNotNone(match)
+        self.assertEqual(match.groups(), (physics.MODEL_VERSION, physics.BUILD_ID))
+
+    def test_original_parameter_defaults_still_match_the_parser(self):
+        parser = _HelpSemanticParser()
+        parser.feed(self.text)
+        rows = {r[0]: r[1] for r in parser.table_rows if len(r) >= 2 and r[0].startswith("--")}
+        for action in cli.build_parser()._actions:
+            name = action.option_strings[0] if action.option_strings else None
+            if name in rows:
+                expected = "omitted" if action.default is None else str(action.default)
+                self.assertEqual(rows[name], expected)
+
+    def test_original_commands_still_run(self):
+        commands = []
+        for line in html_module.unescape(re.sub(r"<[^>]+>", "\n", self.text)).splitlines():
+            line = " ".join(line.replace("\\", " ").split())
+            if line.startswith("python main.py"):
+                commands.append(line)
+        self.assertGreaterEqual(len(commands), 10)
+        for command in dict.fromkeys(commands):
+            arguments = command_arguments(command)
+            if "--n_walks" in arguments and int(arguments[arguments.index("--n_walks") + 1]) > 10:
+                arguments = (*arguments, "--radius", "10")  # keep the check quick
+            with self.subTest(command=command):
+                self.assertIn(run_cli(arguments).exit_code, (None, 0))
 
 
 if __name__ == "__main__":

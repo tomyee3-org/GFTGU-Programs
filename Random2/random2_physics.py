@@ -19,20 +19,23 @@ Two step generators are provided for two different purposes:
         mean_free_path. This makes the displayed walk isotropic in the
         plane.
 
-The module also contains the default star-radius relation and the
+The module also contains the default star-radius relation, the
 geometry for locating the exact point at which a walk segment crosses
-a circular boundary.
+a circular boundary, the large-N prediction for the scaled distance,
+the least-squares log-log slope, seeding of the random-number
+generator, and the input-validation helpers shared by the driver and
+plotting modules.
 """
 
 import math
 import random
 from numbers import Real
-from typing import Literal, Optional, Tuple
+from typing import Literal, Optional, Sequence, Tuple
 
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.2.0"
+MODEL_VERSION = "1.3.0"
 BUILD_ID_COVERS = (
     "random2_physics.py",
     "random2_driver.py",
@@ -73,7 +76,14 @@ ComponentStep3D = Tuple[float, float, float]
 StepDistribution = Literal["uniform", "gaussian"]
 
 
-def _require_positive_finite_number(name: str, value: Real) -> float:
+def require_positive_int(name: str, value: int) -> int:
+    """Validate and return a positive integer (bool is rejected)."""
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer.")
+    return value
+
+
+def require_positive_finite_number(name: str, value: Real) -> float:
     """Validate and return a positive finite real number."""
     if isinstance(value, bool) or not isinstance(value, Real):
         raise ValueError(f"{name} must be a positive finite number.")
@@ -83,7 +93,17 @@ def _require_positive_finite_number(name: str, value: Real) -> float:
     return numeric
 
 
-def _require_finite_point(name: str, value: Point) -> Point:
+def require_nonnegative_finite_number(name: str, value: Real) -> float:
+    """Validate and return a nonnegative finite real number."""
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise ValueError(f"{name} must be a nonnegative finite number.")
+    numeric = float(value)
+    if not math.isfinite(numeric) or numeric < 0.0:
+        raise ValueError(f"{name} must be a nonnegative finite number.")
+    return numeric
+
+
+def require_finite_point(name: str, value: Point) -> Point:
     """Validate and return a two-dimensional point with finite coordinates."""
     try:
         x, y = value
@@ -102,6 +122,69 @@ def _require_finite_point(name: str, value: Point) -> Point:
     if not all(math.isfinite(coordinate) for coordinate in point):
         raise ValueError(f"{name} must contain exactly two finite numbers.")
     return point
+
+
+# Names used inside this module before the helpers became public.
+_require_positive_finite_number = require_positive_finite_number
+_require_finite_point = require_finite_point
+
+
+def seed_generator(seed: Optional[int]) -> None:
+    """Seed the random-number generator used by both step generators.
+
+    ``None`` leaves the generator as it is, so every run differs.  A
+    nonnegative integer makes a run repeatable on the same Python version.
+    """
+    if seed is None:
+        return
+    if not isinstance(seed, int) or isinstance(seed, bool) or seed < 0:
+        raise ValueError("seed must be a nonnegative integer.")
+    random.seed(seed)
+
+
+# Mean length of a step whose components are independent and uniform on
+# [-1, 1]: the mean distance from the centre of the cube [-1, 1]^3 to a
+# uniformly chosen point in it, sqrt(3)/4 + ln(2 + sqrt(3))/2 - pi/24.
+UNIFORM_MEAN_STEP_LENGTH = (
+    math.sqrt(3.0) / 4.0 + math.log(2.0 + math.sqrt(3.0)) / 2.0 - math.pi / 24.0
+)
+
+
+def large_n_scaled_distance_ratio(
+    distribution: "StepDistribution" = "uniform",
+) -> float:
+    """Return the large-N limit of <scaled distance> / sqrt(N).
+
+    For N independent steps whose components have variance s^2, the end
+    point is nearly Gaussian with variance N s^2 per component, so the mean
+    net distance is s*sqrt(8N/pi).  Dividing by the mean step length gives
+
+        uniform:   sqrt(8/(3 pi)) / UNIFORM_MEAN_STEP_LENGTH  (s^2 = 1/3)
+        gaussian:  sqrt(8/pi) / sqrt(8/pi) = 1                (s^2 = 1)
+    """
+    if distribution == "uniform":
+        return math.sqrt(8.0 / (3.0 * math.pi)) / UNIFORM_MEAN_STEP_LENGTH
+    if distribution == "gaussian":
+        return 1.0
+    raise ValueError('distribution must be "uniform" or "gaussian".')
+
+
+def fitted_loglog_slope(xs: Sequence[float], ys: Sequence[float]) -> float:
+    """Least-squares slope of log(y) against log(x); needs two distinct x."""
+    if len(xs) != len(ys) or len(xs) < 2:
+        raise ValueError("the slope needs at least two (x, y) pairs.")
+    for value in (*xs, *ys):
+        require_positive_finite_number("log-log value", value)
+    log_x = [math.log(float(x)) for x in xs]
+    log_y = [math.log(float(y)) for y in ys]
+    mean_x = sum(log_x) / len(log_x)
+    mean_y = sum(log_y) / len(log_y)
+    spread = sum((x - mean_x) ** 2 for x in log_x)
+    if spread == 0.0:
+        raise ValueError("the slope needs at least two distinct x values.")
+    return sum(
+        (x - mean_x) * (y - mean_y) for x, y in zip(log_x, log_y)
+    ) / spread
 
 
 def generate_component_step(
@@ -166,10 +249,7 @@ def default_radius(
     N steps is mean_free_path * sqrt(N). The radius_factor therefore
     chooses a multiple of that characteristic diffusion distance.
     """
-    if not isinstance(reference_steps, int) or isinstance(reference_steps, bool):
-        raise ValueError("reference_steps must be a positive integer.")
-    if reference_steps <= 0:
-        raise ValueError("reference_steps must be a positive integer.")
+    require_positive_int("reference_steps", reference_steps)
 
     mean_free_path = _require_positive_finite_number(
         "mean_free_path", mean_free_path

@@ -13,12 +13,15 @@ Driver routines for Random2.
     Draw a small number of fixed-step, isotropic 2D walks from the
     center of a circular schematic star. Each walk continues until it
     crosses the boundary or reaches a generous safety cap.
+
+The result types are frozen dataclasses holding tuples, so a result
+cannot be changed after it is returned to main.py or the plotter.
 """
 
-from dataclasses import dataclass, field
-from numbers import Real
+from dataclasses import dataclass
 from typing import List, Optional, Tuple
 import math
+import statistics
 
 import random2_physics as phys
 from random2_physics import (
@@ -29,30 +32,10 @@ from random2_physics import (
     generate_component_step,
     generate_isotropic_step,
     point_at,
+    require_nonnegative_finite_number,
+    require_positive_finite_number,
+    require_positive_int,
 )
-
-
-def _require_positive_int(name: str, value: int) -> None:
-    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-        raise ValueError(f"{name} must be a positive integer.")
-
-
-def _require_positive_finite_number(name: str, value: Real) -> float:
-    if isinstance(value, bool) or not isinstance(value, Real):
-        raise ValueError(f"{name} must be a positive finite number.")
-    numeric = float(value)
-    if not math.isfinite(numeric) or numeric <= 0.0:
-        raise ValueError(f"{name} must be a positive finite number.")
-    return numeric
-
-
-def _require_nonnegative_finite_number(name: str, value: Real) -> float:
-    if isinstance(value, bool) or not isinstance(value, Real):
-        raise ValueError(f"{name} must be a nonnegative finite number.")
-    numeric = float(value)
-    if not math.isfinite(numeric) or numeric < 0.0:
-        raise ValueError(f"{name} must be a nonnegative finite number.")
-    return numeric
 
 
 # ---------------------------------------------------------------------
@@ -64,7 +47,7 @@ def _perform_single_walk_3d(
     step_distribution: StepDistribution = "uniform",
 ) -> Tuple[float, float]:
     """Return (net_distance, mean_step_length) for one 3D walk."""
-    _require_positive_int("n_steps", n_steps)
+    require_positive_int("n_steps", n_steps)
 
     x = 0.0
     y = 0.0
@@ -83,15 +66,20 @@ def _perform_single_walk_3d(
     return net_distance, mean_step_length
 
 
-def _perform_trials_3d(
+def _perform_trials_3d_with_error(
     n_steps: int,
     n_trials: int,
     step_distribution: StepDistribution = "uniform",
-) -> float:
-    """Average the scaled distance over n_trials independent walks."""
-    _require_positive_int("n_trials", n_trials)
+) -> Tuple[float, Optional[float]]:
+    """Return (mean scaled distance, standard error of that mean).
+
+    The standard error is the sample standard deviation of the trial values
+    divided by sqrt(n_trials); it is None when n_trials is 1.
+    """
+    require_positive_int("n_trials", n_trials)
 
     total = 0.0
+    total_squares = 0.0
     for _ in range(n_trials):
         net_distance, mean_step = _perform_single_walk_3d(
             n_steps, step_distribution
@@ -100,8 +88,77 @@ def _perform_trials_3d(
             raise RuntimeError(
                 "generated walk has a nonpositive or non-finite mean step length."
             )
-        total += net_distance / mean_step
-    return total / n_trials
+        scaled = net_distance / mean_step
+        total += scaled
+        total_squares += scaled * scaled
+    mean = total / n_trials
+    if n_trials == 1:
+        return mean, None
+    variance = max(0.0, (total_squares - n_trials * mean * mean) / (n_trials - 1))
+    return mean, math.sqrt(variance / n_trials)
+
+
+def _perform_trials_3d(
+    n_steps: int,
+    n_trials: int,
+    step_distribution: StepDistribution = "uniform",
+) -> float:
+    """Average the scaled distance over n_trials independent walks."""
+    return _perform_trials_3d_with_error(n_steps, n_trials, step_distribution)[0]
+
+
+@dataclass(frozen=True)
+class ScaledDistanceResult:
+    """Scaled-distance statistics, ordered from the shortest to the longest walk."""
+    model_version: str
+    build_id: str
+    step_distribution: str
+    n_trials: int
+    lengths: Tuple[float, ...]
+    averages: Tuple[float, ...]
+    standard_errors: Tuple[Optional[float], ...]
+
+
+def run_scaled_distance_statistics(
+    max_steps: int,
+    n_trials: int,
+    step_distribution: StepDistribution = "uniform",
+) -> ScaledDistanceResult:
+    """
+    Run scaled-distance experiments at max_steps, max_steps//2, ...,
+    stopping before a one-step walk, and return the averages together
+    with their standard errors, ordered from smallest to largest step count.
+    """
+    require_positive_int("max_steps", max_steps)
+    require_positive_int("n_trials", n_trials)
+    if max_steps < 2:
+        raise ValueError("max_steps must be at least 2.")
+    if step_distribution not in ("uniform", "gaussian"):
+        raise ValueError(
+            'step_distribution must be "uniform" or "gaussian".'
+        )
+
+    rows = []
+    n_steps = max_steps
+    while n_steps > 1:
+        mean, error = _perform_trials_3d_with_error(
+            n_steps,
+            n_trials,
+            step_distribution,
+        )
+        rows.append((float(n_steps), mean, error))
+        n_steps //= 2
+
+    rows.reverse()
+    return ScaledDistanceResult(
+        model_version=phys.MODEL_VERSION,
+        build_id=phys.BUILD_ID,
+        step_distribution=step_distribution,
+        n_trials=n_trials,
+        lengths=tuple(row[0] for row in rows),
+        averages=tuple(row[1] for row in rows),
+        standard_errors=tuple(row[2] for row in rows),
+    )
 
 
 def run_scaled_distance_experiment(
@@ -119,49 +176,23 @@ def run_scaled_distance_experiment(
         Step counts and the corresponding average scaled distances,
         ordered from smallest to largest step count.
     """
-    _require_positive_int("max_steps", max_steps)
-    _require_positive_int("n_trials", n_trials)
-    if max_steps < 2:
-        raise ValueError("max_steps must be at least 2.")
-    if step_distribution not in ("uniform", "gaussian"):
-        raise ValueError(
-            'step_distribution must be "uniform" or "gaussian".'
-        )
-
-    pairs = []
-    n_steps = max_steps
-    while n_steps > 1:
-        pairs.append(
-            (
-                float(n_steps),
-                _perform_trials_3d(
-                    n_steps,
-                    n_trials,
-                    step_distribution,
-                ),
-            )
-        )
-        n_steps //= 2
-
-    pairs.reverse()
-    lengths = [p[0] for p in pairs]
-    avg_dist = [p[1] for p in pairs]
-    return lengths, avg_dist
+    result = run_scaled_distance_statistics(max_steps, n_trials, step_distribution)
+    return list(result.lengths), list(result.averages)
 
 
 # ---------------------------------------------------------------------
 # "walk2d" mode
 # ---------------------------------------------------------------------
 
-@dataclass
+@dataclass(frozen=True)
 class WalkPath:
-    points: List[Point]
+    points: Tuple[Point, ...]
     escaped: bool
     steps_taken: int
     ray: Optional[Tuple[Point, Point]] = None
 
 
-@dataclass
+@dataclass(frozen=True)
 class Walk2DResult:
     model_version: str
     build_id: str
@@ -169,7 +200,39 @@ class Walk2DResult:
     mean_free_path: float
     reference_steps: int
     step_cap: int
-    walks: List[WalkPath] = field(default_factory=list)
+    walks: Tuple[WalkPath, ...] = ()
+
+
+@dataclass(frozen=True)
+class EscapeStatistics:
+    """Summary of the escape step counts of the walks that escaped."""
+    n_walks: int
+    n_escaped: int
+    mean: Optional[float]
+    standard_error: Optional[float]
+    median: Optional[float]
+    minimum: Optional[int]
+    maximum: Optional[int]
+
+
+def escape_statistics(result: Walk2DResult) -> EscapeStatistics:
+    """Return escape-step statistics; walks stopped by step_cap are excluded."""
+    steps = [walk.steps_taken for walk in result.walks if walk.escaped]
+    if not steps:
+        return EscapeStatistics(len(result.walks), 0, None, None, None, None, None)
+    mean = statistics.fmean(steps)
+    error = (
+        statistics.stdev(steps) / math.sqrt(len(steps)) if len(steps) > 1 else None
+    )
+    return EscapeStatistics(
+        n_walks=len(result.walks),
+        n_escaped=len(steps),
+        mean=mean,
+        standard_error=error,
+        median=float(statistics.median(steps)),
+        minimum=min(steps),
+        maximum=max(steps),
+    )
 
 
 def run_walk2d(
@@ -193,17 +256,17 @@ def run_walk2d(
     exact line-circle intersection and a short straight ray is recorded
     to indicate that the toy model has stopped scattering the photon.
     """
-    _require_positive_int("reference_steps", reference_steps)
-    _require_positive_int("n_walks", n_walks)
-    _require_positive_int("step_cap", step_cap)
+    require_positive_int("reference_steps", reference_steps)
+    require_positive_int("n_walks", n_walks)
+    require_positive_int("step_cap", step_cap)
 
-    mean_free_path = _require_positive_finite_number(
+    mean_free_path = require_positive_finite_number(
         "mean_free_path", mean_free_path
     )
-    radius_factor = _require_positive_finite_number(
+    radius_factor = require_positive_finite_number(
         "radius_factor", radius_factor
     )
-    ray_length_factor = _require_nonnegative_finite_number(
+    ray_length_factor = require_nonnegative_finite_number(
         "ray_length_factor", ray_length_factor
     )
 
@@ -214,7 +277,7 @@ def run_walk2d(
             radius_factor,
         )
     else:
-        radius = _require_positive_finite_number("radius", radius)
+        radius = require_positive_finite_number("radius", radius)
 
     walks: List[WalkPath] = []
 
@@ -262,7 +325,7 @@ def run_walk2d(
 
         walks.append(
             WalkPath(
-                points=points,
+                points=tuple(points),
                 escaped=escaped,
                 steps_taken=steps_taken,
                 ray=ray,
@@ -276,5 +339,5 @@ def run_walk2d(
         mean_free_path=mean_free_path,
         reference_steps=reference_steps,
         step_cap=step_cap,
-        walks=walks,
+        walks=tuple(walks),
     )
