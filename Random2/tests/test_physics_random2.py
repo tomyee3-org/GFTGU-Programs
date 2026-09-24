@@ -8,6 +8,7 @@ test file sits beside the four program modules.
 from __future__ import annotations
 
 import ast
+import base64
 import contextlib
 import hashlib
 import html as html_module
@@ -1784,6 +1785,143 @@ class Audit22Tests(unittest.TestCase):
         self.assertTrue(run.stdout.startswith("Random2 "))
         self.assertEqual(run.stderr, "")
         self.assertIn("Random2 input/model error", str(run.exit_code))
+
+
+RELEASE_NOTES_PATH = HELP_FILE.parent / "Random2-ReleaseNotes.html"
+SAMPLE_OUTPUTS_PATH = HELP_FILE.parent / "SampleOutputs" / "Random2-SampleOutputs_Guide.html"
+
+
+@unittest.skipUnless(
+    RELEASE_NOTES_PATH.is_file() and SAMPLE_OUTPUTS_PATH.is_file(),
+    "the Release Notes and Sample Outputs Guide live in the documentation repository",
+)
+class DocumentationSetTests(unittest.TestCase):
+    """The two companion documents follow the release-document instructions and match the program."""
+
+    RELEASE_NOTES_HEADINGS = [
+        "Release Status", "Open Bugs", "Major Improvements in This Release",
+        "Test Suite Growth", "Known Limitations", "Known Minor Maintenance Items",
+        "Version Identification",
+    ]
+
+    @classmethod
+    def setUpClass(cls):
+        cls.notes = RELEASE_NOTES_PATH.read_text(encoding="utf-8")
+        cls.samples = SAMPLE_OUTPUTS_PATH.read_text(encoding="utf-8")
+
+    def test_release_notes_header_matches_version_build_and_title(self):
+        self.assertIn(f"<title>Random2 {physics.MODEL_VERSION} Release Notes</title>", self.notes)
+        header = re.search(
+            r"<b>Version:</b> (\S+)<br>\s*<b>Build:</b> ([0-9a-f]{12})<br>\s*<b>Date:</b> \d{4}-\d{2}-\d{2}",
+            self.notes,
+        )
+        self.assertIsNotNone(header)
+        self.assertEqual(header.groups(), (physics.MODEL_VERSION, physics.BUILD_ID))
+        identification = self.notes.split("<h2>Version Identification</h2>", 1)[1]
+        self.assertIn(physics.MODEL_VERSION, identification)
+        self.assertIn(physics.BUILD_ID, identification)
+
+    def test_release_notes_have_the_required_sections_in_order_and_only_plain_html(self):
+        self.assertEqual(re.findall(r"<h2>(.*?)</h2>", self.notes), self.RELEASE_NOTES_HEADINGS)
+        for forbidden in ("<table", "<script", "<style", "style=", "<img"):
+            self.assertNotIn(forbidden, self.notes)
+        tags = set(re.findall(r"</?([a-zA-Z0-9]+)", self.notes))
+        allowed = {"html", "head", "meta", "title", "body", "h1", "h2", "p", "ul", "ol", "li",
+                   "b", "i", "code", "sub", "sup", "br"}
+        self.assertLessEqual(tags, allowed)
+
+    def test_open_bugs_are_identified_and_state_a_reproduction(self):
+        section = re.search(r"<h2>Open Bugs</h2>(.*?)<h2>", self.notes, re.S).group(1)
+        entries = re.findall(r"<li>(.*?)</li>", section, re.S)
+        for entry in entries:
+            with self.subTest(entry=entry[:40]):
+                self.assertRegex(entry, r"<b>OB-\d+</b> \(P[123]; ")
+                self.assertIn("Reproduction:", entry)
+                self.assertIn("Observed:", entry)
+                self.assertIn("Expected", entry)
+        if not entries:
+            self.assertIn("None", section)
+
+    def test_open_bug_about_the_original_eq6_is_listed_only_while_it_is_open(self):
+        original = HELP_FILE.with_name("Random2-original.html")
+        if not original.is_file():
+            self.skipTest("Random2-original.html is not present in this layout")
+        still_open = "the measured trend should approach the theoretical value" in original.read_text(encoding="utf-8")
+        listed = "<b>OB-1</b>" in self.notes and "Eq. (6)" in self.notes
+        self.assertEqual(still_open, listed)
+        run = run_cli(("--max_steps", "2", "--n_trials", "200000", *SEED)).stdout
+        self.assertIn("0.9789", run)
+        self.assertIn("0.9789", self.notes)
+
+    def test_release_notes_test_growth_ends_at_the_current_suite_size(self):
+        growth = re.search(r"<h2>Test Suite Growth</h2>(.*?)<h2>", self.notes, re.S).group(1)
+        counts = re.findall(r"\b\d\.\d\.\d: (\d+)", growth)
+        ran = unittest.defaultTestLoader.discover(str(Path(__file__).resolve().parent)).countTestCases()
+        self.assertEqual(int(counts[-1]), ran)
+        self.assertIn(f"{physics.MODEL_VERSION}: {ran}", growth)
+
+    def sample_sections(self):
+        return {
+            int(number): body
+            for number, body in re.findall(r'<section id="beat(\d)">(.*?)</section>', self.samples, re.S)
+        }
+
+    def test_sample_outputs_header_and_provenance_match_version_and_build(self):
+        self.assertRegex(
+            self.samples,
+            rf"Version {re.escape(physics.MODEL_VERSION)} &nbsp;\|&nbsp; Build {physics.BUILD_ID} &nbsp;\|&nbsp; Updated \d{{1,2}} \w+ \d{{4}}",
+        )
+        provenance = re.search(r'<section id="provenance">(.*?)</section>', self.samples, re.S).group(1)
+        self.assertIn(f"Version {physics.MODEL_VERSION}", provenance)
+        self.assertIn(f"build {physics.BUILD_ID}", provenance)
+        self.assertIn("Random2-claude.html", self.samples)
+        self.assertNotIn("Random2.html", self.samples)
+
+    def test_sample_outputs_have_one_figure_section_per_beat_in_order(self):
+        self.assertEqual([int(n) for n in re.findall(r'<section id="beat(\d)">', self.samples)], list(BEAT_NUMBERS))
+        self.assertEqual(re.findall(r'<li><a href="#(beat\d)">', self.samples), [f"beat{n}" for n in BEAT_NUMBERS])
+        for forbidden in ("<table", "<script"):
+            self.assertNotIn(forbidden, self.samples)
+        for number, body in self.sample_sections().items():
+            with self.subTest(beat=number):
+                self.assertEqual(len(re.findall(r"<pre><code>", body)), 1)
+                images = re.findall(r'<img src="data:image/png;base64,([A-Za-z0-9+/=]+)"', body)
+                self.assertEqual(len(images), 1)
+                self.assertTrue(base64.b64decode(images[0]).startswith(b"\x89PNG"))
+                self.assertEqual(len(re.findall(r'<p class="caption">', body)), 1)
+                shows = re.search(r"<h3>What it shows</h3>\s*<ul>(.*?)</ul>", body, re.S).group(1)
+                heads = re.search(r"<h3>Headline values</h3>\s*<ul>(.*?)</ul>", body, re.S).group(1)
+                self.assertIn(shows.count("<li>"), (3, 4))
+                self.assertIn(heads.count("<li>"), (3, 4, 5))
+
+    def test_each_figure_command_is_a_seeded_command_of_its_beat_and_no_two_beats_share_one(self):
+        commands = []
+        for number, body in self.sample_sections().items():
+            command = html_module.unescape(re.search(r"<pre><code>(.*?)</code></pre>", body, re.S).group(1))
+            with self.subTest(beat=number):
+                self.assertIn(command, documented_commands(section_html(HELP_HTML, f"beat{number}")))
+                self.assertTrue(is_seeded(command_arguments(command)))
+                self.assertIn(run_cli(command_arguments(command)).exit_code, (None, 0))
+            commands.append(command_arguments(command))
+        self.assertEqual(len(set(commands)), len(commands))
+
+    def test_numbers_quoted_in_the_sample_outputs_are_printed_by_the_program(self):
+        printed = "\n".join(
+            run_cli(command_arguments(c)).stdout
+            for c in dict.fromkeys(documented_commands(HELP_HTML))
+            if c not in REJECTED_COMMANDS and is_seeded(command_arguments(c))
+        )
+        for number, body in self.sample_sections().items():
+            text = html_text(re.sub(r"base64,[A-Za-z0-9+/=]+", "", body))
+            tokens = (set(HelpQuotedNumberTests.FOUR_DECIMALS.findall(text))
+                      | set(HelpQuotedNumberTests.ONE_DECIMAL.findall(text))) - {"1.0"}
+            # 2000 is the default --reference_steps, an input the summary does not print.
+            whole = set(re.findall(r"(?<![\w.×])\d{2,6}(?![\w.])", text)) - {"2000"}
+            with self.subTest(beat=number):
+                self.assertTrue(tokens)
+                self.assertEqual(sorted(t for t in tokens if t not in printed), [])
+                for count in sorted(whole):
+                    self.assertRegex(printed, rf"(?<![\d.]){count}(?![\d])", count)
 
 
 class HelpOriginalCompatibilityTests(unittest.TestCase):
