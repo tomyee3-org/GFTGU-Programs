@@ -129,6 +129,7 @@ def run_planck2(
     f_peak = f_last
     coord_peak = coord_last
 
+    x_previous = x
     dimensionless_area = 0.0
     physical_integral = 0.0
 
@@ -136,6 +137,13 @@ def run_planck2(
         # Preserve the requested right endpoint exactly.  The general formula
         # can round the final value slightly below or above x_max.
         x = domain.x_max if i == n_steps else domain.x_min + i * dx
+        if not x > x_previous:
+            raise ValueError(
+                "n_steps is too large for the x range: neighbouring grid "
+                "points are not distinct in floating point. Widen the range "
+                "or lower n_steps."
+            )
+        x_previous = x
         f = math.exp(_ln_shape_function_unchecked(x, p, domain))
         y = pref * f
         jac = coordinate_jacobian(quantity, x, T)

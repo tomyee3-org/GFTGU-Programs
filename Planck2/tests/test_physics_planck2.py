@@ -1889,6 +1889,71 @@ class Audit21Tests(unittest.TestCase):
             self.assertEqual(result.coord_values[3], phys.x_to_frequency(result.x_values[3], 5900.0))
 
 
+class Audit22Tests(unittest.TestCase):
+    """Switch false maxima, very large x, and collapsing grids."""
+
+    def test_a_switch_below_the_peak_can_create_a_false_maximum_far_from_the_peak(self):
+        run = run_cli(("--x_low", "4"))
+        step = (100.0 - 0.01) / 2000
+        self.assertTrue(4.0 <= peak_root(5) <= 20.0)  # true peak is in the exact branch
+        self.assertEqual(round(run.result.x_peak, 6), 3.959605)
+        self.assertGreater(abs(run.result.x_peak - peak_root(5)), 20 * step)
+        self.assertGreater(run.result.physical_integral / run.result.exact_physical_integral, 3.6)
+
+    def test_help_states_the_switched_sum_condition_and_documents_the_x_low_4_run(self):
+        beat6 = html_text(section_html(HELP_HTML, "beat6"))
+        beat7 = html_text(section_html(HELP_HTML, "beat7"))
+        self.assertIn("anywhere", beat6)
+        self.assertIn("python main.py --x_low 4", beat7)
+        self.assertIn("x = 3.959605", beat7)
+        self.assertIn("anywhere", html_text(section_html(HELP_HTML, "summary")))
+
+    def test_shape_function_is_finite_and_exact_beyond_the_expm1_overflow_point(self):
+        domain = phys.PlanckDomain(x_max=800.0, x_high=800.0)
+        for p in (3, 5):
+            for x in (600.0, 700.0, 705.0, 720.0, 750.0, 800.0):
+                with self.subTest(p=p, x=x):
+                    value = phys._ln_shape_function_unchecked(x, p, domain)
+                    self.assertTrue(math.isfinite(value))
+                    # exp(-x) is far below rounding, so ln f = p ln x - x.
+                    self.assertAlmostEqual(value, p * math.log(x) - x, delta=1e-9 * abs(value))
+
+    def test_run_with_a_high_threshold_matches_the_default_threshold_run(self):
+        high = driver.run_planck2(5900.0, "wavelength", 720, phys.PlanckDomain(x_max=720.0, x_high=720.0))
+        default = driver.run_planck2(5900.0, "wavelength", 720, phys.PlanckDomain(x_max=720.0))
+        self.assertEqual(len(high.y_values), 721)
+        self.assertAlmostEqual(high.y_values[-1] / 5.430699252086803e-287, 1.0, places=9)
+        for a, b in zip(high.y_values[-20:], default.y_values[-20:]):
+            self.assertLess(relative_error(a, b), 1e-9)
+
+    def test_ordinary_values_are_unchanged_by_the_large_x_form(self):
+        domain = phys.PlanckDomain()
+        for x in (0.05, 1.0, 10.0, 19.9, 20.0):
+            self.assertEqual(
+                phys._ln_shape_function_unchecked(x, 5, domain),
+                5 * math.log(x) - math.log(math.expm1(x)),
+            )
+
+    def test_a_collapsing_grid_is_rejected_with_advice(self):
+        high = math.nextafter(1.0, math.inf)
+        domain = phys.PlanckDomain(x_min=1.0, x_max=high, x_low=1.0, x_high=high)
+        with self.assertRaisesRegex(ValueError, "not distinct.*Widen the range or lower n_steps"):
+            driver.run_planck2(5900.0, "wavelength", 2000, domain)
+
+    def test_a_narrow_but_resolvable_grid_still_runs_with_distinct_points(self):
+        domain = phys.PlanckDomain(x_min=1.0, x_max=1.001, x_low=1.0, x_high=1.001)
+        result = driver.run_planck2(5900.0, "wavelength", 100, domain)
+        self.assertEqual(len(set(result.x_values)), 101)
+        self.assertTrue(all(b > a for a, b in zip(result.x_values, result.x_values[1:])))
+
+    def test_command_line_reports_a_collapsing_grid_as_a_model_error(self):
+        high = repr(math.nextafter(1.0, math.inf))
+        with self.assertRaises(SystemExit) as raised:
+            with mock.patch.object(plt, "show"), contextlib.redirect_stdout(io.StringIO()):
+                planck2_main.main(["--x_min", "1", "--x_max", high, "--x_low", "1", "--x_high", high])
+        self.assertIn("not distinct", str(raised.exception))
+
+
 class HelpOriginalCompatibilityTests(unittest.TestCase):
     """The Reference Guide version is optional; these tests never require it."""
 

@@ -26,7 +26,7 @@ import math
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.3.0"
+MODEL_VERSION = "1.4.0"
 BUILD_ID_COVERS = (
     "planck2_physics.py",
     "planck2_driver.py",
@@ -340,6 +340,10 @@ def _scaled_product(factors, label: str) -> float:
     return _require_positive_finite_result(result, label)
 
 
+# math.expm1 overflows a little above 709.78.
+_EXPM1_SAFE_LIMIT = 700.0
+
+
 def _ln_shape_function_unchecked(x: float, p: int, domain: PlanckDomain) -> float:
     """Internal branch evaluator after x, p, and domain have been validated."""
     if x > domain.x_high:
@@ -349,8 +353,13 @@ def _ln_shape_function_unchecked(x: float, p: int, domain: PlanckDomain) -> floa
         # exp(x)-1 ~= x, so ln(exp(x)-1) ~= ln(x).
         ln_denom = math.log(x)
     else:
-        # expm1 retains precision for small positive x.
-        ln_denom = math.log(math.expm1(x))
+        # expm1 retains precision for small positive x.  Beyond the point
+        # where expm1 itself overflows, use the identical algebraic form
+        # x + ln(1 - exp(-x)), which stays finite for every representable x.
+        if x > _EXPM1_SAFE_LIMIT:
+            ln_denom = x + math.log1p(-math.exp(-x))
+        else:
+            ln_denom = math.log(math.expm1(x))
 
     return p * math.log(x) - ln_denom
 
