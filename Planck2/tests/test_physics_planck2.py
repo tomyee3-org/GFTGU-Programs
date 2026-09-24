@@ -6,17 +6,22 @@ modules during upload.
 """
 
 import ast
+import contextlib
 from dataclasses import FrozenInstanceError, replace
 import hashlib
+import html as html_module
 from html.parser import HTMLParser
+import io
 import math
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+from typing import NamedTuple
 import unittest
 import warnings
 from unittest import mock
@@ -62,13 +67,13 @@ import planck2_plot as plotter  # noqa: E402
 
 
 def find_help_file(module_dir: Path) -> Path:
-    """Find Help in a flattened upload or the GFTGU-Documentation tree.
+    """Find the Beats Help in a flattened upload or the GFTGU-Documentation tree.
 
-    Documentation folders no longer use chapter-number prefixes, and the
-    Help files live under the sibling ``GFTGU-Documentation`` repository
-    rather than beside the program modules inside ``GFTGU-Programs``.
+    Only ``Planck2-claude.html`` is ever returned.  The Reference Guide
+    version, ``Planck2-original.html``, is optional and is never required by
+    the suite; the tests that mention it skip when it is absent.
     """
-    help_filename = "Planck2.html"
+    help_filename = "Planck2-claude.html"
     program_name = "Planck2"
     candidates = [module_dir / help_filename]
     for ancestor in (module_dir, *module_dir.parents):
@@ -81,7 +86,7 @@ def find_help_file(module_dir: Path) -> Path:
         if candidate.is_file():
             return candidate
     raise FileNotFoundError(
-        "Could not find Planck2.html beside the program or in "
+        f"Could not find {help_filename} beside the program or in "
         "GFTGU-Documentation/Planck2/."
     )
 
@@ -769,18 +774,22 @@ class TestDriverScientificResults(unittest.TestCase):
         self.assertEqual(result.x_peak, domain.x_min)
 
     def test_driver_does_not_rescan_completed_sample_arrays(self):
-        original_validator = driver._require_positive_finite_values
-        with mock.patch.object(
-            driver,
-            "_require_positive_finite_values",
-            wraps=original_validator,
-        ) as validator:
-            driver.run_planck2(5900.0, "frequency", 20)
-        self.assertEqual(validator.call_count, 23)
-        self.assertLessEqual(
-            max(len(call.args) - 1 for call in validator.call_args_list),
-            5,
-        )
+        """Behavioural check: validation work is bounded per sample and grows linearly.
+
+        The count of ``math.isfinite`` calls is used as a proxy for validation
+        work, so the test does not depend on which private helpers the driver
+        happens to call.  A full re-validation of the finished arrays would add
+        several checks per sample, and a quadratic rescan would break linearity.
+        """
+        def finite_checks(n_steps):
+            with mock.patch.object(math, "isfinite", wraps=math.isfinite) as spy:
+                driver.run_planck2(5900.0, "frequency", n_steps)
+            return spy.call_count
+
+        small, large = finite_checks(100), finite_checks(400)
+        self.assertLessEqual(small, 18 * 101 + 50)
+        self.assertLessEqual(large, 18 * 401 + 50)
+        self.assertLess(large / small, 5.0)
 
     def test_result_is_fully_immutable(self):
         result = self.results["frequency"]
@@ -1037,134 +1046,863 @@ class TestPlotting(unittest.TestCase):
         self.assertGreaterEqual(right, max(result.coord_values))
 
 
-class TestHelpFile(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.text = HELP_FILE.read_text(encoding="utf-8")
-        cls.parser = HelpStructureParser()
-        cls.parser.feed(cls.text)
+HELP_HTML = HELP_FILE.read_text(encoding="utf-8")
+BEAT_NUMBERS = tuple(range(0, 9))
+VOID_TAGS = {
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link",
+    "meta", "param", "source", "track", "wbr",
+}
+# Commands that the Help documents as being rejected by the program.
+REJECTED_COMMANDS = {"python main.py --x_max 10"}
 
-    def test_help_file_exists_and_is_html5_utf8(self):
-        self.assertTrue(HELP_FILE.is_file())
-        self.assertIn("<!DOCTYPE html>", self.text[:100])
-        self.assertRegex(self.text[:500], r'<meta charset="utf-8"\s*/?>')
 
-    def test_exactly_one_version_build_element(self):
-        self.assertEqual(self.parser.ids.count("version_build"), 1)
+def html_text(fragment: str) -> str:
+    """Visible text of an HTML fragment, with entities decoded and spaces collapsed."""
+    # Only real tags are removed: a "<" followed by a digit or space is text.
+    return " ".join(
+        html_module.unescape(re.sub(r"</?[A-Za-z!][^>]*>", "", fragment)).split()
+    )
 
-    def test_parameter_names_and_defaults_are_paired_in_rows(self):
-        rows = {
-            row[0]: row[1]
-            for section, row in self.parser.rows
-            if section == "parameters" and len(row) >= 2 and row[0] != "Parameter"
-        }
-        expected = {
-            "--T": "5900.0",
-            "--quantity": '"wavelength"',
-            "--n_steps": "2000",
-            "--x_min": "0.01",
-            "--x_max": "100.0",
-            "--x_low": "0.05",
-            "--x_high": "20.0",
-            "--corner": '"upper_right"',
-            "--y_frac_window": "0.003",
-        }
-        self.assertEqual({name: rows[name] for name in expected}, expected)
 
-    def test_quantity_mode_fields_are_paired_in_rows(self):
-        rows = {
-            row[0]: row
-            for section, row in self.parser.rows
-            if section == "quantities" and len(row) == 4 and row[0] != "Mode string"
-        }
-        expected = {
-            '"wavelength"': ("Spectral radiance", "x^5", "Wavelength (m)"),
-            '"frequency"': ("Spectral radiance", "x^3", "Frequency (Hz)"),
-            '"energy_density"': ("Spectral energy density", "x^3", "Frequency (Hz)"),
-        }
-        expected_units = {
-            '"wavelength"': "W m⁻³ sr⁻¹",
-            '"frequency"': "W m⁻² sr⁻¹ Hz⁻¹",
-            '"energy_density"': "J m⁻³ Hz⁻¹",
-        }
-        self.assertEqual(set(rows), set(expected))
-        for mode, (quantity_name, shape, coordinate) in expected.items():
-            with self.subTest(mode=mode):
-                row = rows[mode]
-                self.assertIn(quantity_name, row[1])
-                self.assertIn(expected_units[mode], row[1])
-                self.assertIn(shape, row[2])
-                self.assertEqual(row[3], coordinate)
+def section_html(html: str, section_id: str) -> str:
+    match = re.search(
+        rf'<section id="{re.escape(section_id)}">(.*?)</section>', html, re.DOTALL
+    )
+    if match is None:
+        raise AssertionError(f"section {section_id!r} not found in the Help file")
+    return match.group(1)
 
-    def test_help_distinguishes_dimensionless_and_physical_integrals(self):
-        self.assertIn("distinct from", self.text)
-        self.assertIn("coordinate Jacobian", self.text)
-        self.assertIn(r"\frac{\sigma T^4}{\pi}", self.text)
-        self.assertIn(r"\frac{4\sigma}{c}T^4", self.text)
-        normalized = " ".join(self.text.split())
-        self.assertIn(r"x=\frac{hc}{\lambda kT}=\frac{h\nu}{kT}", normalized)
-        self.assertIn(r"\int_0^\infty\frac{x^3}{e^x-1}\,dx=\frac{\pi^4}{15}", normalized)
-        self.assertIn(r"\int_0^\infty B_\lambda\,d\lambda", normalized)
 
-    def test_help_documents_validation_contract(self):
-        self.assertIn("1–1,000,000", self.text)
-        self.assertIn("representable positive step", self.text)
-        self.assertIn("finite range 0–1", self.text)
-        self.assertIn("representable floating-point range", self.text)
-        self.assertIn(
-            "relative error of the physical integral is less than ",
-            self.text,
+def documented_commands(fragment: str) -> list:
+    """Every ``python main.py ...`` command shown in a <pre> block."""
+    commands = []
+    for block in re.findall(r"<pre[^>]*>(.*?)</pre>", fragment, re.DOTALL):
+        text = html_module.unescape(re.sub(r"<[^>]+>", "", block)).replace("\\\n", " ")
+        for line in text.splitlines():
+            line = " ".join(line.split())
+            if line.startswith("python main.py"):
+                commands.append(line)
+    return commands
+
+
+def command_arguments(command: str) -> tuple:
+    return tuple(shlex.split(command)[2:])
+
+
+class CliRun(NamedTuple):
+    stdout: str
+    stderr: str
+    exit_code: object
+    result: object
+    annotation: str
+
+
+_CLI_CACHE = {}
+
+
+def run_cli(arguments=()) -> CliRun:
+    """Run ``main.main()`` in-process, plotting on the Agg backend, caching each command."""
+    key = tuple(arguments)
+    if key in _CLI_CACHE:
+        return _CLI_CACHE[key]
+    captured = {}
+    real_run = planck2_main.run_planck2
+
+    def capturing_run(*args, **kwargs):
+        captured["result"] = real_run(*args, **kwargs)
+        return captured["result"]
+
+    out, err = io.StringIO(), io.StringIO()
+    exit_code = None
+    with (
+        mock.patch.object(planck2_main, "run_planck2", new=capturing_run),
+        mock.patch.object(plt, "show"),
+        contextlib.redirect_stdout(out),
+        contextlib.redirect_stderr(err),
+    ):
+        try:
+            planck2_main.main(list(key))
+        except SystemExit as exc:
+            exit_code = exc.code
+    annotation = ""
+    if plt.get_fignums():
+        annotation = "\n".join(text.get_text() for text in plt.gca().texts)
+    plt.close("all")
+    run = CliRun(out.getvalue(), err.getvalue(), exit_code, captured.get("result"), annotation)
+    _CLI_CACHE[key] = run
+    return run
+
+
+def printed_by(arguments) -> str:
+    """Everything a command shows a student: the console summary and the plot annotation."""
+    run = run_cli(arguments)
+    return run.stdout + "\n" + run.annotation
+
+
+def trapezoid_simpson(function, lower, upper, intervals=20000):
+    """Composite Simpson rule, used only to check the Help's hand-derived numbers."""
+    if intervals % 2:
+        intervals += 1
+    step = (upper - lower) / intervals
+    total = function(lower) + function(upper)
+    for index in range(1, intervals):
+        total += (4 if index % 2 else 2) * function(lower + index * step)
+    return total * step / 3.0
+
+
+def shape(x, p):
+    return x**p / math.expm1(x)
+
+
+def peak_root(p):
+    low, high = 1.0, 10.0
+    for _ in range(200):
+        mid = 0.5 * (low + high)
+        if mid - p * (1.0 - math.exp(-mid)) < 0.0:
+            low = mid
+        else:
+            high = mid
+    return 0.5 * (low + high)
+
+
+class HelpStructure(HTMLParser):
+    """Ids, links and tag balance of a Help page."""
+
+    def __init__(self, html: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self.ids = []
+        self.hrefs = []
+        self.sidebar_hrefs = []
+        self.section_ids = []
+        self.scripts = []
+        self.errors = []
+        self._stack = []
+        self._in_nav = False
+        self.feed(html)
+        self.close()
+        if self._stack:
+            self.errors.append(f"unclosed tags: {self._stack}")
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if "id" in attributes:
+            self.ids.append(attributes["id"] or "")
+        if tag == "section" and attributes.get("id"):
+            self.section_ids.append(attributes["id"])
+        if tag == "script" and attributes.get("src"):
+            self.scripts.append(attributes["src"])
+        if tag == "nav":
+            self._in_nav = True
+        href = attributes.get("href")
+        if tag == "a" and href:
+            self.hrefs.append(href)
+            if self._in_nav and href.startswith("#"):
+                self.sidebar_hrefs.append(href[1:])
+        if tag not in VOID_TAGS:
+            self._stack.append(tag)
+
+    def handle_endtag(self, tag):
+        if tag == "nav":
+            self._in_nav = False
+        if tag in VOID_TAGS:
+            return
+        if not self._stack or self._stack[-1] != tag:
+            self.errors.append(f"unexpected </{tag}> with open {self._stack[-3:]}")
+            if tag in self._stack:
+                while self._stack and self._stack.pop() != tag:
+                    pass
+            return
+        self._stack.pop()
+
+
+STRUCTURE = HelpStructure(HELP_HTML)
+
+
+class HelpStructureTests(unittest.TestCase):
+    def test_help_file_is_html5_utf8_with_one_version_build(self):
+        self.assertIn("<!DOCTYPE html>", HELP_HTML[:100])
+        self.assertRegex(HELP_HTML[:500], r'<meta charset="utf-8"\s*/?>')
+        self.assertEqual(STRUCTURE.ids.count("version_build"), 1)
+
+    def test_help_file_is_the_beats_version_and_not_the_original(self):
+        self.assertEqual(HELP_FILE.name, "Planck2-claude.html")
+
+    def test_tags_are_balanced_and_ids_are_unique(self):
+        self.assertEqual(STRUCTURE.errors, [])
+        duplicates = sorted({i for i in STRUCTURE.ids if STRUCTURE.ids.count(i) > 1})
+        self.assertEqual(duplicates, [])
+
+    def test_every_internal_link_and_sidebar_entry_resolves(self):
+        targets = set(STRUCTURE.ids)
+        internal = [h[1:] for h in STRUCTURE.hrefs if h.startswith("#")]
+        self.assertGreater(len(internal), 20)
+        for target in internal:
+            with self.subTest(target=target):
+                self.assertIn(target, targets)
+        for target in STRUCTURE.sidebar_hrefs:
+            with self.subTest(sidebar=target):
+                self.assertIn(target, STRUCTURE.section_ids)
+
+    def test_page_has_the_beats_layout_in_order(self):
+        expected = (
+            ["overview", "beats"]
+            + [f"beat{n}" for n in BEAT_NUMBERS]
+            + ["equations", "algorithm", "modules", "quickstart", "parameters",
+               "quantities", "summary", "experiments", "related", "license"]
         )
-        self.assertIn(r"\(10^{-6}\)", self.text)
+        self.assertEqual(STRUCTURE.section_ids, expected)
+        self.assertEqual(STRUCTURE.sidebar_hrefs, expected)
 
-    def test_exercise_identifiers_are_unique_and_sequential(self):
-        numbers = re.findall(r'<div class="ec-num">EXP-(\d+)</div>', self.text)
-        self.assertEqual(numbers, [str(number) for number in range(1, 9)])
-        self.assertEqual(len(numbers), len(set(numbers)))
-        headings = re.findall(
-            r'<div class="ec-num">EXP-\d+</div><h4>(.*?)</h4>',
-            self.text,
-        )
-        self.assertEqual(headings[0], "Solar Black-Body Approximation")
-        self.assertEqual(headings[-1], "Rayleigh–Jeans and Wien Limits")
-
-    def test_internal_navigation_targets_exist(self):
-        targets = set(self.parser.ids)
-        internal_links = [href for _, href in self.parser.hrefs if href.startswith("#")]
-        self.assertGreater(len(internal_links), 0)
-        for href in internal_links:
-            with self.subTest(href=href):
-                self.assertIn(href[1:], targets)
-
-    def test_related_program_links_are_module_relative_html_links(self):
-        related = [href for section, href in self.parser.hrefs if section == "related"]
-        self.assertEqual(related, ["../Star/Star.html", "../Random2/Random2.html"])
+    def test_mathjax_is_the_only_external_script_and_offline_note_is_static(self):
+        self.assertEqual(len(STRUCTURE.scripts), 1)
+        self.assertRegex(STRUCTURE.scripts[0], r"^https://cdn\.jsdelivr\.net/npm/mathjax@3/")
+        self.assertIn("needs no internet access to run", html_text(section_html(HELP_HTML, "overview")))
 
     def test_student_content_contains_no_ai_or_review_history(self):
-        student_text = self.text.split('<section id="license">', 1)[0]
-        suspicious_terms = (
-            "Claude",
-            "Copilot",
-            "Gemini",
-            "ChatGPT",
-            "Anthropic",
-            "AI-generated",
-            "audit round",
-            "previous version",
-            "porting fix",
-            "legacy implementation",
-            "reviewer",
-        )
-        for term in suspicious_terms:
-            self.assertNotIn(term, student_text)
+        student_text = HELP_HTML.split('<section id="license">', 1)[0]
+        for term in ("Claude", "Copilot", "Gemini", "ChatGPT", "Anthropic",
+                     "AI-generated", "audit round", "previous version",
+                     "porting fix", "legacy implementation", "reviewer",
+                     "Kickoff", "Grok", "Codex"):
+            with self.subTest(term=term):
+                self.assertNotIn(term, student_text)
 
     def test_java_provenance_is_confined_to_license(self):
-        before_license, license_and_after = self.text.split('<section id="license">', 1)
+        before_license, license_and_after = HELP_HTML.split('<section id="license">', 1)
         self.assertNotIn("Java/Triana", before_license)
         self.assertIn("Java/Triana", license_and_after)
 
     def test_first_edition_investigations_are_retained(self):
-        self.assertIn("Investigations 10.1, 10.2, and 10.3", self.text)
+        self.assertIn("Investigations 10.1, 10.2, and 10.3", HELP_HTML)
+
+    def test_related_program_links_are_module_relative_html_links(self):
+        related = re.findall(r'<a href="([^"#]+)"', section_html(HELP_HTML, "related"))
+        self.assertEqual(related, ["../Star/Star.html", "../Random2/Random2.html"])
+
+    def test_relative_links_resolve_when_the_documentation_tree_is_present(self):
+        docs_root = HELP_FILE.parent.parent
+        if docs_root.name != "GFTGU-Documentation" or not (docs_root / "Star").is_dir():
+            self.skipTest("the sibling documentation folders are not present in this layout")
+        for href in STRUCTURE.hrefs:
+            if href.startswith(("#", "http://", "https://", "mailto:")):
+                continue
+            with self.subTest(href=href):
+                self.assertTrue((HELP_FILE.parent / href).is_file(), href)
+
+
+class HelpBeatTests(unittest.TestCase):
+    def test_every_beat_follows_the_same_pattern(self):
+        for number in BEAT_NUMBERS:
+            body = section_html(HELP_HTML, f"beat{number}")
+            with self.subTest(beat=number):
+                self.assertIn(f"<h2>Beat {number} · ", body)
+                self.assertGreaterEqual(body.count("<pre>"), 1)
+                self.assertRegex(body, r"<p>Look[ ,]")
+                self.assertIn("Three tasks, in order.", body)
+                self.assertIn("<p><em>Then</em>", body)
+                self.assertIn("<p><em>Experiments that go with this beat:</em>", body)
+                self.assertLess(body.index("<pre>"), body.index("Three tasks, in order."))
+                self.assertLess(body.index("Three tasks, in order."), body.index("<em>Then</em>"))
+                self.assertLess(body.index("<em>Then</em>"), body.index("Experiments that go with"))
+                self.assertGreaterEqual(body.count('class="eq"'), 1)
+
+    def test_sidebar_titles_match_the_beat_headings(self):
+        for number in BEAT_NUMBERS:
+            heading = re.search(
+                rf'<h2>Beat {number} · (.*?)</h2>', section_html(HELP_HTML, f"beat{number}")
+            ).group(1)
+            link = re.search(rf'<a href="#beat{number}">(.*?)</a>', HELP_HTML).group(1)
+            with self.subTest(beat=number):
+                self.assertEqual(html_text(link), f"{number} · {html_text(heading)}")
+
+    def equations(self):
+        found = {}
+        for number in BEAT_NUMBERS:
+            body = section_html(HELP_HTML, f"beat{number}")
+            for match in re.finditer(
+                r'<span class="eq-label">\((\d+)\)</span>\s*<div class="eq-kind">.*?'
+                r'<span class="kind kind-(\w+)">(\w+)</span>',
+                body, re.DOTALL,
+            ):
+                found[int(match.group(1))] = (match.group(3), number)
+        return found
+
+    def test_equations_are_numbered_in_order_and_tagged(self):
+        found = self.equations()
+        self.assertEqual(sorted(found), list(range(1, 22)))
+        beats = [found[n][1] for n in sorted(found)]
+        self.assertEqual(beats, sorted(beats))
+        self.assertIn("Twenty-one equations are numbered", html_text(section_html(HELP_HTML, "beats")))
+
+    def test_only_planck_s_law_is_tagged_law_and_algorithms_are_the_numerical_rules(self):
+        found = self.equations()
+        self.assertEqual([n for n, (kind, _) in found.items() if kind == "LAW"], [1])
+        self.assertEqual(
+            sorted(n for n, (kind, _) in found.items() if kind == "ALGORITHM"),
+            [15, 17, 18, 19, 20],
+        )
+        self.assertIn("Eqs. (15), (17) and (18) to (20)", html_text(section_html(HELP_HTML, "beats")))
+        self.assertFalse([n for n, (kind, _) in found.items() if kind == "ODE"])
+
+    def test_equation_citations_refer_to_numbered_equations(self):
+        for section in ("overview", "beats", "equations", "algorithm", "summary", "experiments",
+                        *[f"beat{n}" for n in BEAT_NUMBERS]):
+            text = html_text(section_html(HELP_HTML, section))
+            for group in re.findall(r"Eqs?\.\s*\(([\d\s,and()to]+?)\)(?=[\s.,;:]|$)", text):
+                for number in re.findall(r"\d+", group):
+                    with self.subTest(section=section, equation=number):
+                        self.assertIn(int(number), range(1, 22))
+
+    def test_equation_index_lists_every_numbered_equation_once_with_its_kind_and_beat(self):
+        found = self.equations()
+        rows = re.findall(
+            r"<tr><td>\((\d+)\)</td><td><span class=\"kind kind-\w+\">(\w+)</span></td>"
+            r"<td>.*?</td><td>(\d+)</td>",
+            section_html(HELP_HTML, "equations"),
+        )
+        self.assertEqual([int(r[0]) for r in rows], list(range(1, 22)))
+        for number, kind, beat in rows:
+            with self.subTest(equation=number):
+                self.assertEqual((kind, int(beat)), found[int(number)])
+
+    def test_every_experiment_is_cited_by_a_beat_and_every_citation_exists(self):
+        experiments = re.findall(r'<h3 id="exp(\d+)">', section_html(HELP_HTML, "experiments"))
+        self.assertEqual(experiments, [str(n) for n in range(1, 12)])
+        cited = set()
+        for number in BEAT_NUMBERS:
+            body = section_html(HELP_HTML, f"beat{number}")
+            tail = body[body.index("Experiments that go with this beat:"):]
+            links = re.findall(r'href="#exp(\d+)"', tail)
+            with self.subTest(beat=number):
+                self.assertTrue(links)
+            cited.update(links)
+        self.assertEqual(cited, set(experiments))
+
+    def test_experiments_are_ranked_from_introductory_to_advanced(self):
+        rank = {"Introductory": 0, "Intermediate": 1, "Intermediate to Advanced": 2,
+                "Advanced": 3, "Advanced Programming": 3}
+        levels = [
+            rank[html_text(title).rsplit("— ", 1)[1]]
+            for title in re.findall(r'<h3 id="exp\d+">(.*?)</h3>', section_html(HELP_HTML, "experiments"))
+        ]
+        self.assertEqual(levels, sorted(levels))
+        self.assertEqual(levels[0], 0)
+        self.assertEqual(levels[-1], 3)
+
+    def test_python_snippets_in_the_experiments_run_and_agree_with_the_beats(self):
+        blocks = [
+            html_module.unescape(re.sub(r"<[^>]+>", "", b))
+            for b in re.findall(r"<pre>(.*?)</pre>", section_html(HELP_HTML, "experiments"), re.DOTALL)
+            if "from planck2_driver import" in b
+        ]
+        self.assertEqual(len(blocks), 2)
+        outputs = []
+        for block in blocks:
+            completed = subprocess.run(
+                [sys.executable, "-c", block], cwd=MODULE_DIR,
+                text=True, capture_output=True, timeout=120,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            outputs.append(completed.stdout.split("\n"))
+        wavelength, frequency = outputs[0][0].split(), outputs[0][1].split()
+        self.assertAlmostEqual(float(wavelength[1]), 4.965114231744, places=9)
+        self.assertAlmostEqual(float(frequency[1]), 2.821439372122, places=9)
+        self.assertLess(abs(float(wavelength[2]) - float(wavelength[1])), 0.0005)
+        self.assertLess(abs(float(frequency[2]) - float(frequency[1])), 0.0005)
+        self.assertAlmostEqual(float(outputs[1][0]), 2.9010e-3, delta=1e-7)
+        self.assertAlmostEqual(float(outputs[1][1]), 1.0, delta=1e-6)
+
+
+class HelpCommandTests(unittest.TestCase):
+    def test_the_help_documents_a_meaningful_number_of_commands(self):
+        commands = documented_commands(HELP_HTML)
+        self.assertGreaterEqual(len(dict.fromkeys(commands)), 30)
+
+    def test_every_documented_command_parses_and_runs_to_a_summary(self):
+        for command in dict.fromkeys(documented_commands(HELP_HTML)):
+            arguments = command_arguments(command)
+            if "--help" in arguments:
+                continue
+            with self.subTest(command=command):
+                run = run_cli(arguments)
+                if command in REJECTED_COMMANDS:
+                    self.assertEqual(run.exit_code, 2)
+                    self.assertIn("Require x_min <= x_low < x_high <= x_max", run.stderr)
+                    self.assertIn("x_max=10", run.stderr)
+                    self.assertEqual(run.stdout, "")
+                else:
+                    self.assertIn(run.exit_code, (None, 0), run.stderr)
+                    lines = run.stdout.splitlines()
+                    self.assertEqual(len(lines), 4)
+                    self.assertTrue(lines[0].startswith(f"Planck2 {phys.MODEL_VERSION} "))
+                    self.assertIn("Exact 0..infinity bolometric value", lines[3])
+                    self.assertIn("Peak", run.annotation)
+
+    def test_rejected_commands_are_documented_as_rejected(self):
+        body = section_html(HELP_HTML, "beat8")
+        for command in REJECTED_COMMANDS:
+            self.assertIn(command, html_text(body))
+        self.assertIn("The first command below is rejected", html_text(body))
+
+    def test_documented_options_are_real_options(self):
+        parser = planck2_main.build_parser()
+        real = {s for action in parser._actions for s in action.option_strings}
+        used = set(re.findall(r"(?<![\w-])(--[A-Za-z_]+)", "\n".join(documented_commands(HELP_HTML))))
+        self.assertTrue(used)
+        self.assertLessEqual(used, real)
+
+
+class HelpReferenceTests(unittest.TestCase):
+    SUPERSCRIPT = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
+
+    def rows(self, section):
+        parser = HelpStructureParser()
+        parser.feed(HELP_HTML)
+        return [row for section_id, row in parser.rows if section_id == section]
+
+    def test_parameter_table_matches_the_parser_options_and_defaults(self):
+        rows = {row[0]: row for row in self.rows("parameters") if row[0] != "Parameter"}
+        parser = planck2_main.build_parser()
+        options = {
+            action.option_strings[0]: action
+            for action in parser._actions
+            if action.option_strings and action.option_strings[0] not in ("-h", "--version")
+        }
+        self.assertEqual(set(rows), set(options))
+        for name, action in options.items():
+            default = action.default
+            expected = f'"{default}"' if isinstance(default, str) else str(default)
+            with self.subTest(option=name):
+                self.assertEqual(rows[name][1], expected)
+
+    def test_quantity_table_matches_the_shared_quantity_descriptor(self):
+        rows = {row[0]: row for row in self.rows("quantities") if row[0] != "Mode string"}
+        self.assertEqual(set(rows), {f'"{name}"' for name in phys.QUANTITY_SPECS})
+        for name, spec in phys.QUANTITY_SPECS.items():
+            row = rows[f'"{name}"']
+            units = re.search(r"\((.*)\)$", spec.y_label).group(1)
+            units = re.sub(
+                r"\$\^\{-(\d)\}\$",
+                lambda m: "⁻" + m.group(1).translate(self.SUPERSCRIPT),
+                units,
+            )
+            with self.subTest(quantity=name):
+                self.assertIn(units, row[1])
+                self.assertIn(f"x^{spec.shape_exponent}", row[2])
+                self.assertEqual(row[3], spec.x_label)
+
+    def test_constants_and_defaults_table_matches_the_program(self):
+        rows = {row[0]: row[1] for row in self.rows("algorithm") if len(row) == 3 and row[0] != "Name"}
+        for name, value in (
+            ("H_PLANCK", f"{phys.H_PLANCK:.8e}"),
+            ("C_LIGHT", f"{phys.C_LIGHT:.8e}"),
+            ("K_BOLTZMANN", f"{phys.K_BOLTZMANN:.6e}"),
+            ("SIGMA_SB", f"{phys.SIGMA_SB:.6e}"),
+        ):
+            mantissa, exponent = value.split("e")
+            sign = "\u2212" if exponent.startswith("-") else ""
+            rendered = f"{mantissa}\u00d710{sign}{int(exponent.lstrip('+-'))}"
+            with self.subTest(constant=name):
+                self.assertTrue(rows[name].startswith(rendered), (rows[name], rendered))
+        self.assertEqual(rows["MAX_STEPS"], f"{driver.MAX_STEPS:,}")
+        domain = phys.PlanckDomain()
+        for field, value in (("x_min", domain.x_min), ("x_max", domain.x_max),
+                             ("x_low", domain.x_low), ("x_high", domain.x_high)):
+            with self.subTest(field=field):
+                self.assertEqual(rows[f"PlanckDomain.{field}"], str(value))
+
+    def test_printed_summary_block_is_exactly_what_the_default_run_prints(self):
+        block = re.search(r"<pre>(Planck2 .*?)</pre>", section_html(HELP_HTML, "summary"), re.DOTALL)
+        self.assertIsNotNone(block)
+        self.assertEqual(
+            html_module.unescape(block.group(1)).strip(),
+            run_cli(()).stdout.strip(),
+        )
+
+    def test_every_summary_label_printed_by_main_is_described_in_the_help(self):
+        described = set(re.findall(r"<li><code>([^<]+)</code>:", section_html(HELP_HTML, "summary")))
+        self.assertEqual(
+            described,
+            {"peak at x", "Dimensionless area", "Physical integral",
+             "Exact 0..infinity bolometric value"},
+        )
+        default = run_cli(()).stdout
+        for label in described:
+            self.assertIn(label, default)
+
+    def test_every_annotation_line_is_described_in_the_help(self):
+        annotation = run_cli(()).annotation
+        text = html_text(section_html(HELP_HTML, "summary"))
+        for label in ("Peak at x", "Peak λ", "Peak value", "∫ f(x) dx",
+                      "Physical integral", "Exact 0..∞ physical"):
+            with self.subTest(label=label):
+                self.assertIn(label, annotation)
+                self.assertIn(label, text)
+
+    def test_code_identifiers_named_in_the_help_exist_in_the_program(self):
+        modules = (phys, driver, plotter, planck2_main)
+        names = set()
+        for body in re.findall(r"<code>([^<]+)</code>", HELP_HTML):
+            body = html_module.unescape(body)
+            match = re.fullmatch(r"(?:PlanckDomain\.)?([A-Za-z_][A-Za-z_0-9]*)\(\)", body)
+            if match:
+                names.add(match.group(1))
+            elif re.fullmatch(r"[A-Z][A-Z_0-9]{3,}", body):
+                names.add(body)
+        self.assertGreater(len(names), 20)
+        allowed_elsewhere = {"expm1"}  # math.expm1
+        for name in sorted(names - allowed_elsewhere):
+            with self.subTest(name=name):
+                self.assertTrue(
+                    any(hasattr(module, name) for module in modules)
+                    or (name == "validate" and hasattr(phys.PlanckDomain, name)),
+                    name,
+                )
+        self.assertTrue(hasattr(phys.PlanckDomain, "validate"))
+
+
+class HelpQuotedNumberTests(unittest.TestCase):
+    """Every number the Help quotes from the console or the plot must be the number printed."""
+
+    PRINTED = re.compile(r"(?<![\w.])(?:\d\.\d{4,6}e[+-]\d\d|\d+\.\d{6})(?![\w%])")
+    # Numbers that a student computes by hand or reads from Eq. (5) and Eq. (6); each is
+    # checked independently in HelpQuantitativeClaimTests.
+    DERIVED_OK = {
+        "4.965114", "2.821439",     # roots of Eq. (5)
+        "2.897772",                 # Wien's constant, Eq. (6)
+        "5.670374",                 # Stefan-Boltzmann constant
+        "0.049995",                 # grid step of the 2000-step default (Beat 6)
+    }
+
+    def outputs_for(self, fragment):
+        chunks = [printed_by(())]
+        for command in documented_commands(fragment):
+            arguments = command_arguments(command)
+            if command not in REJECTED_COMMANDS and "--help" not in arguments:
+                chunks.append(printed_by(arguments))
+        return "\n".join(chunks)
+
+    def quoted_tokens(self, fragment):
+        return set(self.PRINTED.findall(html_text(fragment))) - self.DERIVED_OK
+
+    def test_numbers_quoted_in_each_beat_are_printed_by_that_beat_s_commands(self):
+        for number in BEAT_NUMBERS:
+            body = section_html(HELP_HTML, f"beat{number}")
+            printed = self.outputs_for(body)
+            tokens = self.quoted_tokens(body)
+            with self.subTest(beat=number):
+                self.assertTrue(tokens, "a beat should quote printed numbers")
+                self.assertEqual(sorted(t for t in tokens if t not in printed), [])
+
+    def test_numbers_quoted_in_the_reference_sections_are_printed_by_some_command(self):
+        every_output = "\n".join(
+            printed_by(command_arguments(c))
+            for c in dict.fromkeys(documented_commands(HELP_HTML))
+            if c not in REJECTED_COMMANDS and "--help" not in c
+        )
+        for section in ("overview", "beats", "equations", "algorithm", "modules",
+                        "quickstart", "parameters", "quantities", "summary", "experiments"):
+            with self.subTest(section=section):
+                tokens = self.quoted_tokens(section_html(HELP_HTML, section))
+                self.assertEqual(sorted(t for t in tokens if t not in every_output), [])
+
+
+class HelpQuantitativeClaimTests(unittest.TestCase):
+    """Independent checks of the statements in the beats that go beyond the printed digits."""
+
+    @staticmethod
+    def result(arguments):
+        return run_cli(arguments).result
+
+    def test_eq5_roots_and_eq6_wien_constant(self):
+        self.assertAlmostEqual(peak_root(5), 4.965114, places=6)
+        self.assertAlmostEqual(peak_root(3), 2.821439, places=6)
+        wien = phys.H_PLANCK * phys.C_LIGHT / (phys.K_BOLTZMANN * peak_root(5))
+        self.assertAlmostEqual(wien, 2.897772e-3, delta=1e-9)
+        self.assertAlmostEqual(phys.K_BOLTZMANN * peak_root(3) / phys.H_PLANCK, 5.8789e10, delta=1e6)
+
+    def test_beat1_wavelength_peak_scales_as_inverse_t_and_height_as_t5(self):
+        cool = self.result(("--T", "3000"))
+        mid = self.result(())
+        hot = self.result(("--T", "10000"))
+        products = [r.coord_peak * r.T for r in (cool, mid, hot)]
+        for product in products:
+            self.assertAlmostEqual(product, 2.9010e-3, delta=1e-7)
+            self.assertLess(relative_error(product, products[0]), 1e-12)
+        self.assertLess(abs(products[0] / 2.897772e-3 - 1.0 - 0.0011), 1e-4)
+        self.assertAlmostEqual(mid.y_peak / cool.y_peak, 29.42, places=2)
+        self.assertLess(relative_error(mid.y_peak / cool.y_peak, (5900 / 3000) ** 5), 1e-3)
+        self.assertAlmostEqual(hot.y_peak / mid.y_peak, (10000 / 5900) ** 5, delta=0.05)
+        self.assertEqual({round(r.x_peak, 6) for r in (cool, mid, hot)}, {4.959505})
+
+    def test_beat2_frequency_peak_wavelength_conversion_and_product(self):
+        frequency = self.result(("--T", "5900", "--quantity", "frequency"))
+        wavelength_of_frequency_peak = phys.C_LIGHT / frequency.coord_peak
+        self.assertAlmostEqual(wavelength_of_frequency_peak * 1e9, 867.9, places=1)
+        self.assertAlmostEqual(self.result(()).coord_peak * 1e9, 491.70, places=2)
+        exact_frequency = phys.K_BOLTZMANN * peak_root(3) * 5900 / phys.H_PLANCK
+        self.assertAlmostEqual(exact_frequency, 3.4686e14, delta=1e10)
+        self.assertAlmostEqual(phys.K_BOLTZMANN * peak_root(3) * 2.725 / phys.H_PLANCK / 1e9, 160.20, places=2)
+        self.assertAlmostEqual(peak_root(3) / peak_root(5), 0.568, places=3)
+
+    def test_beat3_energy_density_is_four_pi_over_c_times_frequency_radiance(self):
+        radiance = self.result(("--T", "5900", "--quantity", "frequency"))
+        energy = self.result(("--T", "5900", "--quantity", "energy_density"))
+        factor = 4.0 * math.pi / phys.C_LIGHT
+        self.assertAlmostEqual(factor, 4.1917e-8, delta=5e-13)
+        self.assertLess(relative_error(energy.y_peak / radiance.y_peak, factor), 1e-12)
+        self.assertLess(relative_error(energy.physical_integral / radiance.physical_integral, factor), 1e-12)
+        self.assertEqual(energy.x_peak, radiance.x_peak)
+        self.assertEqual(energy.dimensionless_area, radiance.dimensionless_area)
+        self.assertEqual(energy.physical_integral_units, "J m^-3")
+
+    def test_beat4_both_radiances_have_the_same_physical_integral_and_error(self):
+        wavelength = self.result(())
+        frequency = self.result(("--quantity", "frequency"))
+        self.assertLess(relative_error(wavelength.physical_integral, frequency.physical_integral), 1e-12)
+        for result in (wavelength, frequency):
+            error = result.physical_integral / result.exact_physical_integral - 1.0
+            self.assertAlmostEqual(error, -6.9e-7, delta=1e-8)
+        self.assertAlmostEqual(
+            frequency.dimensionless_area - math.pi**4 / 15.0, -4.5e-6, delta=1e-7
+        )
+        self.assertAlmostEqual(wavelength.dimensionless_area, 8 * math.pi**6 / 63, places=6)
+
+    def test_beat5_temperature_ratios_and_constants(self):
+        for quantity, constant in (("frequency", phys.SIGMA_SB / math.pi),
+                                   ("energy_density", 4 * phys.SIGMA_SB / phys.C_LIGHT)):
+            values = [self.result(("--T", t, "--quantity", quantity)).physical_integral
+                      for t in ("3000", "6000", "12000")]
+            with self.subTest(quantity=quantity):
+                self.assertAlmostEqual(values[1] / values[0], 16.0, places=2)
+                self.assertAlmostEqual(values[2] / values[1], 16.0, places=2)
+                self.assertAlmostEqual(values[2] / values[0], 256.0, places=1)
+                self.assertLess(relative_error(values[0] / 3000.0**4, constant), 1e-5)
+        self.assertAlmostEqual(phys.SIGMA_SB / math.pi, 1.8049e-8, delta=5e-13)
+        self.assertAlmostEqual(4 * phys.SIGMA_SB / phys.C_LIGHT, 7.5657e-16, delta=5e-21)
+
+    def test_beat6_grid_steps_peaks_and_convergence_rate(self):
+        steps = {n: self.result(("--n_steps", str(n))) for n in (10, 100, 1000, 2000, 20000)}
+        for n, expected in ((10, 9.999), (100, 0.9999), (1000, 0.09999),
+                            (2000, 0.049995), (20000, 0.0049995)):
+            self.assertAlmostEqual((100.0 - 0.01) / n, expected, places=7)
+        self.assertEqual(steps[100].x_peak, steps[1000].x_peak)
+        self.assertAlmostEqual(steps[100].x_peak, 5.0095, places=9)
+        self.assertLess(abs(steps[2000].x_peak - 4.965114), abs(steps[1000].x_peak - 4.965114))
+        for n, result in steps.items():
+            step = (100.0 - 0.01) / n
+            self.assertLess(abs(result.x_peak - peak_root(5)), step)
+            if n >= 1000:
+                self.assertLessEqual(abs(result.x_peak - peak_root(5)), 0.5 * step + 1e-9)
+        errors = {n: r.physical_integral / r.exact_physical_integral - 1.0 for n, r in steps.items()}
+        self.assertAlmostEqual(errors[10], -0.930, places=3)
+        self.assertAlmostEqual(errors[100], -8.9e-4, delta=1e-5)
+        self.assertAlmostEqual(errors[1000] / errors[2000], 3.85, delta=0.1)
+        self.assertAlmostEqual(errors[20000], 8.7e-8, delta=1e-8)
+        self.assertLess(relative_error(steps[10].physical_integral, steps[10].exact_physical_integral),
+                        1.0)
+        self.assertAlmostEqual(steps[10].physical_integral / steps[10].exact_physical_integral, 0.0696, places=3)
+        self.assertAlmostEqual(peak_root(5) / steps[2000].x_peak - 1.0, 0.0011, places=4)
+
+    def test_beat6_and_7_the_error_floor_comes_from_the_switch_and_the_range_not_the_grid(self):
+        fine = driver.run_planck2(5900.0, "frequency", 200000)
+        floor = fine.physical_integral / fine.exact_physical_integral - 1.0
+        self.assertAlmostEqual(floor, 7e-8, delta=1e-8)
+        exact_area = math.pi**4 / 15.0
+        over = trapezoid_simpson(lambda x: x * x - shape(x, 3), 0.01, 0.05) / exact_area
+        omitted = 0.01**3 / 3.0 / exact_area
+        self.assertAlmostEqual(over, 1.2e-7, delta=1e-8)
+        self.assertAlmostEqual(omitted, 5e-8, delta=1e-8)
+        self.assertAlmostEqual(over - omitted, floor, delta=1.5e-8)
+        no_switch = driver.run_planck2(
+            5900.0, "frequency", 200000, phys.PlanckDomain(0.01, 100.0, 0.01, 100.0)
+        )
+        self.assertAlmostEqual(
+            no_switch.physical_integral / no_switch.exact_physical_integral - 1.0,
+            -omitted, delta=1.5e-8,
+        )
+
+    def test_beat7_switch_runs_and_the_error_sizes_of_the_two_forms(self):
+        exact = self.result(()).exact_physical_integral
+        off = self.result(("--x_low", "0.01", "--x_high", "100"))
+        self.assertEqual(f"{off.physical_integral:.6e}", f"{self.result(()).physical_integral:.6e}")
+        wave = self.result(("--x_low", "1", "--x_high", "3"))
+        freq = self.result(("--quantity", "frequency", "--x_low", "1", "--x_high", "3"))
+        self.assertAlmostEqual(wave.dimensionless_area / (8 * math.pi**6 / 63) - 1.0, -0.0066, places=4)
+        self.assertAlmostEqual(wave.physical_integral / exact - 1.0, 0.0066, places=4)
+        self.assertAlmostEqual(freq.dimensionless_area / (math.pi**4 / 15) - 1.0, 0.0066, places=4)
+        self.assertLess(relative_error(wave.physical_integral, freq.physical_integral), 1e-12)
+        wrong = self.result(("--x_low", "5", "--x_high", "6"))
+        self.assertAlmostEqual(wrong.dimensionless_area / (8 * math.pi**6 / 63), 5.65, places=2)
+        self.assertAlmostEqual(wrong.physical_integral / exact, 6.60, places=2)
+        self.assertEqual(round(wrong.x_peak, 6), round(self.result(()).x_peak, 6))
+        self.assertEqual(wrong.x_peak, max(v for v in wrong.x_values if v < 5.0))
+        self.assertAlmostEqual(wrong.y_peak / self.result(()).y_peak, 28.5, delta=0.1)
+        for x, expected in ((0.05, 0.025), (1.0, 0.72)):
+            self.assertAlmostEqual(math.expm1(x) / x - 1.0, expected, delta=0.005)
+        self.assertAlmostEqual(math.exp(-3.0), 0.05, delta=0.001)
+        self.assertLess(math.exp(-20.0), 3e-9)
+
+    def test_beat8_truncation_estimates_and_hard_cases(self):
+        exact = self.result(()).exact_physical_integral
+        cut = self.result(("--x_max", "10", "--x_high", "9"))
+        upper5 = trapezoid_simpson(lambda x: shape(x, 5), 10.0, 200.0)
+        upper3 = trapezoid_simpson(lambda x: shape(x, 3), 10.0, 200.0)
+        self.assertAlmostEqual(upper5, 8.05, places=2)
+        self.assertAlmostEqual(upper3, 0.062, places=3)
+        self.assertAlmostEqual(upper5 / (8 * math.pi**6 / 63), 0.066, places=3)
+        self.assertAlmostEqual(upper3 / (math.pi**4 / 15), 0.0096, places=4)
+        closed = math.exp(-10.0) * sum(
+            math.factorial(5) // math.factorial(5 - j) * 10.0 ** (5 - j) for j in range(6)
+        )
+        self.assertAlmostEqual(closed, upper5, places=2)
+        self.assertAlmostEqual(cut.dimensionless_area / (8 * math.pi**6 / 63) - 1.0, -0.066, places=3)
+        self.assertAlmostEqual(cut.physical_integral / exact - 1.0, -0.0096, places=4)
+        edge = self.result(("--x_max", "4", "--x_high", "3"))
+        self.assertEqual(edge.x_peak, 4.0)
+        self.assertAlmostEqual(edge.physical_integral / exact, 0.59, places=2)
+        low = self.result(("--x_min", "1", "--x_low", "1"))
+        self.assertAlmostEqual(low.physical_integral / exact - 1.0, -0.035, places=3)
+        self.assertAlmostEqual(low.dimensionless_area / (8 * math.pi**6 / 63) - 1.0, -0.0011, places=4)
+        self.assertAlmostEqual(trapezoid_simpson(lambda x: shape(x, 3), 1e-9, 1.0), 0.2248, places=4)
+        self.assertAlmostEqual(trapezoid_simpson(lambda x: shape(x, 5), 1e-9, 1.0), 0.1284, places=4)
+        full = self.result(("--y_frac_window", "0"))
+        default = self.result(())
+        self.assertEqual(full.physical_integral, default.physical_integral)
+        self.assertAlmostEqual(min(default.coord_values), 2.4e-8, delta=5e-10)
+        self.assertAlmostEqual(max(default.coord_values), 2.4e-4, delta=5e-6)
+
+    def test_zero_window_axis_never_extends_to_negative_coordinates(self):
+        result = driver.run_planck2(5900.0, "wavelength", 200)
+        with mock.patch.object(plt, "show"):
+            plotter.plot_planck2(result, y_frac_window=0.0)
+        left, right = plt.gca().get_xlim()
+        plt.close("all")
+        self.assertEqual((left, right), (min(result.coord_values), max(result.coord_values)))
+        self.assertGreater(left, 0.0)
+
+    def test_domain_error_message_lists_the_four_values(self):
+        run = run_cli(("--x_max", "10"))
+        self.assertEqual(run.exit_code, 2)
+        self.assertIn("x_min=0.01, x_low=0.05, x_high=20, x_max=10", run.stderr)
+
+
+class HelpOriginalCompatibilityTests(unittest.TestCase):
+    """The Reference Guide version is optional; these tests never require it."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.original = HELP_FILE.with_name("Planck2-original.html")
+        if not cls.original.is_file():
+            raise unittest.SkipTest("Planck2-original.html is not present in this layout")
+        cls.text = cls.original.read_text(encoding="utf-8")
+
+    def test_original_stamp_matches_the_program(self):
+        match = re.search(
+            r'<p id="version_build"[^>]*>\s*Version\s+([^&<\s]+)(?:&nbsp;)+Build\s+([0-9a-f]{12})',
+            self.text,
+        )
+        self.assertIsNotNone(match)
+        self.assertEqual(match.groups(), (phys.MODEL_VERSION, phys.BUILD_ID))
+
+    def test_original_parameter_defaults_still_match_the_parser(self):
+        parser = HelpStructureParser()
+        parser.feed(self.text)
+        rows = {r[0]: r[1] for s, r in parser.rows if s == "parameters" and len(r) >= 2 and r[0] != "Parameter"}
+        for action in planck2_main.build_parser()._actions:
+            if action.option_strings and action.option_strings[0] not in ("-h", "--version"):
+                default = action.default
+                expected = f'"{default}"' if isinstance(default, str) else str(default)
+                self.assertEqual(rows[action.option_strings[0]], expected)
+
+    def test_original_commands_still_run(self):
+        commands = []
+        for block in re.findall(r'<div class="sig">(.*?)</div>', self.text, re.DOTALL):
+            for line in html_module.unescape(re.sub(r"<[^>]+>", "", block)).splitlines():
+                line = " ".join(line.split())
+                if line.startswith("python main.py"):
+                    commands.append(line)
+        self.assertGreaterEqual(len(commands), 4)
+        for command in dict.fromkeys(commands):
+            arguments = command_arguments(command)
+            if "--help" in arguments:
+                continue
+            with self.subTest(command=command):
+                self.assertIn(run_cli(arguments).exit_code, (None, 0))
+
+
+class TestQuantitySpecSynchronization(unittest.TestCase):
+    """One immutable descriptor feeds the physics, driver, plotter, and Help."""
+
+    def test_specs_are_immutable_and_cover_exactly_the_quantities(self):
+        self.assertEqual(set(phys.QUANTITY_SPECS), {"wavelength", "frequency", "energy_density"})
+        spec = phys.quantity_spec("frequency")
+        self.assertIsInstance(spec, phys.QuantitySpec)
+        with self.assertRaises(FrozenInstanceError):
+            spec.shape_exponent = 5
+        for name, spec in phys.QUANTITY_SPECS.items():
+            self.assertEqual(spec.name, name)
+            self.assertIn(spec.coordinate, ("wavelength", "frequency"))
+            self.assertIn(spec.coordinate_symbol, ("\u03bb", "\u03bd"))
+
+    def test_quantity_spec_rejects_unknown_quantities(self):
+        for bad in ("intensity", "", None, 3):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    phys.quantity_spec(bad)
+
+    def test_module_level_helpers_are_views_of_the_descriptor(self):
+        for name, spec in phys.QUANTITY_SPECS.items():
+            with self.subTest(quantity=name):
+                self.assertEqual(phys.SHAPE_EXPONENT[name], spec.shape_exponent)
+                self.assertEqual(phys.units_label(name), (spec.x_label, spec.y_label))
+                self.assertEqual(phys.physical_integral_units(name), spec.integral_units)
+                self.assertEqual(
+                    phys.prefactor(name, 5900.0),
+                    spec.prefactor_scale * 5900.0 ** spec.shape_exponent,
+                )
+                self.assertEqual(
+                    phys.exact_physical_integral(name, 5900.0),
+                    spec.exact_integral_scale * 5900.0 ** 4,
+                )
+
+    def test_result_and_plot_metadata_come_from_the_same_descriptor(self):
+        for name, spec in phys.QUANTITY_SPECS.items():
+            result = driver.run_planck2(5900.0, name, 20)
+            with self.subTest(quantity=name):
+                self.assertEqual(result.x_label, spec.x_label)
+                self.assertEqual(result.y_label, spec.y_label)
+                self.assertEqual(result.physical_integral_units, spec.integral_units)
+                convert = (
+                    phys.x_to_wavelength if spec.coordinate == "wavelength"
+                    else phys.x_to_frequency
+                )
+                self.assertEqual(
+                    result.coord_values, tuple(convert(x, 5900.0) for x in result.x_values)
+                )
+                with mock.patch.object(plt, "show"):
+                    plotter.plot_planck2(result)
+                annotation = "\n".join(text.get_text() for text in plt.gca().texts)
+                plt.close("all")
+                self.assertIn(f"Peak {spec.coordinate_symbol} = ", annotation)
+                self.assertEqual(plt.get_fignums(), [])
+
+    def test_plotter_rejects_metadata_that_disagrees_with_the_descriptor(self):
+        result = driver.run_planck2(5900.0, "wavelength", 20)
+        for field in ("x_label", "y_label", "physical_integral_units"):
+            with self.subTest(field=field):
+                with self.assertRaises(ValueError):
+                    plotter.plot_planck2(replace(result, **{field: "changed"}))
+
+    def test_parser_is_available_separately_from_parsing(self):
+        parser = planck2_main.build_parser()
+        self.assertEqual(parser.prog, "Planck2")
+        self.assertEqual(parser.parse_args([]).quantity, "wavelength")
+        self.assertEqual(
+            tuple(action.choices for action in parser._actions
+                  if action.option_strings == ["--quantity"])[0],
+            tuple(phys.QUANTITY_SPECS),
+        )
 
 
 class TestMainModule(unittest.TestCase):

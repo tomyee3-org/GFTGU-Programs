@@ -25,7 +25,7 @@ import math
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.1.0"
+MODEL_VERSION = "1.2.0"
 BUILD_ID_COVERS = (
     "planck2_physics.py",
     "planck2_driver.py",
@@ -105,11 +105,72 @@ SIGMA_SB = (
 
 PlanckQuantity = Literal["wavelength", "frequency", "energy_density"]
 
-SHAPE_EXPONENT = {
-    "wavelength": 5,
-    "frequency": 3,
-    "energy_density": 3,
+
+@dataclass(frozen=True)
+class QuantitySpec:
+    """Everything that differs from one spectral quantity to the next.
+
+    This is the single place where the shape exponent, prefactor scale,
+    exact bolometric scale, horizontal coordinate, axis labels, and integral
+    units of a quantity are recorded.  The driver, the plotter, and the
+    module-level helper functions all read from it so the metadata cannot
+    drift apart.
+    """
+    name: str
+    shape_exponent: int
+    coordinate: str
+    coordinate_symbol: str
+    prefactor_scale: float
+    exact_integral_scale: float
+    x_label: str
+    y_label: str
+    integral_units: str
+
+
+QUANTITY_SPECS = {
+    "wavelength": QuantitySpec(
+        name="wavelength",
+        shape_exponent=5,
+        coordinate="wavelength",
+        coordinate_symbol="\u03bb",
+        prefactor_scale=WAVELENGTH_PREFACTOR_SCALE,
+        exact_integral_scale=SIGMA_SB / math.pi,
+        x_label="Wavelength (m)",
+        y_label=r"Spectral radiance $B_\lambda$ (W m$^{-3}$ sr$^{-1}$)",
+        integral_units="W m^-2 sr^-1",
+    ),
+    "frequency": QuantitySpec(
+        name="frequency",
+        shape_exponent=3,
+        coordinate="frequency",
+        coordinate_symbol="\u03bd",
+        prefactor_scale=FREQUENCY_PREFACTOR_SCALE,
+        exact_integral_scale=SIGMA_SB / math.pi,
+        x_label="Frequency (Hz)",
+        y_label=r"Spectral radiance $B_\nu$ (W m$^{-2}$ sr$^{-1}$ Hz$^{-1}$)",
+        integral_units="W m^-2 sr^-1",
+    ),
+    "energy_density": QuantitySpec(
+        name="energy_density",
+        shape_exponent=3,
+        coordinate="frequency",
+        coordinate_symbol="\u03bd",
+        prefactor_scale=ENERGY_DENSITY_PREFACTOR_SCALE,
+        exact_integral_scale=4.0 * SIGMA_SB / C_LIGHT,
+        x_label="Frequency (Hz)",
+        y_label=r"Spectral energy density $u_\nu$ (J m$^{-3}$ Hz$^{-1}$)",
+        integral_units="J m^-3",
+    ),
 }
+
+# Read-only view kept for callers that only need the shape exponent.
+SHAPE_EXPONENT = {name: spec.shape_exponent for name, spec in QUANTITY_SPECS.items()}
+
+
+def quantity_spec(quantity: str) -> QuantitySpec:
+    """Return the :class:`QuantitySpec` for a valid quantity name."""
+    validate_quantity(quantity)
+    return QUANTITY_SPECS[quantity]
 
 
 @dataclass(frozen=True)
@@ -138,7 +199,7 @@ class PlanckDomain:
 
 
 def validate_quantity(quantity: str) -> None:
-    if not isinstance(quantity, str) or quantity not in SHAPE_EXPONENT:
+    if not isinstance(quantity, str) or quantity not in QUANTITY_SPECS:
         raise ValueError(
             'quantity must be "wavelength", "frequency", or "energy_density".'
         )
@@ -305,14 +366,9 @@ def prefactor(quantity: PlanckQuantity, T: float) -> float:
     validate_quantity(quantity)
     _validate_temperature(T)
 
-    scale = {
-        "wavelength": WAVELENGTH_PREFACTOR_SCALE,
-        "frequency": FREQUENCY_PREFACTOR_SCALE,
-        "energy_density": ENERGY_DENSITY_PREFACTOR_SCALE,
-    }[quantity]
-    power = 5 if quantity == "wavelength" else 3
+    spec = QUANTITY_SPECS[quantity]
     return _scaled_product(
-        ((scale, 1), (T, power)),
+        ((spec.prefactor_scale, 1), (T, spec.shape_exponent)),
         "The spectral prefactor",
     )
 
@@ -337,13 +393,8 @@ def exact_physical_integral(quantity: PlanckQuantity, T: float) -> float:
     validate_quantity(quantity)
     _validate_temperature(T)
 
-    scale = (
-        SIGMA_SB / math.pi
-        if quantity in ("wavelength", "frequency")
-        else 4.0 * SIGMA_SB / C_LIGHT
-    )
     return _scaled_product(
-        ((scale, 1), (T, 4)),
+        ((QUANTITY_SPECS[quantity].exact_integral_scale, 1), (T, 4)),
         "The bolometric integral",
     )
 
@@ -370,17 +421,10 @@ def x_to_frequency(x: float, T: float) -> float:
 
 def units_label(quantity: PlanckQuantity) -> tuple[str, str]:
     """Return x-axis and y-axis labels for the selected quantity."""
-    validate_quantity(quantity)
-    if quantity == "wavelength":
-        return ("Wavelength (m)", r"Spectral radiance $B_\lambda$ (W m$^{-3}$ sr$^{-1}$)")
-    if quantity == "frequency":
-        return ("Frequency (Hz)", r"Spectral radiance $B_\nu$ (W m$^{-2}$ sr$^{-1}$ Hz$^{-1}$)")
-    return ("Frequency (Hz)", r"Spectral energy density $u_\nu$ (J m$^{-3}$ Hz$^{-1}$)")
+    spec = quantity_spec(quantity)
+    return (spec.x_label, spec.y_label)
 
 
 def physical_integral_units(quantity: PlanckQuantity) -> str:
     """Units of the spectrum integrated over its physical horizontal coordinate."""
-    validate_quantity(quantity)
-    if quantity in ("wavelength", "frequency"):
-        return "W m^-2 sr^-1"
-    return "J m^-3"
+    return quantity_spec(quantity).integral_units

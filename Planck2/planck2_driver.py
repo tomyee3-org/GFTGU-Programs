@@ -8,13 +8,11 @@ import planck2_physics as phys
 from planck2_physics import (
     PlanckDomain,
     PlanckQuantity,
-    SHAPE_EXPONENT,
     _ln_shape_function_unchecked,
     coordinate_jacobian,
     exact_physical_integral,
-    physical_integral_units,
     prefactor,
-    units_label,
+    quantity_spec,
     validate_quantity,
     x_to_frequency,
     x_to_wavelength,
@@ -97,7 +95,11 @@ def run_planck2(
         pref,
         exact_integral,
     )
-    p = SHAPE_EXPONENT[quantity]
+    spec = quantity_spec(quantity)
+    p = spec.shape_exponent
+    to_coordinate = (
+        x_to_wavelength if spec.coordinate == "wavelength" else x_to_frequency
+    )
 
     x_values: List[float] = []
     coord_values: List[float] = []
@@ -109,11 +111,7 @@ def run_planck2(
     y_last = pref * f_last
     jac_last = coordinate_jacobian(quantity, x, T)
 
-    coord_last = (
-        x_to_wavelength(x, T)
-        if quantity == "wavelength"
-        else x_to_frequency(x, T)
-    )
+    coord_last = to_coordinate(x, T)
     _require_positive_finite_values(
         "The first sampled point",
         x,
@@ -141,11 +139,7 @@ def run_planck2(
         f = math.exp(_ln_shape_function_unchecked(x, p, domain))
         y = pref * f
         jac = coordinate_jacobian(quantity, x, T)
-        coord = (
-            x_to_wavelength(x, T)
-            if quantity == "wavelength"
-            else x_to_frequency(x, T)
-        )
+        coord = to_coordinate(x, T)
         _require_positive_finite_values(
             "A sampled point",
             x,
@@ -176,8 +170,6 @@ def run_planck2(
     computed = (f_peak, y_peak, dimensionless_area, physical_integral)
     _require_positive_finite_values("The completed result", *computed)
 
-    x_label, y_label = units_label(quantity)
-
     return Planck2Result(
         model_version=phys.MODEL_VERSION,
         build_id=phys.BUILD_ID,
@@ -192,7 +184,7 @@ def run_planck2(
         dimensionless_area=dimensionless_area,
         physical_integral=physical_integral,
         exact_physical_integral=exact_integral,
-        physical_integral_units=physical_integral_units(quantity),
-        x_label=x_label,
-        y_label=y_label,
+        physical_integral_units=spec.integral_units,
+        x_label=spec.x_label,
+        y_label=spec.y_label,
     )

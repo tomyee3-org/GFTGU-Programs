@@ -7,11 +7,7 @@ import matplotlib.pyplot as plt
 import math
 
 from planck2_driver import Planck2Result
-from planck2_physics import (
-    physical_integral_units,
-    units_label,
-    validate_quantity,
-)
+from planck2_physics import quantity_spec
 
 Corner = Literal["upper right", "upper left", "lower right", "lower left"]
 
@@ -37,7 +33,7 @@ def _validate_result(result: Planck2Result) -> None:
     if not isinstance(result, Planck2Result):
         raise ValueError("result must be a Planck2Result instance.")
 
-    validate_quantity(result.quantity)
+    spec = quantity_spec(result.quantity)
     if (
         not isinstance(result.T, (int, float))
         or isinstance(result.T, bool)
@@ -106,11 +102,9 @@ def _validate_result(result: Planck2Result) -> None:
             "Planck2Result peak fields must identify the first sampled maximum."
         )
 
-    expected_x_label, expected_y_label = units_label(result.quantity)
-    expected_integral_units = physical_integral_units(result.quantity)
-    if result.x_label != expected_x_label or result.y_label != expected_y_label:
+    if result.x_label != spec.x_label or result.y_label != spec.y_label:
         raise ValueError("Planck2Result axis labels do not match its quantity.")
-    if result.physical_integral_units != expected_integral_units:
+    if result.physical_integral_units != spec.integral_units:
         raise ValueError(
             "Planck2Result physical-integral units do not match its quantity."
         )
@@ -166,8 +160,12 @@ def plot_planck2(
 
     ax.plot(coords, ys, linewidth=2, color="darkred")
     ax.axvline(result.coord_peak, color="gray", linestyle=":", linewidth=1)
-    if xlim is not None:
-        ax.set_xlim(xlim)
+    if xlim is None:
+        # Show exactly the computed coordinate range; Matplotlib's default
+        # margin would otherwise extend the axis to negative wavelengths or
+        # frequencies, which have no physical meaning.
+        xlim = (coords[0], coords[-1])
+    ax.set_xlim(xlim)
 
     ax.set_xlabel(result.x_label)
     ax.set_ylabel(result.y_label)
@@ -177,11 +175,7 @@ def plot_planck2(
     )
     ax.grid(True, alpha=0.3)
 
-    quantity_name = {
-        "wavelength": "λ",
-        "frequency": "ν",
-        "energy_density": "ν",
-    }[result.quantity]
+    quantity_name = quantity_spec(result.quantity).coordinate_symbol
 
     anchor = _CORNER_TO_ANCHOR[corner]
     text = (

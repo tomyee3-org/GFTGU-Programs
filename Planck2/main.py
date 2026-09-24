@@ -13,7 +13,8 @@ Inputs (use `python main.py --help` for their current defaults):
     integration domain x = h nu / (k T).
 `--x_low`, `--x_high`: approximation switches inside the domain. The
     small-x Rayleigh-Jeans form is used below x_low and the large-x Wien
-    form above x_high.
+    form above x_high. Require x_min <= x_low < x_high <= x_max, so lowering
+    --x_max below the default x_high of 20 also needs a lower --x_high.
 `--corner {upper_right,upper_left,lower_right,lower_left}`: position of the
     plot annotation; underscores map to the plotter's spaced internal names.
 `--y_frac_window FRACTION`: fraction of the peak used to window the
@@ -33,7 +34,7 @@ import math
 import planck2_physics
 from planck2_driver import MAX_STEPS, run_planck2
 from planck2_plot import plot_planck2
-from planck2_physics import PlanckDomain, SHAPE_EXPONENT
+from planck2_physics import PlanckDomain, QUANTITY_SPECS, quantity_spec
 
 
 CORNER_NAMES = {
@@ -89,7 +90,8 @@ def _exact_dimensionless_area(p: int) -> float:
     raise ValueError(f"No closed form on hand for p={p}")
 
 
-def parse_args(argv=None):
+def build_parser():
+    """Return the command-line parser (separate so tests and tools can inspect it)."""
     parser = argparse.ArgumentParser(
         prog="Planck2",
         description="Explore black-body spectra in dimensionless and SI forms.",
@@ -108,7 +110,7 @@ def parse_args(argv=None):
         help="positive black-body temperature [K]",
     )
     parser.add_argument(
-        "--quantity", choices=tuple(SHAPE_EXPONENT), default="wavelength",
+        "--quantity", choices=tuple(QUANTITY_SPECS), default="wavelength",
         help=("spectral quantity: wavelength is radiance per wavelength; "
               "frequency is radiance per frequency; energy_density is "
               "energy per volume per frequency"),
@@ -127,11 +129,13 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--x_low", type=_positive_float, default=0.05, metavar="X",
-        help="threshold below which the Rayleigh-Jeans approximation is used",
+        help=("threshold below which the Rayleigh-Jeans approximation is used; "
+              "require x_min <= x_low < x_high <= x_max"),
     )
     parser.add_argument(
         "--x_high", type=_positive_float, default=20.0, metavar="X",
-        help="threshold above which the Wien approximation is used",
+        help=("threshold above which the Wien approximation is used; "
+              "lower it when you lower x_max"),
     )
     parser.add_argument(
         "--corner", choices=tuple(CORNER_NAMES), default="upper_right",
@@ -142,11 +146,19 @@ def parse_args(argv=None):
         "--y_frac_window", type=_fraction, default=0.003, metavar="FRAC",
         help="display window relative to peak (0 shows the full coordinate domain)",
     )
+    return parser
+
+
+def parse_args(argv=None):
+    parser = build_parser()
     args = parser.parse_args(argv)
     try:
         PlanckDomain(args.x_min, args.x_max, args.x_low, args.x_high).validate()
     except ValueError as exc:
-        parser.error(str(exc))
+        parser.error(
+            f"{exc} Got x_min={args.x_min:g}, x_low={args.x_low:g}, "
+            f"x_high={args.x_high:g}, x_max={args.x_max:g}."
+        )
     return args
 
 
@@ -169,7 +181,7 @@ def main(argv=None):
     except (ValueError, OverflowError, RuntimeError) as exc:
         raise SystemExit(f"Planck2 input/model error: {exc}") from exc
 
-    exact_shape = _exact_dimensionless_area(SHAPE_EXPONENT[args.quantity])
+    exact_shape = _exact_dimensionless_area(quantity_spec(args.quantity).shape_exponent)
     print(
         f"Planck2 {result.model_version} (build {result.build_id}) — "
         f"peak at x = {result.x_peak:.6f}"
