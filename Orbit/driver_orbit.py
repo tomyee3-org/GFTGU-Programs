@@ -7,15 +7,18 @@ It uses:
   * adaptive timestep reduction and gradual recovery,
   * Euclidean vector convergence tests,
   * accumulated unwrapped azimuth for revolution counting,
-  * explicit termination reasons and conservation diagnostics.
+  * explicit termination reasons (TerminationReason) and conservation
+    diagnostics.
 
 The requested maximum timestep is dt0.  The working timestep may shrink where
-the orbit changes rapidly and then recover toward dt0.
+the orbit changes rapidly and then recover toward dt0.  The retry limits,
+iteration limits, and timestep factors are the module constants defined below.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from numbers import Integral, Real
 from typing import Literal
 import math
@@ -40,6 +43,34 @@ OutputType = Literal[
 ]
 
 
+class TerminationReason(str, Enum):
+    """Why an integration stopped.
+
+    Each member is also the plain string it has always been, so
+    ``result.termination_reason == "max_steps"`` remains true.
+    """
+
+    MAX_ORBITS = "max_orbits"
+    MAX_STEPS = "max_steps"
+    CENTRAL_SINGULARITY = "central_singularity"
+
+    def __str__(self) -> str:
+        return self.value
+
+
+# Numerical-method limits and factors.  Every retry limit, iteration limit,
+# and timestep factor used by run_orbit() is defined here.
+MAX_CORRECTOR_ITERATIONS = 10       # corrector passes before a step is halved
+MAX_RETRIES_PER_STEP = 80           # trial timesteps before the run is abandoned
+MAX_EVENT_REFINEMENT_TRIALS = 80    # trials allowed to locate the final endpoint
+MAX_ANGULAR_STEP = 0.5 * math.pi    # largest angular travel of one accepted step (rad)
+TIMESTEP_SHRINK_FACTOR = 0.5        # applied to a rejected trial step
+TIMESTEP_GROWTH_FACTOR = 1.1        # applied after an accepted step, up to dt0
+SINGULARITY_GUARD_RELATIVE = 1.0e-12  # guard radius / initial radius
+SINGULARITY_GUARD_ULPS = 32.0       # floor on the guard, in floating-point spacings
+SINGULARITY_STOP_FACTOR = 1024.0    # accepted-state stop radius / guard radius
+
+
 @dataclass
 class OrbitResult:
     """Full trajectory history plus run diagnostics."""
@@ -56,7 +87,7 @@ class OrbitResult:
     KEs: NDArray[np.float64]
     Hs: NDArray[np.float64]
 
-    termination_reason: str
+    termination_reason: TerminationReason
     accepted_steps: int
     final_time: float
     revolutions_completed: float
@@ -90,7 +121,7 @@ def _validate_inputs(
         "yInit": yInit,
         "vxInit": vxInit,
         "vyInit": vyInit,
-        "mu": mu,
+        "k": mu,
         "dt0": dt0,
         "eps1": eps1,
         "eps2": eps2,
@@ -105,7 +136,7 @@ def _validate_inputs(
     if math.hypot(xInit, yInit) <= 0.0:
         raise ValueError("The initial position must not be at r=0.")
     if mu <= 0.0:
-        raise ValueError("mu=GM must be positive.")
+        raise ValueError("k=GM must be positive.")
     if dt0 <= 0.0:
         raise ValueError("dt0 must be positive.")
     if not isinstance(maxSteps, Integral) or isinstance(maxSteps, bool) or maxSteps <= 0:
@@ -221,6 +252,7 @@ def run_orbit(
     A bound orbit normally terminates at maxOrbits accumulated azimuthal
     revolutions.  An unbound or radial orbit generally terminates at maxSteps,
     unless the trajectory approaches the mathematical point-mass singularity.
+    The result's ``termination_reason`` is a :class:`TerminationReason`.
     """
     _validate_inputs(
         xInit, yInit, vxInit, vyInit,
@@ -256,14 +288,13 @@ def run_orbit(
     # ulp term keeps the threshold representable without imposing an SI length
     # floor that would exclude otherwise valid microscopic models.
     singularity_guard = max(
-        1.0e-12 * initial_radius,
-        32.0 * math.ulp(initial_radius),
+        SINGULARITY_GUARD_RELATIVE * initial_radius,
+        SINGULARITY_GUARD_ULPS * math.ulp(initial_radius),
     )
     # Stop accepted radial infall before roundoff-scale trial rejection makes
     # further progress unreliable.  This factor leaves room for timestep
     # refinement without assigning a physical radius to the central body.
-    singularity_stop_factor = 1024.0
-    singularity_stop_radius = singularity_stop_factor * singularity_guard
+    singularity_stop_radius = SINGULARITY_STOP_FACTOR * singularity_guard
 
     xs = [x]
     ys = [y]
@@ -293,16 +324,12 @@ def run_orbit(
     max_absolute_h_drift = 0.0
 
     dt_work = float(dt0)
-    max_corrector_iterations = 10
-    max_retries_per_step = 80
-    max_angular_step = 0.5 * math.pi
-    max_event_refinement_trials = 80
 
     angle_previous = math.atan2(y, x)
     accumulated_angle = 0.0
     target_angle = 2.0 * math.pi * maxOrbits
 
-    termination_reason = "max_steps"
+    termination_reason = TerminationReason.MAX_STEPS
     accepted_steps = 0
     closure_radius_residual = None
     closure_velocity_residual = None
@@ -320,12 +347,12 @@ def run_orbit(
 
     while accepted_steps < maxSteps:
         if math.hypot(x, y) <= singularity_stop_radius:
-            termination_reason = "central_singularity"
+            termination_reason = TerminationReason.CENTRAL_SINGULARITY
             break
 
         accepted = False
 
-        for _retry in range(max_retries_per_step):
+        for _retry in range(MAX_RETRIES_PER_STEP):
             ax0, ay0 = compute_acceleration(x, y, k)
 
             # Constant-acceleration predictor.
@@ -341,13 +368,13 @@ def run_orbit(
                 or not math.isfinite(predicted_radius)
                 or predicted_radius <= singularity_guard
             ):
-                dt_work *= 0.5
+                dt_work *= TIMESTEP_SHRINK_FACTOR
                 continue
 
             ax_pred, ay_pred = compute_acceleration(x_pred, y_pred, k)
 
             if _relative_vector_change(ax0, ay0, ax_pred, ay_pred) > eps1:
-                dt_work *= 0.5
+                dt_work *= TIMESTEP_SHRINK_FACTOR
                 continue
 
             # Iterated trapezoidal corrector.  Convergence is measured on
@@ -364,7 +391,7 @@ def run_orbit(
             converged = False
             trial_hits_guard = False
 
-            for _ in range(max_corrector_iterations):
+            for _ in range(MAX_CORRECTOR_ITERATIONS):
                 vx_corr = vx + 0.5 * (ax0 + ax_end) * dt_work
                 vy_corr = vy + 0.5 * (ay0 + ay_end) * dt_work
                 x_corr = x + 0.5 * (vx + vx_corr) * dt_work
@@ -403,11 +430,11 @@ def run_orbit(
                 ax_end, ay_end = compute_acceleration(x_guess, y_guess, k)
 
             if trial_hits_guard:
-                dt_work *= 0.5
+                dt_work *= TIMESTEP_SHRINK_FACTOR
                 continue
 
             if not converged:
-                dt_work *= 0.5
+                dt_work *= TIMESTEP_SHRINK_FACTOR
                 continue
 
             segment_radius = _minimum_segment_radius(x, y, x_guess, y_guess)
@@ -415,7 +442,7 @@ def run_orbit(
                 # A guard intersection in a coarse trial is not itself a
                 # physical event.  Retry with a smaller step; genuine infall
                 # terminates only after accepted states approach the guard.
-                dt_work *= 0.5
+                dt_work *= TIMESTEP_SHRINK_FACTOR
                 continue
 
             h_start = abs(specific_angular_momentum(x, y, vx, vy))
@@ -426,11 +453,11 @@ def run_orbit(
                 )
             except OverflowError:
                 angular_step_estimate = math.inf
-            if not math.isfinite(angular_step_estimate) or angular_step_estimate > max_angular_step:
+            if not math.isfinite(angular_step_estimate) or angular_step_estimate > MAX_ANGULAR_STEP:
                 # This conservative endpoint/chord estimate is a numerical
                 # safeguard, not a formal bound on the curved numerical path.
                 angular_step_rejections += 1
-                dt_work *= 0.5
+                dt_work *= TIMESTEP_SHRINK_FACTOR
                 continue
 
             accepted = True
@@ -439,7 +466,7 @@ def run_orbit(
         if not accepted:
             raise RuntimeError(
                 "Orbit could not find a converged timestep after "
-                f"{max_retries_per_step} retries at t={t:.6g} s, "
+                f"{MAX_RETRIES_PER_STEP} retries at t={t:.6g} s, "
                 f"r={math.hypot(x, y):.6g} m, dt={dt_work:.6g} s."
             )
 
@@ -470,10 +497,10 @@ def run_orbit(
         if event_needed is not None:
             event_trials_this_step += 1
             event_refinement_trials += 1
-            if event_trials_this_step > max_event_refinement_trials:
+            if event_trials_this_step > MAX_EVENT_REFINEMENT_TRIALS:
                 raise RuntimeError(
                     "Orbit could not refine the final revolution endpoint after "
-                    f"{max_event_refinement_trials} trials at t={t:.6g} s."
+                    f"{MAX_EVENT_REFINEMENT_TRIALS} trials at t={t:.6g} s."
                 )
 
             trial_angle = abs(delta_angle)
@@ -482,7 +509,7 @@ def run_orbit(
             if abs(event_error) <= event_tolerance:
                 # Keep the actual integrated azimuth so the returned arrays
                 # and revolutions_completed describe the same endpoint.
-                termination_reason = "max_orbits"
+                termination_reason = TerminationReason.MAX_ORBITS
             else:
                 if event_error > 0.0:
                     event_upper_dt = dt_work
@@ -562,7 +589,7 @@ def run_orbit(
                 _fractional_drift(h_now, h0),
             )
 
-        if termination_reason == "max_orbits":
+        if termination_reason is TerminationReason.MAX_ORBITS:
             # Closure residuals compare the final state with the initial state
             # and are meaningful only after an integral number of revolutions.
             nearest_integer_orbits = round(maxOrbits)
@@ -577,7 +604,7 @@ def run_orbit(
             break
 
         # Gradual recovery after demanding portions of the orbit.
-        dt_work = min(dt_work * 1.1, dt0)
+        dt_work = min(dt_work * TIMESTEP_GROWTH_FACTOR, dt0)
 
     revolutions = abs(accumulated_angle) / (2.0 * math.pi)
 

@@ -24,7 +24,7 @@ from typing import NamedTuple
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.4.0"
+MODEL_VERSION = "1.5.0"
 BUILD_ID_COVERS = (
     "physics_orbit.py",
     "driver_orbit.py",

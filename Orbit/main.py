@@ -44,7 +44,7 @@ import argparse
 import math
 
 import physics_orbit
-from driver_orbit import OutputType, OrbitResult, run_orbit
+from driver_orbit import OutputType, OrbitResult, TerminationReason, run_orbit
 from physics_orbit import GM_SUN
 from plot_orbit import plot_orbit
 
@@ -58,7 +58,8 @@ OUTPUT_CHOICES: tuple[OutputType, ...] = (
 )
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
+    """Return the command-line parser, which defines every option and default."""
     parser = argparse.ArgumentParser(
         prog="Orbit",
         description=(
@@ -129,7 +130,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "components; energy=specific-energy components"
         ),
     )
-    return parser.parse_args(argv)
+    return parser
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    return build_parser().parse_args(argv)
 
 
 def _five_significant(value: float) -> str:
@@ -140,20 +145,28 @@ def _five_significant(value: float) -> str:
     if value == 0.0:
         return "0.0000"
 
-    exponent = math.floor(math.log10(abs(value)))
+    # Take the exponent from the value after rounding to five digits, so a
+    # value such as 0.99999996 prints as 1.0000 rather than 1.00000.
+    scientific = f"{value:.4e}"
+    exponent = int(scientific.split("e")[1])
     if -4 <= exponent < 5:
         decimal_places = max(0, 4 - exponent)
         return f"{value:.{decimal_places}f}"
-    return f"{value:.4e}"
+    return scientific
+
+
+TERMINATION_TEXT: dict[TerminationReason, str] = {
+    TerminationReason.MAX_ORBITS: "requested revolution count reached",
+    TerminationReason.MAX_STEPS: "maximum accepted-step count reached",
+    TerminationReason.CENTRAL_SINGULARITY: "point-mass singularity approached",
+}
 
 
 def _summary_lines(result: OrbitResult) -> list[str]:
     """Return the complete human-readable run summary."""
-    reason = {
-        "max_orbits": "requested revolution count reached",
-        "max_steps": "maximum accepted-step count reached",
-        "central_singularity": "point-mass singularity approached",
-    }.get(result.termination_reason, result.termination_reason)
+    reason = TERMINATION_TEXT.get(
+        result.termination_reason, str(result.termination_reason)
+    )
 
     lines = [
         f"  termination             : {reason}",
@@ -257,7 +270,8 @@ def _summary_lines(result: OrbitResult) -> list[str]:
 
     if (
         elements.classification == "hyperbolic"
-        and result.termination_reason in ("max_steps", "max_orbits")
+        and result.termination_reason
+        in (TerminationReason.MAX_STEPS, TerminationReason.MAX_ORBITS)
     ):
         final_radius = math.hypot(result.xs[-1], result.ys[-1])
         final_speed = math.hypot(result.vxs[-1], result.vys[-1])
