@@ -1730,6 +1730,62 @@ class Audit21Tests(unittest.TestCase):
         self.assertIn("at least 2", text)
 
 
+def math_blocks(html: str) -> list:
+    """TeX source of every \\( \\) and \\[ \\] block outside <pre> and <code>."""
+    body = re.sub(r"<(pre|code|script|style)[^>]*>.*?</\1>", "", html, flags=re.DOTALL)
+    return [a or b for a, b in re.findall(r"\\\[(.*?)\\\]|\\\((.*?)\\\)", body, re.DOTALL)]
+
+
+class Audit22Tests(unittest.TestCase):
+    """Rendered meaning of the TeX, the seed sentence, and the original's validation note."""
+
+    def test_no_math_block_contains_a_tex_line_break(self):
+        documents = [("claude", HELP_HTML)]
+        original = HELP_FILE.with_name("Random2-original.html")
+        if original.is_file():
+            documents.append(("original", original.read_text(encoding="utf-8")))
+        for name, html in documents:
+            blocks = math_blocks(html)
+            self.assertGreater(len(blocks), 50)
+            for block in blocks:
+                with self.subTest(document=name, block=block[:40]):
+                    self.assertNotIn("\\\\", block)
+
+    def test_eq5_uses_the_logarithm_operator(self):
+        body = section_html(HELP_HTML, "beat0")
+        eq5 = body[body.index('<span class="eq-label">(5)</span>'):]
+        eq5 = eq5[:eq5.index("\\]")]
+        self.assertIn("\\log\\langle d\\rangle\\approx\\tfrac12\\log N+\\log C", eq5)
+        self.assertNotRegex(eq5, r"\\\\[A-Za-z]")
+
+    def test_seed_sentence_does_not_promise_agreement_within_one_standard_error(self):
+        text = html_text(section_html(HELP_HTML, "beats"))
+        self.assertNotIn("agree with these within their standard errors", text)
+        self.assertIn("combined standard error of Beat 8", text)
+        self.assertIn("more than two combined standard errors is expected", text)
+        twelve = run_cli(SEED).result
+        two = run_cli(("--seed", "2")).result
+        difference = abs(twelve.averages[-1] - two.averages[-1])
+        combined = math.hypot(twelve.standard_errors[-1], two.standard_errors[-1])
+        self.assertAlmostEqual(difference / combined, 2.09, places=2)
+
+    def test_original_distinguishes_parser_checks_from_derived_checks(self):
+        original = HELP_FILE.with_name("Random2-original.html")
+        if not original.is_file():
+            self.skipTest("Random2-original.html is not present in this layout")
+        parser = _HelpSemanticParser()
+        parser.feed(original.read_text(encoding="utf-8"))
+        text = " ".join("".join(parser.visible_text).split())
+        self.assertIn("are rejected by the command-line parser", text)
+        self.assertIn("checked by the program after parsing but before any walk starts", text)
+        self.assertNotIn("out-of-range physical parameters", text)
+        run = run_cli(("--display", "walk2d", "--radius", "1e155", "--mean_free_path", "1",
+                       "--n_walks", "1", "--step_cap", "1", *SEED))
+        self.assertTrue(run.stdout.startswith("Random2 "))
+        self.assertEqual(run.stderr, "")
+        self.assertIn("Random2 input/model error", str(run.exit_code))
+
+
 class HelpOriginalCompatibilityTests(unittest.TestCase):
     """The Reference Guide version is optional; these tests never require it."""
 
