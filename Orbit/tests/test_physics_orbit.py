@@ -839,6 +839,9 @@ class NumericalConstantTests(unittest.TestCase):
         "SINGULARITY_GUARD_RELATIVE": 1.0e-12,
         "SINGULARITY_GUARD_ULPS": 32.0,
         "SINGULARITY_STOP_FACTOR": 1024.0,
+        "EVENT_ANGLE_RELATIVE_TOLERANCE": 1.0e-12,
+        "EVENT_ANGLE_FLOOR": 1.0e-14,
+        "MIN_MAX_ORBITS": 1.0e-9,
     }
 
     def test_constants_exist_with_the_documented_values(self) -> None:
@@ -1401,6 +1404,9 @@ class HelpReferenceTests(unittest.TestCase):
             "SINGULARITY_GUARD_RELATIVE": "10<sup>&minus;12</sup>",
             "SINGULARITY_GUARD_ULPS": "32",
             "SINGULARITY_STOP_FACTOR": "1024",
+            "EVENT_ANGLE_RELATIVE_TOLERANCE": "10<sup>&minus;12</sup>",
+            "EVENT_ANGLE_FLOOR": "10<sup>&minus;14</sup>",
+            "MIN_MAX_ORBITS": "10<sup>&minus;9</sup>",
         }
         self.assertEqual(set(rows), set(NumericalConstantTests.EXPECTED))
         for name, shown in display.items():
@@ -1844,7 +1850,9 @@ class RunDiagnosticTests(unittest.TestCase):
         self.assertIsNone(empty.shortest_accepted_step)
         self.assertIsNone(empty.longest_accepted_step)
         lines = "\n".join(orbit_main._summary_lines(empty))
-        self.assertIn("accepted timestep range  : n/a (no step accepted)", lines)
+        self.assertIn("shortest accepted step   : n/a (no step accepted)", lines)
+        self.assertIn("longest accepted step    : n/a (no step accepted)", lines)
+        self.assertIn("n/a (no step accepted)", html_text(section_html(HELP_HTML, "summary")))
 
     def test_specific_energy_of_the_starting_state_is_printed(self) -> None:
         expectations = {
@@ -1862,6 +1870,26 @@ class RunDiagnosticTests(unittest.TestCase):
                     printed,
                 )
 
+    def test_final_specific_energy_is_printed_and_matches_the_last_state(self) -> None:
+        for arguments, printed in (
+            ((), "-1.1457e+09"),
+            (("--vyInit", "75961", "--maxSteps", "600"), "82138"),
+            (("--vyInit", "85000", "--maxSteps", "600"), "7.2756e+08"),
+        ):
+            with self.subTest(arguments=arguments):
+                run = run_cli(arguments)
+                result = run.result
+                energy = (
+                    0.5 * (result.vxs[-1] ** 2 + result.vys[-1] ** 2)
+                    - physics.GM_SUN / math.hypot(result.xs[-1], result.ys[-1])
+                )
+                # energy is a difference of two large terms, so allow a few parts in 1e12 of the larger one
+                self.assertAlmostEqual(result.final_specific_energy, energy, delta=1e-6)
+                self.assertIn(f"  final specific energy    : {printed} J/kg\n", run.stdout)
+                # The change from the start can never exceed the reported maximum drift.
+                change = abs(result.final_specific_energy - result.orbital_elements.specific_energy)
+                self.assertLessEqual(change, result.max_absolute_specific_energy_drift * (1 + 1e-12))
+
     def test_the_hodograph_marks_the_origin_and_the_initial_velocity(self) -> None:
         result = circular_result(maxOrbits=0.1)
         with mock.patch.object(plotting.plt, "show"):
@@ -1871,6 +1899,48 @@ class RunDiagnosticTests(unittest.TestCase):
             plotting.plt.close("all")
         self.assertIn((0.0, 0.0), offsets)
         self.assertIn((float(result.vxs[0]), float(result.vys[0])), offsets)
+
+
+class SmallRevolutionTargetTests(unittest.TestCase):
+    """A tiny --maxOrbits must be met, or rejected; it may not silently overshoot."""
+
+    def test_targets_at_and_above_the_minimum_are_met_to_a_small_fraction(self) -> None:
+        for target in (1.0e-9, 3.0e-9, 1.0e-8, 1.0e-6, 1.0e-3, 0.01, 0.1, 0.5, 1.5):
+            with self.subTest(target=target):
+                result = run_result(maxOrbits=target)
+                self.assertIs(result.termination_reason, driver.TerminationReason.MAX_ORBITS)
+                self.assertAlmostEqual(result.revolutions_completed / target, 1.0, delta=1e-5)
+                self.assertIsNone(result.closure_radius_residual)
+                self.assertIsNone(result.closure_velocity_residual)
+
+    def test_minimum_target_is_met_from_any_starting_direction(self) -> None:
+        for angle in (0.3, 2.0, 3.1, -2.5):
+            with self.subTest(angle=angle):
+                c, s_ = math.cos(angle), math.sin(angle)
+                result = run_result(
+                    xInit=4.6e10 * c, yInit=4.6e10 * s_,
+                    vxInit=-58980.0 * s_, vyInit=58980.0 * c,
+                    maxOrbits=driver.MIN_MAX_ORBITS,
+                )
+                self.assertAlmostEqual(result.revolutions_completed / driver.MIN_MAX_ORBITS, 1.0, delta=1e-5)
+
+    def test_targets_below_the_minimum_are_rejected_with_a_clear_message(self) -> None:
+        for target in (1.0e-10, 1.0e-13, 1.0e-16, 1.0e-300):
+            with self.subTest(target=target):
+                with self.assertRaisesRegex(ValueError, "maxOrbits must be at least 1e-09"):
+                    run_result(maxOrbits=target)
+        with (
+            mock.patch.object(sys, "argv", ["main.py", "--maxOrbits", "1e-13"]),
+            self.assertRaisesRegex(SystemExit, "Orbit: maxOrbits must be at least 1e-09"),
+        ):
+            orbit_main.main()
+
+    def test_closure_needs_a_positive_whole_number_of_revolutions(self) -> None:
+        for target, expected in ((1.0, True), (2.0, True), (1.5, False), (0.5, False), (1.0e-9, False)):
+            with self.subTest(target=target):
+                result = run_result(maxOrbits=target)
+                self.assertEqual(result.closure_radius_residual is not None, expected)
+                self.assertEqual(result.closure_velocity_residual is not None, expected)
 
 
 class AuditFixClaimTests(unittest.TestCase):

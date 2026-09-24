@@ -33,10 +33,10 @@ def plot_orbit(result: OrbitResult, output: OutputType = "orbit") -> None:
 
     elif output == "velocity":
         ax.plot(result.vxs, result.vys, linewidth=2, label="Velocity")
-        ax.scatter([0], [0], s=35, marker="x", color="black", zorder=3,
+        ax.scatter([0], [0], s=60, marker="x", color="black", zorder=4,
                    label="Zero velocity (origin)")
-        ax.scatter([result.vxs[0]], [result.vys[0]], s=35, zorder=3,
-                   label="Initial velocity")
+        ax.scatter([result.vxs[0]], [result.vys[0]], s=70, color="tab:red",
+                   edgecolors="black", zorder=4, label="Initial velocity")
         ax.set_xlabel(r"$v_x$ (m/s)")
         ax.set_ylabel(r"$v_y$ (m/s)")
         ax.set_title("Orbit — Velocity Space (Hodograph)")

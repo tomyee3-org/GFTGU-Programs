@@ -180,7 +180,8 @@ def _summary_lines(result: OrbitResult) -> list[str]:
         f"  acceleration evaluations : {result.acceleration_evaluations}",
     ]
     if result.shortest_accepted_step is None:
-        lines.append("  accepted timestep range  : n/a (no step accepted)")
+        lines.append("  shortest accepted step   : n/a (no step accepted)")
+        lines.append("  longest accepted step    : n/a (no step accepted)")
     else:
         lines.append(
             "  shortest accepted step   : "
@@ -204,6 +205,10 @@ def _summary_lines(result: OrbitResult) -> list[str]:
     lines.append(
         "  max absolute specific-energy drift: "
         f"{_five_significant(result.max_absolute_specific_energy_drift)} J/kg"
+    )
+    lines.append(
+        "  final specific energy    : "
+        f"{_five_significant(result.final_specific_energy)} J/kg"
     )
 
     if result.max_fractional_angular_momentum_drift is None:

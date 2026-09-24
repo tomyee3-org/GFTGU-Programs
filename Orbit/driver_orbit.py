@@ -69,6 +69,10 @@ TIMESTEP_GROWTH_FACTOR = 1.1        # applied after an accepted step, up to dt0
 SINGULARITY_GUARD_RELATIVE = 1.0e-12  # guard radius / initial radius
 SINGULARITY_GUARD_ULPS = 32.0       # floor on the guard, in floating-point spacings
 SINGULARITY_STOP_FACTOR = 1024.0    # accepted-state stop radius / guard radius
+EVENT_ANGLE_RELATIVE_TOLERANCE = 1.0e-12  # endpoint angle error / requested angle
+EVENT_ANGLE_FLOOR = 1.0e-14         # roundoff floor on that error (rad); atan2 is good to ~1e-15
+MIN_MAX_ORBITS = 1.0e-9            # smallest accepted revolution target; the floor above is
+                                    # then at most about 2e-6 of the requested angle
 
 
 @dataclass
@@ -103,6 +107,11 @@ class OrbitResult:
     angular_step_rejections: int
     event_refinement_trials: int
     acceleration_evaluations: int = 0
+
+    @property
+    def final_specific_energy(self) -> float:
+        """Specific energy (J/kg) of the last accepted state, from its kinetic and potential parts."""
+        return float(self.KEs[-1] + self.PEs[-1])
 
     @property
     def shortest_accepted_step(self) -> float | None:
@@ -158,6 +167,11 @@ def _validate_inputs(
         raise ValueError("eps2 must be positive.")
     if maxOrbits <= 0.0:
         raise ValueError("maxOrbits must be positive.")
+    if maxOrbits < MIN_MAX_ORBITS:
+        raise ValueError(
+            f"maxOrbits must be at least {MIN_MAX_ORBITS:g} revolutions; a smaller "
+            "target cannot be placed reliably in floating point."
+        )
 
 
 def _relative_vector_change(
@@ -522,7 +536,7 @@ def run_orbit(
 
             trial_angle = abs(delta_angle)
             event_error = trial_angle - event_needed
-            event_tolerance = 1.0e-12 * max(1.0, target_angle)
+            event_tolerance = max(EVENT_ANGLE_RELATIVE_TOLERANCE * target_angle, EVENT_ANGLE_FLOOR)
             if abs(event_error) <= event_tolerance:
                 # Keep the actual integrated azimuth so the returned arrays
                 # and revolutions_completed describe the same endpoint.
@@ -610,7 +624,9 @@ def run_orbit(
             # Closure residuals compare the final state with the initial state
             # and are meaningful only after an integral number of revolutions.
             nearest_integer_orbits = round(maxOrbits)
-            if math.isclose(maxOrbits, nearest_integer_orbits, rel_tol=0.0, abs_tol=1.0e-12):
+            if nearest_integer_orbits >= 1 and math.isclose(
+                maxOrbits, nearest_integer_orbits, rel_tol=0.0, abs_tol=1.0e-12
+            ):
                 closure_radius_residual = abs(radius - initial_radius) / initial_radius
                 if initial_speed > 0.0:
                     closure_velocity_residual = (
