@@ -29,6 +29,7 @@ from random2_physics import (
     StepDistribution,
     circle_crossing_fraction,
     default_radius,
+    diffusion_step_scale,
     generate_component_step,
     generate_isotropic_step,
     point_at,
@@ -201,6 +202,9 @@ class Walk2DResult:
     reference_steps: int
     step_cap: int
     walks: Tuple[WalkPath, ...] = ()
+    # True when the radius was supplied directly, so reference_steps and the
+    # radius factor played no part in it.
+    radius_given: bool = False
 
 
 @dataclass(frozen=True)
@@ -270,6 +274,7 @@ def run_walk2d(
         "ray_length_factor", ray_length_factor
     )
 
+    radius_given = radius is not None
     if radius is None:
         radius = default_radius(
             reference_steps,
@@ -278,6 +283,9 @@ def run_walk2d(
         )
     else:
         radius = require_positive_finite_number("radius", radius)
+    # Reject scales whose (R / mean free path)^2 cannot be represented before
+    # any walk is started; the summary and Eq. (16) need that number.
+    diffusion_step_scale(radius, mean_free_path)
 
     walks: List[WalkPath] = []
 
@@ -340,4 +348,5 @@ def run_walk2d(
         reference_steps=reference_steps,
         step_cap=step_cap,
         walks=tuple(walks),
+        radius_given=radius_given,
     )

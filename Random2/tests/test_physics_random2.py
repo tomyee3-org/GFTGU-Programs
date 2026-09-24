@@ -1620,6 +1620,116 @@ class EndToEndSubprocessTests(unittest.TestCase):
         self.assertIn("max_steps must be at least 2", completed.stderr)
 
 
+class Audit21Tests(unittest.TestCase):
+    """Experiment 9 bound, asymptotic wording, scale limits, annotation provenance."""
+
+    def test_experiment9_bound_uses_r_over_lambda(self):
+        card = html_text(section_html(HELP_HTML, "experiments"))
+        exp9 = card[card.index("9 · Verify Escape Steps"):card.index("10 · ")]
+        self.assertIn(r"(1+\lambda/R)^2", exp9)
+        self.assertNotIn(r"(1+1/R)^2", exp9)
+        self.assertIn("mean escape steps / (R / mean free path)^2", exp9)
+        run = run_cli(("--display", "walk2d", "--radius", "30", "--mean_free_path", "2",
+                       "--n_walks", "200", *SEED))
+        stats = driver.escape_statistics(run.result)
+        scale = physics.diffusion_step_scale(30.0, 2.0)
+        ratio, error = stats.mean / scale, stats.standard_error / scale
+        self.assertLessEqual(1.0 - 3 * error, ratio)
+        self.assertLessEqual(ratio, (1 + 2 / 30) ** 2 + 3 * error)
+        self.assertLess(stats.mean / 30 ** 2, 0.3)  # dividing by R^2 alone would be wrong
+
+    def test_beat0_marks_eq5_as_asymptotic(self):
+        body = section_html(HELP_HTML, "beat0")
+        eq5 = body[body.index('<span class="eq-label">(5)</span>'):]
+        eq5 = eq5[:eq5.index("\\]")]
+        self.assertEqual(eq5.count(r"\approx"), 2)
+        text = html_text(body)
+        self.assertIn("Eq. (4) is exact for every", text)
+        self.assertIn("approaches a constant", text)
+
+    def test_beat2_constant_is_not_claimed_to_depend_only_weakly(self):
+        text = html_text(section_html(HELP_HTML, "beat2"))
+        self.assertNotIn("only weakly", text)
+        self.assertIn("about 4%", text)
+
+    def test_seed_wording_matches_the_commands(self):
+        text = html_text(section_html(HELP_HTML, "beats"))
+        self.assertNotIn("Every command on this page", text)
+        self.assertIn("The commands of Beats 0 to 7 include --seed 12", text)
+        for number in range(0, 8):
+            for command in documented_commands(section_html(HELP_HTML, f"beat{number}")):
+                self.assertIn("--seed 12", command)
+
+    def test_extreme_scale_ratios_are_rejected_with_a_message(self):
+        for radius in (1.0e155, 1.0e-160):
+            with self.subTest(radius=radius):
+                with self.assertRaisesRegex(ValueError, "between 1e-150 and 1e150"):
+                    driver.run_walk2d(n_walks=1, radius=radius, step_cap=1)
+                run = run_cli(("--display", "walk2d", "--radius", repr(radius), "--mean_free_path", "1",
+                               "--step_cap", "1", "--n_walks", "1", *SEED))
+                self.assertIn("Random2 input/model error", str(run.exit_code))
+                self.assertEqual(run.stdout.count("\n"), 1)
+
+    def test_scales_at_the_limits_are_accepted_and_printed_finitely(self):
+        for radius in (1.0e150, 1.0e-150):
+            with self.subTest(radius=radius):
+                run = run_cli(("--display", "walk2d", "--radius", repr(radius), "--step_cap", "1",
+                               "--n_walks", "1", *SEED))
+                self.assertIn(run.exit_code, (None, 0))
+                self.assertNotIn("inf", run.stdout)
+                self.assertNotRegex(run.stdout, r": 0\.0+\n")
+
+    def test_lengths_never_print_as_zero(self):
+        self.assertEqual(physics.length_text(89.44271909999159), "89.4427")
+        self.assertEqual(physics.length_text(30.0), "30.0000")
+        self.assertEqual(physics.length_text(0.004), "0.004")
+        self.assertEqual(physics.length_text(2.5e7), "2.5e+07")
+        output = run_cli(("--display", "walk2d", "--radius", "0.004", "--mean_free_path", "0.001",
+                          *SEED)).stdout
+        self.assertIn("star radius R: 0.004\n", output)
+        self.assertIn("(R / mean free path)^2: 16.0", output)
+
+    def test_annotation_says_when_the_radius_was_given(self):
+        for arguments, given in (({"radius": 0.004, "mean_free_path": 0.001}, True), ({}, False)):
+            with isolated_rng(3):
+                result = driver.run_walk2d(n_walks=2, **arguments)
+            self.assertIs(result.radius_given, given)
+            with mock.patch.object(plot.plt, "show"):
+                plot.plot_walk2d(result)
+            text = "\n".join(t.get_text() for t in plt.gca().texts)
+            plt.close("all")
+            with self.subTest(given=given):
+                self.assertNotIn("radius = 0.00\n", text)
+                if given:
+                    self.assertIn("radius = 0.004  (given)", text)
+                    self.assertNotIn("reference steps", text)
+                else:
+                    self.assertIn("reference steps = 2000", text)
+                    self.assertNotIn("(given)", text)
+
+    def test_plot_rejects_a_non_boolean_radius_given(self):
+        result = driver.Walk2DResult("v", "b", 1.0, 1.0, 1, 1,
+                                     (driver.WalkPath(((0.0, 0.0),), False, 0),), "yes")
+        with self.assertRaisesRegex(ValueError, "radius_given"):
+            plot.plot_walk2d(result)
+
+    def test_original_help_lists_every_current_option(self):
+        original = HELP_FILE.with_name("Random2-original.html")
+        if not original.is_file():
+            self.skipTest("Random2-original.html is not present in this layout")
+        parser = _HelpSemanticParser()
+        parser.feed(original.read_text(encoding="utf-8"))
+        listed = {r[0] for r in parser.table_rows if r and r[0].startswith("--")}
+        options = {
+            action.option_strings[0] for action in cli.build_parser()._actions
+            if action.option_strings and action.option_strings[0] not in ("-h", "--version")
+        }
+        self.assertEqual(listed, options)
+        text = " ".join("".join(parser.visible_text).split())
+        self.assertIn("the program prints a table", text)
+        self.assertIn("at least 2", text)
+
+
 class HelpOriginalCompatibilityTests(unittest.TestCase):
     """The Reference Guide version is optional; these tests never require it."""
 

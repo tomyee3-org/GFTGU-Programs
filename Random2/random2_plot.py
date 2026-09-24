@@ -13,6 +13,7 @@ from matplotlib.patches import Circle
 from random2_driver import Walk2DResult, escape_statistics
 from random2_physics import (
     fitted_loglog_slope,
+    length_text,
     require_finite_point,
     require_positive_finite_number,
 )
@@ -119,6 +120,8 @@ def _validate_walk2d_result(result: Walk2DResult) -> float:
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise ValueError(f"{name} must be a positive integer.")
 
+    if not isinstance(result.radius_given, bool):
+        raise ValueError("result.radius_given must be True or False.")
     if not isinstance(result.walks, (list, tuple)) or not result.walks:
         raise ValueError("result.walks must be a non-empty sequence.")
 
@@ -237,9 +240,13 @@ def plot_walk2d(
 
     anchor = _CORNER_TO_ANCHOR[corner]
     text_lines = [
-        f"radius = {result.radius:.2f}",
+        f"radius = {length_text(result.radius)}"
+        + ("  (given)" if result.radius_given else ""),
         f"mean free path = {result.mean_free_path:g}",
-        f"reference steps = {result.reference_steps}",
+    ]
+    if not result.radius_given:
+        text_lines.append(f"reference steps = {result.reference_steps}")
+    text_lines += [
         f"walks = {stats.n_walks}  (escaped: {stats.n_escaped})",
     ]
     if stats.n_escaped < stats.n_walks:

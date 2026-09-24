@@ -65,8 +65,10 @@ from random2_driver import (
     run_walk2d,
 )
 from random2_physics import (
+    diffusion_step_scale,
     fitted_loglog_slope,
     large_n_scaled_distance_ratio,
+    length_text,
     seed_generator,
 )
 from random2_plot import plot_scaled_distance, plot_walk2d
@@ -313,12 +315,17 @@ def scaled_distance_summary(result, seed=None):
 def walk2d_summary(result, seed=None):
     """Return the console summary lines for a two-dimensional star run."""
     stats = escape_statistics(result)
-    diffusion_steps = (result.radius / result.mean_free_path) ** 2
+    diffusion_steps = diffusion_step_scale(result.radius, result.mean_free_path)
     lines = [
         "display: walk2d",
-        f"star radius R: {result.radius:.4f}",
+        f"star radius R: {length_text(result.radius)}",
         f"mean free path: {result.mean_free_path:g}",
-        f"(R / mean free path)^2: {diffusion_steps:.1f}",
+        "(R / mean free path)^2: "
+        + (
+            f"{diffusion_steps:.1f}"
+            if 0.1 <= diffusion_steps < 1.0e9
+            else f"{diffusion_steps:.6g}"
+        ),
         f"step cap: {result.step_cap}",
         f"seed: {_seed_text(seed)}",
     ]

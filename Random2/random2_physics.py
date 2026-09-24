@@ -35,7 +35,7 @@ from typing import Literal, Optional, Sequence, Tuple
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.3.0"
+MODEL_VERSION = "1.4.0"
 BUILD_ID_COVERS = (
     "random2_physics.py",
     "random2_driver.py",
@@ -265,6 +265,40 @@ def default_radius(
             "radius_factor must be positive and finite."
         )
     return radius
+
+
+# Range of radius / mean_free_path whose square, and the ratios printed with
+# it, stay comfortably inside the normal floating-point range.
+DIFFUSION_RATIO_LIMITS = (1.0e-150, 1.0e150)
+
+
+def diffusion_step_scale(radius: float, mean_free_path: float) -> float:
+    """Return (radius / mean_free_path)^2, the diffusion step scale of Eq. (16).
+
+    Raise ValueError when the ratio or its square is not a positive finite
+    number, so that the summary never has to print 0 or infinity.
+    """
+    radius = require_positive_finite_number("radius", radius)
+    mean_free_path = require_positive_finite_number("mean_free_path", mean_free_path)
+    ratio = radius / mean_free_path
+    if not DIFFUSION_RATIO_LIMITS[0] <= ratio <= DIFFUSION_RATIO_LIMITS[1]:
+        raise ValueError(
+            f"(radius / mean_free_path)^2 is outside the supported range "
+            f"(radius / mean_free_path = {ratio:.6g}); use a radius and mean free "
+            "path whose ratio is between 1e-150 and 1e150."
+        )
+    return ratio * ratio
+
+
+def length_text(value: float) -> str:
+    """Format a length for the summary and the plot annotation.
+
+    Four decimals for ordinary sizes; six significant digits for very small or
+    very large ones, so that a valid length never prints as 0.0000.
+    """
+    if 0.01 <= abs(value) < 1.0e6:
+        return f"{value:.4f}"
+    return f"{value:.6g}"
 
 
 def circle_crossing_fraction(
