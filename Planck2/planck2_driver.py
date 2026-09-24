@@ -130,6 +130,7 @@ def run_planck2(
     coord_peak = coord_last
 
     x_previous = x
+    coord_previous = coord_last
     dimensionless_area = 0.0
     physical_integral = 0.0
 
@@ -148,6 +149,13 @@ def run_planck2(
         y = pref * f
         jac = coordinate_jacobian(quantity, x, T)
         coord = to_coordinate(x, T)
+        if coord == coord_previous:
+            raise ValueError(
+                "n_steps is too large for the x range: neighbouring grid "
+                "points give the same wavelength or frequency in floating "
+                "point. Widen the range or lower n_steps."
+            )
+        coord_previous = coord
         _require_positive_finite_values(
             "A sampled point",
             x,

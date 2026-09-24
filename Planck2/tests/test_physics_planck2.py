@@ -1954,6 +1954,93 @@ class Audit22Tests(unittest.TestCase):
         self.assertIn("not distinct", str(raised.exception))
 
 
+class Audit23Tests(unittest.TestCase):
+    """Per-run attribution in Beat 7, the large-x safeguard in the Help, coincident coordinates."""
+
+    ORDINALS = ("first", "second", "third", "fourth", "fifth")
+
+    def test_beat7_numbers_are_attributed_to_the_run_that_prints_them(self):
+        body = section_html(HELP_HTML, "beat7")
+        commands = documented_commands(body)
+        self.assertEqual(len(commands), 5)
+        tasks = html_text(re.search(r"<p>Three tasks, in order\.(.*?)</p>", body, re.DOTALL).group(1))
+        segments = re.split(r"(?=Then read the )", tasks)
+        checked = 0
+        for segment in segments:
+            match = re.match(r"Then read the (\w+) run", segment)
+            if not match:
+                continue
+            index = self.ORDINALS.index(match.group(1))
+            printed = printed_by(command_arguments(commands[index]))
+            tokens = set(HelpQuotedNumberTests.PRINTED.findall(segment)) | set(
+                re.findall(r"\d\.\d{4}e[+-]\d\d", segment)
+            )
+            tokens -= {"2.9281e+13"}  # the default run's peak value, quoted for comparison
+            with self.subTest(run=match.group(1)):
+                self.assertTrue(tokens)
+                self.assertEqual(sorted(tok for tok in tokens if tok not in printed), [])
+            checked += 1
+        self.assertEqual(checked, 2)
+        self.assertNotIn("last run", html_text(body))
+
+    def test_beat7_ratios_match_the_fourth_and_fifth_runs(self):
+        fourth = run_cli(("--x_low", "5", "--x_high", "6")).result
+        fifth = run_cli(("--x_low", "4")).result
+        default = run_cli(()).result
+        self.assertAlmostEqual(fifth.physical_integral / fifth.exact_physical_integral, 3.65, places=2)
+        self.assertAlmostEqual(fifth.y_peak / default.y_peak, 11.6, places=1)
+        self.assertAlmostEqual(fourth.physical_integral / fourth.exact_physical_integral, 6.6, places=1)
+        self.assertIn("3.65 times", html_text(section_html(HELP_HTML, "beat7")))
+
+    def test_help_documents_the_large_x_safeguard_as_a_named_constant(self):
+        parser = HelpStructureParser()
+        parser.feed(HELP_HTML)
+        rows = {r[0]: r[1] for s, r in parser.rows if s == "algorithm" and len(r) == 3}
+        self.assertEqual(float(rows["_EXPM1_SAFE_LIMIT"]), phys._EXPM1_SAFE_LIMIT)
+        for section in ("beat7", "algorithm"):
+            text = html_text(section_html(HELP_HTML, section))
+            with self.subTest(section=section):
+                self.assertIn("700", text)
+                self.assertIn(r"x+\ln(1-e^{-x})", text)
+
+    def test_neighbouring_grid_points_with_the_same_coordinate_are_rejected(self):
+        low = 4.965114
+        high = math.nextafter(low, math.inf)
+        domain = phys.PlanckDomain(x_min=low, x_max=high, x_low=low, x_high=high)
+        for quantity in phys.QUANTITY_SPECS:
+            with self.subTest(quantity=quantity):
+                with self.assertRaisesRegex(ValueError, "same wavelength or frequency.*Widen the range"):
+                    driver.run_planck2(3000.0, quantity, 1, domain)
+
+    def test_default_and_documented_grids_keep_distinct_monotonic_coordinates(self):
+        for quantity, sign in (("wavelength", -1), ("frequency", 1), ("energy_density", 1)):
+            for n_steps in (1, 10, 2000, 20000):
+                result = driver.run_planck2(5900.0, quantity, n_steps)
+                with self.subTest(quantity=quantity, n_steps=n_steps):
+                    self.assertTrue(all(
+                        sign * (b - a) > 0.0
+                        for a, b in zip(result.coord_values, result.coord_values[1:])
+                    ))
+
+    def test_plotter_rejects_a_result_whose_coordinates_span_no_interval(self):
+        result = driver.run_planck2(5900.0, "wavelength", 1)
+        flat = replace(result, coord_values=(result.coord_values[0],) * 2, coord_peak=result.coord_values[0])
+        with warnings.catch_warnings(record=True) as caught, mock.patch.object(plt, "show"):
+            warnings.simplefilter("always")
+            with self.assertRaisesRegex(ValueError, "nonzero interval"):
+                plotter.plot_planck2(flat, y_frac_window=0.0)
+        plt.close("all")
+        self.assertFalse(any("identical low and high" in str(w.message) for w in caught))
+
+    def test_zero_window_limits_are_exactly_the_coordinate_endpoints_for_a_one_step_run(self):
+        result = driver.run_planck2(5900.0, "frequency", 1, phys.PlanckDomain(1.0, 2.0, 1.0, 2.0))
+        with mock.patch.object(plt, "show"):
+            plotter.plot_planck2(result, y_frac_window=0.0)
+        limits = plt.gca().get_xlim()
+        plt.close("all")
+        self.assertEqual(limits, (min(result.coord_values), max(result.coord_values)))
+
+
 class HelpOriginalCompatibilityTests(unittest.TestCase):
     """The Reference Guide version is optional; these tests never require it."""
 

@@ -65,6 +65,10 @@ def _validate_result(result: Planck2Result) -> None:
         for value in result.coord_values
     ):
         raise ValueError("Planck2Result coordinates must be finite and positive.")
+    if min(result.coord_values) == max(result.coord_values):
+        raise ValueError(
+            "Planck2Result coordinates must span a nonzero interval."
+        )
     if not all(
         isinstance(value, (int, float))
         and not isinstance(value, bool)
