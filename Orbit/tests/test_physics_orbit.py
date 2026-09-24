@@ -2090,7 +2090,7 @@ class ReferenceGuideHelpTests(unittest.TestCase):
 # checks then apply in full.  While it is set, the checks require the documents
 # to still be at exactly that version, so the freeze cannot outlive the change
 # it stands for.
-COMPANION_DOCS_FROZEN_AT: str | None = "1.4.0"
+COMPANION_DOCS_FROZEN_AT: str | None = None
 
 RELEASE_NOTES_ACTIVE = re.compile(
     r"<b>Version:</b>\s*(?P<version>\d+\.\d+\.\d+)\s*<br>\s*<b>Build:</b>\s*(?P<build>[0-9a-f]{12})"
@@ -2199,35 +2199,140 @@ class DocumentationSetTests(unittest.TestCase):
         self.assertTrue(RELEASE_NOTES_PATH.is_file())
         self.assertTrue(SAMPLE_OUTPUTS_PATH.is_file())
 
+    # The two documents below follow Instructions_for_Release_Notes_and_Sample_Outputs_Guide.
+    # These checks replace earlier wording checks ("five significant digits",
+    # "Keplerian Elements", console-summary strings): the new specification asks for
+    # a different structure and for no printed console tables, so the structure is
+    # what is checked, together with the numbers the guide quotes.
+    RELEASE_NOTES_HEADINGS = [
+        "Release Status", "Open Bugs", "Major Improvements in This Release",
+        "Test Suite Growth", "Known Limitations", "Known Minor Maintenance Items",
+        "Version Identification",
+    ]
+
     def test_release_notes_match_current_version_and_build(self) -> None:
         self.require_synchronised_or_pending(RELEASE_NOTES_ACTIVE, self.release_notes)
-        self.assertIn("command-line", self.release_notes)
-        self.assertIn("five significant digits", self.release_notes)
-        self.assertIn("Keplerian Elements", self.release_notes)
+        self.assertIn(f"<title>Orbit {physics.MODEL_VERSION} Release Notes</title>", self.release_notes)
+        self.assertRegex(self.release_notes, r"<b>Date:</b> \d{4}-\d{2}-\d{2}")
+
+    def test_release_notes_have_the_required_sections_in_order_and_only_plain_html(self) -> None:
+        headings = re.findall(r"<h2>(.*?)</h2>", self.release_notes)
+        self.assertEqual(headings, self.RELEASE_NOTES_HEADINGS)
+        for forbidden in ("<table", "<script", "<style", "style=", "<img"):
+            self.assertNotIn(forbidden, self.release_notes)
+        tags = set(re.findall(r"</?([a-zA-Z0-9]+)", self.release_notes))
+        allowed = {"html", "head", "meta", "title", "body", "h1", "h2", "p", "ul", "ol", "li",
+                   "b", "i", "code", "sub", "sup", "br"}
+        self.assertLessEqual(tags, allowed)
+
+    def test_open_bugs_are_identified_and_state_a_reproduction(self) -> None:
+        section = re.search(r"<h2>Open Bugs</h2>(.*?)<h2>", self.release_notes, re.S).group(1)
+        entries = re.findall(r"<li>(.*?)</li>", section, re.S)
+        self.assertGreaterEqual(len(entries), 1)
+        for entry in entries:
+            with self.subTest(entry=entry[:40]):
+                self.assertRegex(entry, r"<b>OB-\d+</b> \(P[123]; ")
+                self.assertIn("Reproduction:", entry)
+                self.assertIn("Observed:", entry)
+                self.assertIn("Expected", entry)
+
+    def test_open_bug_about_the_maxorbits_minimum_is_removed_once_the_program_states_it(self) -> None:
+        help_text = run_cli(("--help",)).stdout
+        stated_in_help = "1e-9" in help_text or "1e-09" in help_text
+        listed_open = "<b>OB-1</b>" in self.release_notes and "lower limit of <code>--maxOrbits</code>" in self.release_notes
+        self.assertNotEqual(stated_in_help, listed_open, "OB-1 and the program's --help disagree")
+
+    def test_release_notes_test_growth_ends_at_the_current_suite_size(self) -> None:
+        counts = [int(n) for n in re.findall(r"(?:\d\.\d\.\d: |, )(\d+)(?: tests)?", re.search(r"<li>1\.4\.0:.*?</li>", self.release_notes, re.S).group(0))]
+        ran = unittest.defaultTestLoader.discover(str(Path(__file__).resolve().parent)).countTestCases()
+        self.assertEqual(counts[-1], ran)
 
     def test_sample_outputs_match_current_version_and_build(self) -> None:
         self.require_synchronised_or_pending(SAMPLE_OUTPUTS_ACTIVE, self.samples)
+        self.assertRegex(self.samples, r"Build [0-9a-f]{12} &nbsp;\|&nbsp; Updated \d{1,2} \w+ \d{4}")
+        provenance = re.search(r'<section id="provenance">(.*?)</section>', self.samples, re.S).group(1)
+        self.assertIn(f"Version {physics.MODEL_VERSION}", provenance)
+        self.assertIn(f"build {physics.BUILD_ID}", provenance)
 
-    def test_sample_outputs_demonstrate_cli_and_requested_summary(self) -> None:
-        for text in (
-            "python main.py",
-            "--vyInit 85000",
-            "--maxSteps 600",
-            "--output velocity",
-            "--output energy",
-            "Keplerian elements at initial state",
-            "conic classification",
-            "eccentricity",
-            "semimajor axis",
-            "semilatus rectum",
-            "periapsis radius",
-            "apoapsis radius",
-            "Keplerian period",
-            "final radius",
-            "final speed",
-        ):
-            with self.subTest(text=text):
-                self.assertIn(text, self.samples)
+    def sample_sections(self) -> dict[int, str]:
+        return {
+            int(number): body
+            for number, body in re.findall(r'<section id="beat(\d)">(.*?)</section>', self.samples, re.S)
+        }
+
+    def test_sample_outputs_have_one_figure_section_per_beat_in_order(self) -> None:
+        order = [int(n) for n in re.findall(r'<section id="beat(\d)">', self.samples)]
+        self.assertEqual(order, list(BEAT_NUMBERS))
+        self.assertNotIn("<table", self.samples)
+        contents = re.findall(r'<li><a href="#(beat\d)">', self.samples)
+        self.assertEqual(contents, [f"beat{n}" for n in BEAT_NUMBERS])
+        for number, body in self.sample_sections().items():
+            with self.subTest(beat=number):
+                self.assertEqual(len(re.findall(r"<pre><code>", body)), 1)
+                self.assertEqual(len(re.findall(r'<img src="data:image/png;base64,', body)), 1)
+                self.assertEqual(len(re.findall(r'<p class="caption">', body)), 1)
+                shows = re.search(r"<h3>What it shows</h3>\s*<ul>(.*?)</ul>", body, re.S).group(1)
+                heads = re.search(r"<h3>Headline values</h3>\s*<ul>(.*?)</ul>", body, re.S).group(1)
+                self.assertIn(shows.count("<li>"), (3, 4))
+                self.assertIn(heads.count("<li>"), (3, 4, 5))
+
+    def test_each_figure_command_is_a_command_of_its_beat_and_runs(self) -> None:
+        def without_output(arguments: tuple[str, ...]) -> tuple[str, ...]:
+            kept, skip = [], False
+            for argument in arguments:
+                if skip:
+                    skip = False
+                elif argument == "--output":
+                    skip = True
+                else:
+                    kept.append(argument)
+            return tuple(kept)
+
+        for number, body in self.sample_sections().items():
+            with self.subTest(beat=number):
+                command = html_module.unescape(re.search(r"<pre><code>(.*?)</code></pre>", body, re.S).group(1))
+                arguments = command_arguments(command)
+                beat_commands = {
+                    without_output(command_arguments(c))
+                    for c in documented_commands(section_html(HELP_HTML, f"beat{number}"))
+                }
+                self.assertIn(without_output(arguments), beat_commands)
+                self.assertTrue(run_cli(arguments).stdout.startswith("Orbit "))
+        commands = [
+            command_arguments(html_module.unescape(re.search(r"<pre><code>(.*?)</code></pre>", body, re.S).group(1)))
+            for body in self.sample_sections().values()
+        ]
+        self.assertEqual(len(set(commands)), len(commands), "two Beats share a command")
+
+    def test_numbers_quoted_in_the_sample_outputs_are_printed_by_the_program(self) -> None:
+        printed = "\n".join(
+            run_cli(command_arguments(c)).stdout
+            for c in dict.fromkeys(documented_commands(HELP_HTML))
+            if not is_template(c) and "--help" not in c and "--version" not in c
+        )
+        for number, body in self.sample_sections().items():
+            body = re.sub(r"base64,[A-Za-z0-9+/=]+", "", body)
+            text = html_text(re.sub(
+                r"(\d\.\d{4})\u00d710<sup>(\u2212?)(\d+)</sup>",
+                lambda m: f"{m.group(1)}e{'-' if m.group(2) else '+'}{int(m.group(3)):02d}",
+                body,
+            ))
+            tokens = set(HelpQuotedNumberTests.PRINTED.findall(text))
+            with self.subTest(beat=number):
+                self.assertTrue(tokens)
+                self.assertEqual(sorted(t for t in tokens if t not in printed), [])
+
+    def test_sample_outputs_use_the_current_summary_wording(self) -> None:
+        text = html_text(self.samples)
+        printed = run_cli(("--vyInit", "85000", "--maxSteps", "600")).stdout
+        for label in ("final specific energy", "n/a (unbound)", "specific energy", "final radius"):
+            with self.subTest(label=label):
+                self.assertIn(label, text)
+                self.assertIn(label, printed)
+        quoted = re.search(r"suite of (\d+) tests", text)
+        self.assertIsNotNone(quoted)
+        ran = unittest.defaultTestLoader.discover(str(Path(__file__).resolve().parent)).countTestCases()
+        self.assertEqual(int(quoted.group(1)), ran)
 
 
 if __name__ == "__main__":
