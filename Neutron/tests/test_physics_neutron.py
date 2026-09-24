@@ -61,9 +61,19 @@ DEFAULT_GAMMA = 1.666667
 DEFAULT_PC = 1.26e35
 DEFAULT_K = 5.3802e3
 
-# Independent high-accuracy reference obtained by integrating
-# q=p**((gamma-1)/gamma) with a terminal q=0 event. These values are not copied
-# from the production solver and protect the surface-location regression.
+# Independent high-precision reference for the default model (gamma=
+# 1.666667, pC=1.26e35, K=5.3802e3). This fixed constant predates the
+# _q_reference_model() helper defined below and was not regenerated from
+# it; both were established independently of the production solver and
+# protect its surface-location regression (test_default_model_matches_
+# independent_surface_reference, test_refinement_improves_surface_
+# reference_agreement) against a change there. _q_reference_model() itself
+# -- the same tangent-based extrapolation used for the parametrized
+# cross-checks further below, just run at this model's own parameters --
+# agrees with this constant to within about a micrometre in radius, not
+# bit-for-bit: see test_q_reference_model_matches_default_reference_constant,
+# which checks that agreement directly instead of leaving it asserted only
+# in comments or in the Beats Help file.
 REFERENCE_RADIUS_M = 7802.758706219183
 REFERENCE_MASS_KG = 1.9140826174028036e30
 
@@ -696,6 +706,25 @@ def test_refinement_improves_surface_reference_agreement() -> None:
     assert abs(fine["total_mass_kg"] / REFERENCE_MASS_KG - 1.0) < 1e-9
 
 
+def test_q_reference_model_matches_default_reference_constant() -> None:
+    """Make the relationship between the fixed REFERENCE_RADIUS_M/
+    REFERENCE_MASS_KG constants and this file's own _q_reference_model()
+    helper executable rather than only asserted in a comment or in the
+    Beats Help file (Audit24 Codex #2). The constants predate this helper
+    and are not regenerated from it, so running the helper at the default
+    model's own parameters is expected to land close to, but not exactly
+    on, the fixed values: within a generous few-micrometre radius
+    tolerance and a tiny relative mass tolerance, both well above observed
+    floating-point noise and well below the production solver's own
+    roughly 0.8 m surface-location error that these constants benchmark.
+    """
+    radius, mass = _q_reference_model(DEFAULT_GAMMA, DEFAULT_PC, DEFAULT_K)
+    # Observed gap is about 1.01e-6 m (~1 micrometre) in radius and about
+    # 9.4e-12 in relative mass; both tolerances below are generously wider.
+    assert abs(radius - REFERENCE_RADIUS_M) < 5e-6
+    assert abs(mass / REFERENCE_MASS_KG - 1.0) < 1e-9
+
+
 @pytest.mark.parametrize(
     ("gamma", "p_c", "rho_c", "radius_tolerance", "mass_tolerance"),
     [
@@ -977,8 +1006,11 @@ def test_help_distinguishes_rk4_local_and_global_error_order() -> None:
 def test_help_does_not_generalize_the_weak_field_ranking() -> None:
     """The weak-field state's ranking (compactness >> pressure corrections)
     is specific to that hand-picked, low-pressure state; the default star's
-    interior shows the opposite ranking through most of its volume
-    (Audit22 Codex #1)."""
+    interior shows the opposite ranking close to the center, reversing at
+    r/R~0.287 and r/R~0.420 (Audit22 Codex #1; radii pinned down precisely
+    in Audit23 Codex #1, which found compactness dominant from there out to
+    the surface -- i.e. through most of the star's volume, not the pressure
+    corrections)."""
     html = _help_text()
     assert "typically the largest of the three corrections" not in html
     # The interior factors at r=16.375 m and r~1637.5 m must be shown so the
@@ -1027,6 +1059,23 @@ def test_help_labels_the_step_doubling_agreement_as_relative() -> None:
     assert "agree to a relative 1.4" in html
 
 
+def test_help_does_not_claim_the_center_is_newtonian() -> None:
+    """Compactness vanishing at the center does not make the classical
+    equation exact there: the TOV/Newtonian gradient ratio tends to
+    (1+eta)(1+3eta) as r->0, not to 1, where eta=p_C/(rho_C c^2). The page
+    must not claim the classical equation is valid 'very close to the
+    center' of the default (high-central-pressure) model (Audit24 Codex #1).
+    """
+    html = _help_text()
+    assert (
+        "not what the program solves anywhere but very close to the "
+        "center" not in html
+    )
+    assert "1.979374" in html
+    assert "(1+\\eta)(1+3\\eta)" in html or "1+\\eta" in html
+    assert "eta" in html.lower() or "\\eta" in html
+
+
 def test_help_scopes_the_interior_ranking_to_where_it_holds() -> None:
     """The pressure corrections dominate only close to the center; compactness
     overtakes each of them in turn and stays largest out to the surface, where
@@ -1057,15 +1106,21 @@ def test_help_calls_the_surface_extrapolation_second_order_not_first() -> None:
 
 
 def test_help_states_the_surface_reference_constants_provenance() -> None:
-    """REF_R is a fixed benchmark shared with the test suite's own
-    regression check, not something a literal steps_per_scale=8000 run of
-    the shown reference integrator reproduces bit-for-bit; the page should
-    say so and quantify the reference's own grid-doubling convergence
-    instead of implying the printed digits are exact (Audit23 Codex #3)."""
+    """REF_R is a fixed benchmark checked against the production solver's
+    own regression, not something a literal steps_per_scale=8000 run of the
+    shown reference integrator reproduces bit-for-bit; the page should say
+    so, name the executable test that checks that specific gap
+    (Audit24 Codex #2), and quantify the reference's own grid-doubling
+    convergence instead of implying the printed digits are exact
+    (Audit23 Codex #3)."""
     html = _help_text()
     assert "REFERENCE_RADIUS_M" in html
-    assert "does not reproduce it bit-for-bit" in html
+    assert "bit-for-bit" in html
+    assert "test_q_reference_model_matches_default_reference_constant" in html
     assert "0.99, 0.26 and 0.065 micrometres" in html
+    # Audit24 Codex #2: the constant is checked against production output,
+    # not described as the q-reference integrator's own self-check.
+    assert "reference integrator's own regression check" not in html
 
 
 def test_help_exercises_are_numbered_in_increasing_difficulty() -> None:
