@@ -25,7 +25,11 @@ CORE_MODULE_FILENAMES = (
     "main.py",
     "plot_neutron.py",
 )
-HELP_FILENAME = "Neutron.html"
+# The Beats-format tutorial is the Help file this suite scrapes and requires.
+# ``Neutron-original.html`` (the pre-Beats Reference Guide) is not looked for
+# here and a passing run never depends on it existing.
+PROGRAM_NAME = "Neutron"
+HELP_FILENAME = "Neutron-claude.html"
 
 
 def find_module_dir(start: Path) -> Path:
@@ -177,26 +181,29 @@ def _independent_build_id() -> str:
 
 
 def find_help_file(module_dir: Path) -> Path:
-    """Find Help in a flattened upload or the GFTGU-Documentation tree.
+    """Find the Beats Help file in a flattened upload or the
+    GFTGU-Documentation tree.
 
     Documentation folders no longer use chapter-number prefixes, and the
     Help files live under the sibling ``GFTGU-Documentation`` repository
-    rather than beside the program modules inside ``GFTGU-Programs``.
+    rather than beside the program modules inside ``GFTGU-Programs``. The
+    program's documentation directory is still named ``Neutron`` even
+    though the file sought inside it is ``Neutron-claude.html``, so the
+    directory name is kept separate from the Help filename.
     """
-    program_name = Path(HELP_FILENAME).stem
     candidates = [module_dir / HELP_FILENAME]
     for ancestor in (module_dir, *module_dir.parents):
         candidates.append(
-            ancestor / "GFTGU-Documentation" / program_name / HELP_FILENAME
+            ancestor / "GFTGU-Documentation" / PROGRAM_NAME / HELP_FILENAME
         )
-        if ancestor.name != program_name:
-            candidates.append(ancestor / program_name / HELP_FILENAME)
+        if ancestor.name != PROGRAM_NAME:
+            candidates.append(ancestor / PROGRAM_NAME / HELP_FILENAME)
     for candidate in candidates:
         if candidate.is_file():
             return candidate
     raise FileNotFoundError(
         f"Could not find {HELP_FILENAME} beside the program or in "
-        f"GFTGU-Documentation/{program_name}/."
+        f"GFTGU-Documentation/{PROGRAM_NAME}/."
     )
 
 
@@ -887,9 +894,9 @@ def test_help_documents_correct_tov_terms_and_mass_equation() -> None:
     html = _help_text()
     assert r"\rho+\dfrac{p}{c^2}" in html
     assert r"m+\dfrac{4\pi r^3p}{c^2}" in html
-    assert r"\frac{dm}{dr}=4\pi r^2\rho" in html
-    assert r"2GM/(Rc^2)\le8/9" in html
-    assert "does not separately compute baryonic (rest) mass" in html
+    assert r"\frac{dm}{dr} = 4\pi r^2 \rho(r)" in html
+    assert r"2GM}{Rc^2} \le \frac{8}{9}" in html
+    assert "not a separately tracked baryonic or rest mass" in html
 
 
 def test_help_documents_surface_variable_and_causality_diagnostic() -> None:
@@ -901,8 +908,9 @@ def test_help_documents_surface_variable_and_causality_diagnostic() -> None:
 
 def test_help_explains_gamma_one_restriction_and_plot_normalization() -> None:
     html = _help_text()
-    assert "Why \\(\\gamma=1\\) is not accepted" in html
-    assert "approach zero only" in html
+    assert "gamma must be finite and greater than 1." in html
+    assert "pressure only approaches zero asymptotically" in html
+    assert "protects the model's physical and numerical definition" in html
     assert "Capitalization and surrounding spaces are ignored" in html
     assert "prints a warning" in html
 
@@ -922,15 +930,24 @@ def test_help_contains_no_development_history_commentary() -> None:
 
 
 def test_help_exercises_are_numbered_in_increasing_difficulty() -> None:
+    """The Beats file lists experiments as ``experiment-card`` blocks rather
+    than the classic Reference Guide's numbered ``<h3>`` headings; check the
+    same kind of thing (an unbroken, increasing sequence with the expected
+    early/late titles) against that markup instead."""
     html = _help_text()
-    headings = re.findall(r"<h3>(\d+)\.\s*([^<]+)</h3>", html)
-    assert [int(number) for number, _ in headings] == list(range(1, 9))
-    titles = [title for _, title in headings]
-    assert titles[0].startswith("Profile Shapes")
-    assert "Numerical Convergence" in titles[1]
-    assert "Mass–Central-Pressure Sequence" in titles[3]
-    assert "Minimum-Mass" in titles[4]
-    assert "Limits of a Single Polytrope" in titles[-1]
+    cards = re.findall(
+        r'<div class="experiment-card" id="exp(\d+)">\s*'
+        r'<div class="exp-num">Experiment \1[^<]*</div>\s*'
+        r'<div class="exp-title">([^<]+)</div>',
+        html,
+    )
+    assert [int(number) for number, _ in cards] == list(range(1, 9))
+    titles = [title for _, title in cards]
+    assert titles[0].startswith("Profile shapes")
+    assert "Numerical convergence" in titles[1]
+    assert "maximum mass" in titles[3]
+    assert "Buchdahl" in titles[4]
+    assert "minimum-mass puzzle" in titles[-1].lower()
 
 
 def test_help_preserves_textbook_minimum_mass_question() -> None:
