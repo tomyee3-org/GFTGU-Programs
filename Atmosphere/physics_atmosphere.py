@@ -8,7 +8,7 @@ import math
 from numbers import Real
 from typing import List
 
-MODEL_VERSION = "1.4.0"
+MODEL_VERSION = "1.5.0"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -115,6 +115,24 @@ class TemperatureProfile:
         if not _is_finite_number(pressure) or pressure < 0.0:
             raise ValueError("pressure must be a finite non-negative number.")
 
+        # Re-check the profile here so a later mutation, or a direct call on an
+        # unvalidated object, raises ValueError instead of IndexError or
+        # ZeroDivisionError.
+        try:
+            n_h = len(self.h)
+            n_t = len(self.T)
+        except TypeError as exc:
+            raise ValueError(
+                "h_points and T_points must be a non-string sequence of numbers."
+            ) from exc
+        if n_h != n_t or n_h < 2:
+            raise ValueError(
+                "A temperature profile needs at least two matching altitude and "
+                "temperature values."
+            )
+        if any(self.h[i + 1] <= self.h[i] for i in range(n_h - 1)):
+            raise ValueError("h_points must be in strictly increasing order.")
+
         # If we are still below or within measured range, do linear interpolation
         if altitude <= self.h[-1]:
             # Find bracketing indices
@@ -191,7 +209,7 @@ def ideal_gas_density(pressure: float, mu: float, temperature: float) -> float:
         rho = p * q / T,  where q = u * mu / k
 
     pressure: p (Pa)
-    mu: mean molecular weight (in atomic mass units, u; about 28.97 for dry air)
+    mu: mean molecular mass (in atomic mass units, u; about 28.97 for dry air)
     temperature: T (K)
     """
     if not _is_finite_number(pressure) or pressure < 0.0:

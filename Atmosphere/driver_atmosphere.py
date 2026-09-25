@@ -30,7 +30,7 @@ MAX_RETRIES = 25
 class AtmosphereParameters:
     planet_name: str
     g_accel: float          # surface gravity (m/s^2)
-    mu: float               # mean molecular weight (atomic mass units, u)
+    mu: float               # mean molecular mass (atomic mass units, u)
     p0: float               # surface pressure (Pa)
     h_points: List[float]   # measured altitudes (m)
     T_points: List[float]   # measured temperatures (K)
@@ -195,6 +195,11 @@ class AtmosphereModel:
         retry_count = 0
         max_retries = MAX_RETRIES
 
+        # Interior temperature breakpoints above the reference level.  The
+        # integrator lands on each of them so a thin hot or cold layer cannot
+        # hide between two Euler samples (see Release Notes OB-1).
+        profile_nodes = [height for height in self.params.h_points if height > 0.0]
+
         # Outer while-loop: repeat with larger dh if we do not reach the
         # numerical upper boundary within max_steps.
         while last_step == 0:
@@ -208,12 +213,23 @@ class AtmosphereModel:
             # extrapolation coefficient must therefore be recomputed.
             self.temp_profile.reached_top = False
             self.temp_profile.beta = 0.0
+            node_index = 0
 
             for j in range(1, max_steps):
-                alt[j] = alt[j - 1] + dh
+                step = dh
+                while (
+                    node_index < len(profile_nodes)
+                    and profile_nodes[node_index] <= alt[j - 1]
+                ):
+                    node_index += 1
+                if node_index < len(profile_nodes):
+                    distance = profile_nodes[node_index] - alt[j - 1]
+                    if 0.0 < distance <= dh:
+                        step = distance
+                alt[j] = alt[j - 1] + step
                 if not math.isfinite(alt[j]):
                     raise RuntimeError("Altitude overflowed during integration.")
-                p[j] = hydrostatic_step(p[j - 1], rho[j - 1], g, dh)
+                p[j] = hydrostatic_step(p[j - 1], rho[j - 1], g, step)
 
                 # Stop when the Euler step reaches or crosses the model's
                 # zero-pressure boundary.  The non-positive point is excluded.
@@ -294,6 +310,18 @@ def _require_result_arrays(result: AtmosphereResult) -> None:
         for index in range(len(result.altitudes) - 1)
     ):
         raise ValueError("AtmosphereResult altitudes must be strictly increasing.")
+    if not math.isfinite(result.altitudes[-1] - result.altitudes[0]):
+        raise ValueError(
+            "AtmosphereResult altitudes span a range too large for interpolation."
+        )
+    if any(pressure <= 0.0 for pressure in result.pressures):
+        raise ValueError("AtmosphereResult pressures must be finite positive numbers.")
+    if any(density <= 0.0 for density in result.densities):
+        raise ValueError("AtmosphereResult densities must be finite positive numbers.")
+    if any(temperature <= 0.0 for temperature in result.temperatures):
+        raise ValueError(
+            "AtmosphereResult temperatures must be finite numbers greater than zero kelvin."
+        )
     if result.mu is not None and (
         not isinstance(result.mu, Real) or isinstance(result.mu, bool)
         or not math.isfinite(result.mu) or result.mu <= 0.0

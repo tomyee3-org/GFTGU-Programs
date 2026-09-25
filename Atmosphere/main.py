@@ -11,8 +11,15 @@ profile. Every user-facing model input can be set at the command line:
     9.81). Larger gravity makes pressure fall more rapidly with altitude.
 
 ``--mu VALUE``
-    Positive, finite mean molecular weight in atomic mass units (default 28.97 for
+    Positive, finite mean molecular mass in atomic mass units (default 28.97 for
     dry air). Larger values also reduce the atmospheric scale height.
+
+``--save_plot PATH``
+    Write the figure to PATH (PNG, PDF, or any format Matplotlib accepts) in
+    addition to, or instead of, opening a window.
+
+``--no_show``
+    Do not open a plot window. Useful with ``--save_plot`` or in batch runs.
 
 ``--p0 VALUE``
     Positive, finite pressure at altitude zero in pascals (default 101300).
@@ -51,7 +58,7 @@ from driver_atmosphere import (
     extract_checkpoints,
     extract_output,
 )
-from plot_atmosphere import plot_atmosphere
+from plot_atmosphere import plot_atmosphere, save_and_maybe_show
 
 
 DEFAULT_H_POINTS = (
@@ -198,7 +205,7 @@ def parse_args(argv=None):
         type=_positive_float,
         default=28.97,
         metavar="ATOMIC_MASS_UNITS",
-        help="positive mean molecular weight in atomic mass units",
+        help="positive mean molecular mass in atomic mass units",
     )
     parser.add_argument(
         "--p0",
@@ -230,6 +237,17 @@ def parse_args(argv=None):
             "quantity to plot: pressure [Pa], density [kg/m^3], or "
             "temperature [K]"
         ),
+    )
+    parser.add_argument(
+        "--save_plot",
+        default=None,
+        metavar="PATH",
+        help="write the figure to PATH instead of relying on a display window",
+    )
+    parser.add_argument(
+        "--no_show",
+        action="store_true",
+        help="do not open a plot window (use with --save_plot for batch runs)",
     )
     if argv is None:
         argv = sys.argv[1:]
@@ -291,7 +309,11 @@ def main(argv=None):
         f"{result.planet_name}: {result.output_type}"
     )
     print_checkpoints(result, args.h_points, args.T_points)
-    plot_atmosphere(extract_output(result))
+    save_and_maybe_show(
+        extract_output(result),
+        save_path=args.save_plot,
+        show=not args.no_show,
+    )
 
 
 if __name__ == "__main__":
