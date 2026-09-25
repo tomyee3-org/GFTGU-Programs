@@ -12,6 +12,11 @@ from physics_spheregravity import OutputType, SHELL_RADIUS
 
 
 def plot_spheregravity(radius, acceleration, outputType: OutputType = "acceleration"):
+    """Plot acceleration or relative difference against radius.
+
+    The figure is shown with plt.show() and then returned as (figure, axes),
+    so that a script can save it (figure.savefig(...)) or add to it.
+    """
     if outputType not in ("acceleration", "relative difference"):
         raise ValueError(
             "outputType must be 'acceleration' or 'relative difference'."
@@ -69,3 +74,4 @@ def plot_spheregravity(radius, acceleration, outputType: OutputType = "accelerat
     ax.grid(True)
     plt.tight_layout()
     plt.show()
+    return fig, ax

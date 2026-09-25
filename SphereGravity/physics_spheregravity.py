@@ -16,7 +16,7 @@ import numpy as np
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.3.0"
+MODEL_VERSION = "1.4.0"
 BUILD_ID_COVERS = (
     "physics_spheregravity.py",
     "driver_spheregravity.py",
@@ -61,6 +61,12 @@ RADIUS_STEP = 0.005
 SURFACE_INDEX = round(SHELL_RADIUS / RADIUS_STEP)
 MAX_NDIV = 100_000
 MAX_VECTOR_ELEMENTS = 1_000_000
+# Ranges that keep every tile contribution and every printed quantity well
+# inside the double-precision range, so that no result underflows or
+# overflows.
+MIN_EPSILON = 1.0e-100
+MAX_EPSILON = 1.0e100
+MAX_SAMPLE_RADIUS = 1.0e100
 
 
 def _validate_nDiv(nDiv):
@@ -86,6 +92,10 @@ def _validate_epsilon(epsilon):
 
     if not is_valid:
         raise ValueError("epsilon must be a positive finite number.")
+    if not MIN_EPSILON <= epsilon <= MAX_EPSILON:
+        raise ValueError(
+            f"epsilon must be a positive finite number from {MIN_EPSILON:g} to {MAX_EPSILON:g}."
+        )
 
 
 def _compute_ring_geometry(nDiv, epsilon):
@@ -149,6 +159,8 @@ def _validate_sample_radii(radii):
         raise ValueError("radii must contain only finite values.")
     if np.any(values < 0.0):
         raise ValueError("radii must be nonnegative.")
+    if np.any(values > MAX_SAMPLE_RADIUS):
+        raise ValueError(f"radii must not exceed {MAX_SAMPLE_RADIUS:g}.")
     if np.any(values == SHELL_RADIUS):
         raise ValueError("radii must not include the discontinuous shell surface r = 1.")
     return values
@@ -192,6 +204,36 @@ def compute_acceleration_at_radii(nDiv, radii, epsilon=DEFAULT_EPSILON):
         acceleration[j] = accel
 
     return radius.copy(), acceleration
+
+
+def midpoint_error_estimate(nDiv, radii):
+    """Return the leading-order midpoint-rule error at each radius.
+
+    The latitude sum is a midpoint rule with step h = pi/nDiv applied to a
+    smooth integrand, so by the Euler-Maclaurin formula its error is
+    proportional to h^2 and to the difference of the integrand's slopes at
+    the two poles.  For the thin shell this gives, with G = 1,
+
+        outside (r > 1):  (g_num - M/r^2)/(M/r^2)
+                          ~ (h^2/48) r^2 [1/(r + 1)^2 + 1/(r - 1)^2]
+        inside  (r < 1):  g_num/M
+                          ~ (h^2/48) [1/(r + 1)^2 - 1/(1 - r)^2]
+
+    where M = 4 pi epsilon is the continuum shell mass.  Both are the
+    quantities printed in the comparison table.  The estimate assumes h is
+    much smaller than |r - 1|; it does not depend on epsilon.
+    """
+    _validate_nDiv(nDiv)
+    radius = _validate_sample_radii(radii)
+    h = np.pi / nDiv
+    factor = h * h / 48.0
+    inner = 1.0 / (radius + 1.0) ** 2
+    outer = 1.0 / (radius - 1.0) ** 2
+    return np.where(
+        radius > SHELL_RADIUS,
+        factor * radius**2 * (inner + outer),
+        factor * (inner - outer),
+    )
 
 
 def _validate_profile_inputs(nDiv, outputType, epsilon):
