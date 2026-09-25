@@ -275,13 +275,17 @@ LANE_EMDEN_MAX_XI = 1.0e12
 # Relative step of the Runge-Kutta integration in xi.  The solution is
 # computed with this step and with half of it; the half-step values are
 # returned, and the relative difference between the two is returned as an
-# estimate of their uncertainty; against an independent high-accuracy solver
-# it has been larger than the actual error.
+# estimate of their error.  It is an estimate, not a guaranteed bound.
 LANE_EMDEN_RELATIVE_STEP = 1.0e-3
+# Smallest relative step lane_emden_surface() accepts, and the most steps it
+# takes before giving up.  At the smallest step a surface near the largest xi
+# needs about 3e5 steps.
+LANE_EMDEN_MIN_RELATIVE_STEP = 1.0e-4
+LANE_EMDEN_MAX_STEPS = 1_000_000
 # Above this estimated relative uncertainty the Lane-Emden values may not be
 # good to seven significant figures, and the printed summary says so.  The
 # uncertainty of xi_1 grows as 1/(5 - n); it passes this level only for
-# gamma within about 1.3e-7 of 6/5.
+# gamma within about 1.5e-7 of 6/5.
 LANE_EMDEN_UNCERTAINTY_WARNING = 1.0e-7
 
 
@@ -315,24 +319,30 @@ def lane_emden_surface(n: float, relative_step: float = None):
     The equation (1/xi^2) d/dxi (xi^2 dtheta/dxi) = -theta**n, with
     theta(0) = 1 and theta'(0) = 0, is started from its series at a small xi
     and integrated with classical fourth-order Runge-Kutta steps of 0.1% of
-    xi (or of 0.001 near the centre), shortened where theta is small when
-    n < 1, and refined a thousandfold in three stages once a step crosses the
-    zero.  The first zero of theta is located on a cubic Hermite interpolant
+    xi (or of 0.001 near the centre), shortened in proportion to theta once
+    theta < 0.1 when n < 2, and refined a thousandfold in three stages once a
+    step crosses the zero.  The first zero of theta is located on a cubic Hermite interpolant
     of the final step, and the mass factor is completed with the integral of
     xi**2 theta**n over the last short interval.  relative_step defaults to
-    LANE_EMDEN_RELATIVE_STEP.  A ValueError is raised if n is not in [0, 5)
-    or the surface lies beyond LANE_EMDEN_MAX_XI.
+    LANE_EMDEN_RELATIVE_STEP and must lie between LANE_EMDEN_MIN_RELATIVE_STEP
+    and 0.1.  A ValueError is raised if n or relative_step is out of range,
+    if the surface lies beyond LANE_EMDEN_MAX_XI, or if it is not reached in
+    LANE_EMDEN_MAX_STEPS steps.
 
-    The error of xi_1 grows as 1/(5 - n), from about 1e-13 for moderate n to
-    about 3e-6 at n = 4.9999999; lane_emden_solution() estimates it.
+    For 0 <= n <= 4.99 the result agrees with an independent high-accuracy
+    solution to better than 1e-10.  Closer to n = 5 the error of xi_1 grows
+    as 1/(5 - n), to the order of 1e-6 at n = 4.9999999; lane_emden_solution()
+    estimates it.
     """
     _validate_finite_real("n", n)
     if not 0.0 <= n < 5.0:
         raise ValueError("the polytropic index n must satisfy 0 <= n < 5.")
     step = LANE_EMDEN_RELATIVE_STEP if relative_step is None else relative_step
     _validate_finite_real("relative_step", step)
-    if not 0.0 < step <= 0.1:
-        raise ValueError("relative_step must satisfy 0 < relative_step <= 0.1.")
+    if not LANE_EMDEN_MIN_RELATIVE_STEP <= step <= 0.1:
+        raise ValueError(
+            f"relative_step must satisfy {LANE_EMDEN_MIN_RELATIVE_STEP:g} <= relative_step <= 0.1."
+        )
 
     def slope(xi, theta, dtheta):
         return dtheta, -(max(theta, 0.0) ** n) - 2.0 * dtheta / xi
@@ -341,12 +351,22 @@ def lane_emden_surface(n: float, relative_step: float = None):
     theta = 1.0 - xi * xi / 6.0 + n * xi**4 / 120.0
     dtheta = -xi / 3.0 + n * xi**3 / 30.0
     refine = 1.0
+    steps = 0
     while True:
+        steps += 1
+        if steps > LANE_EMDEN_MAX_STEPS:
+            raise ValueError(
+                f"the Lane-Emden integration did not reach the surface in "
+                f"{LANE_EMDEN_MAX_STEPS} steps."
+            )
         h = step * max(1.0, xi) * refine
-        if n < 1.0:
-            # theta**n has an unbounded slope at theta = 0 when n < 1, so take
-            # shorter steps as theta approaches zero.
-            h *= max(1.0e-3, min(1.0, theta / 0.01))
+        if n < 2.0:
+            # theta**n has an unbounded first (n < 1) or second (1 < n < 2)
+            # derivative at theta = 0, so take steps in proportion to theta
+            # once it falls below 0.1.
+            h *= max(1.0e-6, min(1.0, theta / 0.1))
+        if xi + h == xi:
+            raise ValueError("the Lane-Emden step is too small to advance xi.")
         k1 = slope(xi, theta, dtheta)
         k2 = slope(xi + h / 2, theta + h / 2 * k1[0], dtheta + h / 2 * k1[1])
         k3 = slope(xi + h / 2, theta + h / 2 * k2[0], dtheta + h / 2 * k2[1])
@@ -400,7 +420,8 @@ def lane_emden_solution(p_c: float, rho_c: float, gamma: float) -> LaneEmdenSolu
     theta'(xi_1)).  The Lane-Emden solution is the exact solution of the
     equations that integrate_star() steps through; it is computed here as a
     numerical reference, far more accurately than integrate_star(), and
-    relative_uncertainty estimates its remaining error.
+    relative_uncertainty estimates its remaining error (an estimate, not a
+    guaranteed bound).
     """
     n = polytropic_index(gamma)
     coarse = lane_emden_surface(n, LANE_EMDEN_RELATIVE_STEP)

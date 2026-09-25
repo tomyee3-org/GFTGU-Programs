@@ -41,8 +41,8 @@ Each run also prints the surface radius and total mass; the radial step, the
 number of grid points and the number of step doublings (restarts); the
 polytropic index and the radius and mass of the Lane-Emden solution of the
 same polytrope, computed as a numerical reference, with the relative
-difference of the integrated values and a warning if that reference is
-uncertain in its seventh significant figure;
+difference of the integrated values and a warning if the estimated
+uncertainty of that reference is above 1e-7;
 and linearly interpolated pressure, density, temperature, and enclosed mass
 at 0%, 25%, 50%, 75%, and 90% of the surface radius. Numerical results are
 printed to five significant figures.
