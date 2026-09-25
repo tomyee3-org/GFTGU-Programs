@@ -1668,9 +1668,40 @@ class TestHelpBeats(unittest.TestCase):
 
     def test_experiment_6_script_finds_the_stability_boundary(self):
         lines = self.python_snippet("circular_proper_time_speed(r)")
-        kinds = [line.split(" ", 2)[2].rsplit(" ", 1)[0] for line in lines]
+        kinds = [line.split(" ", 3)[3].rsplit(" ", 1)[0] for line in lines]
         self.assertEqual(kinds, ["circular (unstable)", "circular (unstable)",
                                  "circular (stable)", "circular (stable)", "circular (stable)"])
+        # The printed radius and speed are complete: typed back in as
+        # --x_init and --u_init they start the same circular orbit.
+        for line, kind in zip(lines, kinds):
+            _, radius, speed, _ = line.split(" ", 3)
+            with self.subTest(radius=radius):
+                output = run_cli(("--x_init", radius, "--u_init", speed,
+                                  "--max_steps", "1", "--dt", "1e-9")).stdout
+                self.assertIn(f"motion          : {kind},", output)
+
+    def test_printed_circular_speed_is_documented_as_rounded(self):
+        # The summary shows the circular value to six significant figures; the
+        # Help says that typing that value back in is a different orbit, with
+        # the ISCO as its example, and that the full value starts a circle.
+        radius = "8859.750228300749"
+        shown = run_cli(("--x_init", radius, "--u_init", "1.8e8", "--max_steps", "1",
+                         "--dt", "1e-9")).stdout
+        printed = re.search(r"circular dy/dtau: (\S+) m/s at x_init", shown).group(1)
+        self.assertEqual(printed, "1.73085e+08")
+        typed = run_cli(("--x_init", radius, "--u_init", printed, "--max_steps", "1",
+                         "--dt", "1e-9")).stdout
+        self.assertIn("motion          : plunge", typed)
+        full = repr(physics.circular_proper_time_speed(float(radius)))
+        exact = run_cli(("--x_init", radius, "--u_init", full, "--max_steps", "1",
+                         "--dt", "1e-9")).stdout
+        self.assertIn("motion          : circular (marginally stable)", exact)
+        self.assertEqual(float(radius), physics.ISCO_RADIUS)
+        algorithm = html_text(section_html(HELP_HTML, "algorithm"))
+        self.assertIn("six significant figures only", algorithm)
+        self.assertIn("--x_init 8859.750228300749 --u_init 1.73085e8 is predicted to plunge", algorithm)
+        self.assertNotIn("recognises the value printed", algorithm)
+        self.assertIn("six significant figures", html_text(section_html(HELP_HTML, "summary")))
 
 
 class TestHelpCommands(unittest.TestCase):
@@ -1867,7 +1898,9 @@ class TestHelpQuotedNumbers(unittest.TestCase):
             if c not in REJECTED_COMMANDS and "--help" not in c
         )
         allowed = {"2953.25", "4429.88", "8859.75", "299792458.0", "7564.95", "9.40306",
-                   "206265", "1915", "3.10"}
+                   "206265", "1915", "3.10",
+                   # ISCO_RADIUS in full, checked in test_printed_circular_speed_is_documented_as_rounded
+                   "8859.750228300749"}
         for section in ("overview", "beats", "algorithm", "modules", "quickstart",
                         "parameters", "output", "experiments"):
             text = self.visible(section_html(HELP_HTML, section))
