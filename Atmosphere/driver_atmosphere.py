@@ -24,6 +24,10 @@ OutputType = Literal["Pressure", "Density", "Temperature"]
 STEPS_PER_SCALE_HEIGHT = 200
 MAX_STEPS = 50_000
 MAX_RETRIES = 25
+# Cap |ΔT|/min(T) across one Euler step inside the supplied profile so a
+# steep linear ramp cannot be crossed in a single sample.  Slowly varying
+# teaching profiles (the default Earth run) never hit this cap.
+MAX_RELATIVE_TEMP_JUMP = 0.05
 
 
 @dataclass
@@ -122,6 +126,37 @@ class AtmosphereModel:
             )
         self.temp_profile.validate()
 
+    def _temperature_limited_step(
+        self,
+        altitude: float,
+        temperature: float,
+        proposed: float,
+        pressure: float,
+    ) -> float:
+        """Shrink ``proposed`` when temperature would jump too far in one Euler step."""
+        if proposed <= 0.0 or temperature <= 0.0:
+            return proposed
+        target = altitude + proposed
+        try:
+            t_target = self.temp_profile.get_temp(target, pressure)
+        except ValueError:
+            return proposed
+        t_floor = min(temperature, t_target)
+        if t_floor <= 0.0 or not math.isfinite(t_target):
+            return proposed
+        relative = abs(t_target - temperature) / t_floor
+        if relative <= MAX_RELATIVE_TEMP_JUMP:
+            return proposed
+        # A landing a few micrometres wide cannot change ln p by a useful
+        # amount even at the coldest temperature; leave those micro-steps
+        # alone so a dense sounding still fits in the point budget.
+        local_scale = t_floor / (
+            self.params.g_accel * self.params.mu * phys.ATOMIC_MASS_UNIT / phys.K_BOLTZMANN
+        )
+        if local_scale > 0.0 and proposed / local_scale < 1e-5:
+            return proposed
+        return proposed * MAX_RELATIVE_TEMP_JUMP / relative
+
     def run(self) -> AtmosphereResult:
         """
         Compute an atmosphere profile by finite steps in altitude:
@@ -196,8 +231,9 @@ class AtmosphereModel:
         max_retries = MAX_RETRIES
 
         # Interior temperature breakpoints above the reference level.  The
-        # integrator lands on each of them so a thin hot or cold layer cannot
-        # hide between two Euler samples (see Release Notes OB-1).
+        # integrator lands on each of them so a thin layer cannot sit unseen
+        # between two Euler samples.  A further cap on |ΔT|/T across a step
+        # keeps a steep ramp from being crossed in one sample.
         profile_nodes = [height for height in self.params.h_points if height > 0.0]
 
         # Outer while-loop: repeat with larger dh if we do not reach the
@@ -226,6 +262,10 @@ class AtmosphereModel:
                     distance = profile_nodes[node_index] - alt[j - 1]
                     if 0.0 < distance <= dh:
                         step = distance
+                if alt[j - 1] < self.temp_profile.h[-1]:
+                    step = self._temperature_limited_step(
+                        alt[j - 1], Temp[j - 1], step, p[j - 1]
+                    )
                 alt[j] = alt[j - 1] + step
                 if not math.isfinite(alt[j]):
                     raise RuntimeError("Altitude overflowed during integration.")
@@ -368,8 +408,8 @@ def extract_checkpoints(
     The checkpoint temperatures are the defining profile values themselves.
     Pressure is linearly interpolated between adjacent integration samples.
     For model results, density follows the ideal-gas law using that pressure,
-    the model's molecular weight, and the supplied checkpoint temperature.
-    Manually constructed results without molecular weight use interpolated
+    the model's molecular mass, and the supplied checkpoint temperature.
+    Manually constructed results without molecular mass use interpolated
     stored density instead. The ratio p/T uses the same pressure and temperature.
     A checkpoint outside the stored positive-pressure domain remains in the
     returned table with unavailable pressure and density diagnostics.

@@ -2,13 +2,14 @@
 Atmosphere physics module
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections.abc import Sequence
+from bisect import bisect_right
 import math
 from numbers import Real
-from typing import List
+from typing import List, Optional, Tuple
 
-MODEL_VERSION = "1.5.0"
+MODEL_VERSION = "1.5.1"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -80,6 +81,25 @@ class TemperatureProfile:
     power: float = 0.5  # exponent in T = beta * p^power for upper atmosphere
     beta: float = 0.0   # will be set when top is reached
     reached_top: bool = False
+    _validated_token: Optional[Tuple] = field(default=None, repr=False, compare=False)
+
+    def _token(self):
+        """Cheap identity of the current altitude and temperature lists."""
+        try:
+            if not self.h or not self.T:
+                return ("empty", id(self.h), id(self.T))
+            return (
+                id(self.h),
+                id(self.T),
+                len(self.h),
+                len(self.T),
+                self.h[0],
+                self.h[-1],
+                self.T[0],
+                self.T[-1],
+            )
+        except (TypeError, IndexError):
+            return None
 
     def validate(self) -> None:
         """Validate the supplied temperature profile."""
@@ -102,6 +122,12 @@ class TemperatureProfile:
             )
         if not _is_finite_number(self.power) or self.power <= 0.0:
             raise ValueError("power must be a finite positive number.")
+        self._validated_token = self._token()
+
+    def _ensure_validated(self) -> None:
+        """Run ``validate()`` only when the profile object looks new or edited."""
+        if self._validated_token != self._token():
+            self.validate()
 
     def get_temp(self, altitude: float, pressure: float) -> float:
         """
@@ -115,46 +141,28 @@ class TemperatureProfile:
         if not _is_finite_number(pressure) or pressure < 0.0:
             raise ValueError("pressure must be a finite non-negative number.")
 
-        # Re-check the profile here so a later mutation, or a direct call on an
-        # unvalidated object, raises ValueError instead of IndexError or
-        # ZeroDivisionError.
-        try:
-            n_h = len(self.h)
-            n_t = len(self.T)
-        except TypeError as exc:
-            raise ValueError(
-                "h_points and T_points must be a non-string sequence of numbers."
-            ) from exc
-        if n_h != n_t or n_h < 2:
-            raise ValueError(
-                "A temperature profile needs at least two matching altitude and "
-                "temperature values."
-            )
-        if any(self.h[i + 1] <= self.h[i] for i in range(n_h - 1)):
-            raise ValueError("h_points must be in strictly increasing order.")
+        # Validate when the lists look new or replaced.  The integrator calls
+        # this once per step, so the check itself must not scan the profile.
+        self._ensure_validated()
 
         # If we are still below or within measured range, do linear interpolation
         if altitude <= self.h[-1]:
-            # Find bracketing indices
-            for i in range(len(self.h) - 1):
-                h_low = self.h[i]
-                h_high = self.h[i + 1]
-                if h_low <= altitude <= h_high:
-                    t_low = self.T[i]
-                    t_high = self.T[i + 1]
-                    # Linear interpolation in altitude
-                    frac = (altitude - h_low) / (h_high - h_low)
-                    temperature = t_low + frac * (t_high - t_low)
-                    if not math.isfinite(temperature):
-                        raise ValueError(
-                            "The interpolated temperature is not a finite number."
-                        )
-                    return temperature
-            # If altitude is below first measurement, just use first temperature
-            if altitude < self.h[0]:
+            if altitude <= self.h[0]:
                 return self.T[0]
-            # If altitude is exactly at last measurement
-            return self.T[-1]
+            index = bisect_right(self.h, altitude) - 1
+            if index >= len(self.h) - 1:
+                return self.T[-1]
+            h_low = self.h[index]
+            h_high = self.h[index + 1]
+            t_low = self.T[index]
+            t_high = self.T[index + 1]
+            frac = (altitude - h_low) / (h_high - h_low)
+            temperature = t_low + frac * (t_high - t_low)
+            if not math.isfinite(temperature):
+                raise ValueError(
+                    "The interpolated temperature is not a finite number."
+                )
+            return temperature
 
         # Above highest measurement: upper atmosphere model.  A zero-pressure
         # query is already at the numerical boundary, so it must not initialize

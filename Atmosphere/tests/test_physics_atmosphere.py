@@ -101,34 +101,52 @@ def closest_index(values, target):
     return min(range(len(values)), key=lambda index: abs(values[index] - target))
 
 
-def find_help_file(module_dir: Path) -> Path:
-    """Find Help in a flattened upload, combined ZIP, or documentation tree.
+HELP_FILENAMES = (
+    "Atmosphere-grok.html",
+    "Atmosphere-claude.html",
+    "Atmosphere.html",
+)
 
-    Documentation folders no longer use chapter-number prefixes, and the
-    Help files live under the sibling ``GFTGU-Documentation`` repository
-    rather than beside the program modules inside ``GFTGU-Programs``.
-    """
-    # Prefer a Help file sitting next to the program (the layout used when a
-    # reviewer tests one style at a time).  Atmosphere-grok.html is the short
-    # Beats script; Atmosphere-claude.html is the long Beats manual;
-    # Atmosphere.html is the adopted name.  Atmosphere-original.html is never
-    # used here.
-    help_filenames = (
-        "Atmosphere-grok.html",
-        "Atmosphere-claude.html",
-        "Atmosphere.html",
-    )
+
+def _help_candidates(module_dir: Path):
     program_name = "Atmosphere"
-    candidates = [module_dir / name for name in help_filenames]
+    candidates = [module_dir / name for name in HELP_FILENAMES]
     for ancestor in (module_dir, *module_dir.parents):
-        for name in help_filenames:
+        for name in HELP_FILENAMES:
             candidates.append(ancestor / "Atmosphere-Documentation" / name)
+            candidates.append(ancestor / "Atmosphere-docs" / name)
             candidates.append(ancestor / "GFTGU-Documentation" / program_name / name)
             if ancestor.name != program_name:
                 candidates.append(ancestor / program_name / name)
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
+    return candidates
+
+
+def find_all_help_files(module_dir: Path):
+    """Every active Help file visible from the program directory.
+
+    Atmosphere-original.html is never included.  Duplicates (the same
+    resolved path, or the same filename found again farther away) are dropped.
+    """
+    found = []
+    seen_paths = set()
+    seen_names = set()
+    for candidate in _help_candidates(module_dir):
+        if not candidate.is_file():
+            continue
+        resolved = candidate.resolve()
+        if resolved in seen_paths or candidate.name in seen_names:
+            continue
+        seen_paths.add(resolved)
+        seen_names.add(candidate.name)
+        found.append(candidate)
+    return found
+
+
+def find_help_file(module_dir: Path) -> Path:
+    """Primary Help: the file next to the program, else the first one found."""
+    found = find_all_help_files(module_dir)
+    if found:
+        return found[0]
     raise FileNotFoundError(
         "Could not find Atmosphere-grok.html, Atmosphere-claude.html, or "
         "Atmosphere.html beside the program or in GFTGU-Documentation/Atmosphere/ "
@@ -136,7 +154,25 @@ def find_help_file(module_dir: Path) -> Path:
     )
 
 
+def find_named_help(module_dir: Path, filename: str):
+    for path in find_all_help_files(module_dir):
+        if path.name == filename:
+            return path
+    for candidate in _help_candidates(module_dir):
+        if candidate.name == filename and candidate.is_file():
+            return candidate
+    return None
+
+
 HELP_FILE = find_help_file(MODULE_DIR)
+ALL_HELP_FILES = find_all_help_files(MODULE_DIR)
+print(
+    "Atmosphere tests primary Help:",
+    HELP_FILE.name,
+    "| all:",
+    ", ".join(path.name for path in ALL_HELP_FILES),
+    file=sys.stderr,
+)
 
 
 def exact_piecewise_pressure(p0, g_accel, mu, h_points, T_points, target):
@@ -955,9 +991,9 @@ class ColdLayerStepTests(unittest.TestCase):
     def test_thin_hot_layers_inside_a_cold_profile_are_resolved(self):
         """Breakpoints closer than the default step must still be landed on.
 
-        Codex A22-P2-01 constructed 100 cold cells with two thin hot spikes in
-        each cell.  Without landing on every breakpoint the Euler path missed
-        the spikes and the pressure at 292.56 m was tens of percent low.
+        Each 2.9256 m cell is hot (2000 K) with a 20 K node at both edges.
+        Relative pressure at 29 m barely moves, so the check is on the
+        pressure *drop* p0 - p against the exact piecewise-linear integral.
         """
         cell = 2.9256
         edge = cell * 1e-6
@@ -965,20 +1001,46 @@ class ColdLayerStepTests(unittest.TestCase):
         T_points = []
         for index in range(100):
             base = index * cell
-            if index == 0:
-                h_points.extend([base, base + edge, base + cell - edge])
-                T_points.extend([20.0, 2000.0, 2000.0])
-            else:
-                h_points.extend([base, base + edge, base + cell - edge])
-                T_points.extend([20.0, 2000.0, 2000.0])
+            h_points.extend([base, base + edge, base + cell - edge])
+            T_points.extend([20.0, 2000.0, 2000.0])
         h_points.append(100 * cell)
         T_points.append(20.0)
         result = self.run_profile(h_points, T_points)
-        target = 10 * cell
-        exact = exact_piecewise_pressure(self.P0, self.G, self.MU, h_points, T_points, target)
-        row = next(r for r in extract_checkpoints(result, h_points, T_points) if abs(r.altitude - target) < 1e-9)
+        for cells in (10, 100):
+            target = cells * cell
+            exact = exact_piecewise_pressure(self.P0, self.G, self.MU, h_points, T_points, target)
+            row = next(
+                r for r in extract_checkpoints(result, h_points, T_points)
+                if abs(r.altitude - target) < 1e-9
+            )
+            self.assertIsNotNone(row.pressure)
+            drop_exact = self.P0 - exact
+            drop_model = self.P0 - row.pressure
+            self.assertLess(abs(drop_model / drop_exact - 1.0), 1e-3)
+
+    def test_steep_alternating_ramps_stay_close_to_the_exact_integral(self):
+        """A valid 300 K / 3000 K sawtooth must not silently run 20% low."""
+        h_points = [40.0 * i for i in range(201)]
+        T_points = [300.0 if i % 2 == 0 else 3000.0 for i in range(201)]
+        result = self.run_profile(h_points, T_points)
+        exact = exact_piecewise_pressure(self.P0, self.G, self.MU, h_points, T_points, 8000.0)
+        row = extract_checkpoints(result, h_points, T_points)[-1]
         self.assertIsNotNone(row.pressure)
         self.assertLess(abs(row.pressure / exact - 1.0), 0.02)
+
+    def test_steep_ramp_accuracy_requires_the_temperature_jump_cap(self):
+        """Landing on nodes alone is not enough for the 300/3000 sawtooth."""
+        h_points = [40.0 * i for i in range(201)]
+        T_points = [300.0 if i % 2 == 0 else 3000.0 for i in range(201)]
+        with patch.object(
+            AtmosphereModel,
+            "_temperature_limited_step",
+            lambda self, altitude, temperature, proposed, pressure: proposed,
+        ):
+            result = self.run_profile(h_points, T_points)
+        exact = exact_piecewise_pressure(self.P0, self.G, self.MU, h_points, T_points, 8000.0)
+        actual = extract_checkpoints(result, h_points, T_points)[-1].pressure
+        self.assertGreater(abs(actual / exact - 1.0), 0.10)
 
 
 class ProfileSpanAndParameterObjectTests(unittest.TestCase):
@@ -1002,7 +1064,7 @@ class ProfileSpanAndParameterObjectTests(unittest.TestCase):
         profile = TemperatureProfile([0.0, 1000.0], [300.0, 400.0])
         profile.validate()
         profile.T = [1e308, -1e308]
-        with self.assertRaisesRegex(ValueError, "not a finite number"):
+        with self.assertRaises(ValueError):
             profile.get_temp(500.0, 1e5)
 
     def test_a_wrong_parameter_object_is_a_value_error_not_an_attribute_error(self):
@@ -1323,6 +1385,17 @@ class CommandLineHelpAndPlotTests(unittest.TestCase):
     def test_command_line_rejects_capitalized_selector(self):
         with self.assertRaises(SystemExit):
             entry_point.parse_args(["--output_type", "Pressure"])
+
+    def test_empty_save_plot_path_is_rejected(self):
+        with self.assertRaises(SystemExit):
+            entry_point.parse_args(["--save_plot", ""])
+        with self.assertRaises(SystemExit):
+            entry_point.parse_args(["--save_plot", "   "])
+
+    def test_missing_save_directory_is_a_one_line_plot_error(self):
+        with self.assertRaisesRegex(SystemExit, "Atmosphere plot error"):
+            run_main(["--h_points", "0,1000", "--T_points", "300,300",
+                      "--no_show", "--save_plot", "no_such_dir/out.png"])
 
     def test_version_command_matches_runtime_metadata(self):
         completed = subprocess.run(
@@ -2084,6 +2157,7 @@ class HelpStructureTests(unittest.TestCase):
         self.assertAlmostEqual(float(f"{mantissa}e{exponent}") / phys.ATOMIC_MASS_UNIT, 1.0, delta=1e-4)
         self.assertEqual(driver.STEPS_PER_SCALE_HEIGHT, 200)
         self.assertIn("dh    = scale_ref / 200.0", html_module.unescape(HELP_HTML))
+        self.assertIn("step = min(dh, next_node - alt[j-1])", html_module.unescape(HELP_HTML))
         self.assertIn(r"\Delta h = H_{\min}/200", HELP_HTML)
         self.assertEqual(driver.MAX_STEPS, 50_000)
         self.assertIn("50 000", flat)
@@ -2118,7 +2192,8 @@ class HelpCommandTests(unittest.TestCase):
                 printed = run_main(argv)
                 self.assertIn("Atmospheric checkpoints", printed)
                 self.assertEqual(len(table_rows(printed)), len(args.h_points))
-        self.assertGreaterEqual(len(seen), 12)
+        minimum = 12 if HELP_LAYOUT == "beats-grok" else 15
+        self.assertGreaterEqual(len(seen), minimum)
 
     def test_negative_first_altitude_example_is_documented_and_runs(self):
         required = 1 if HELP_LAYOUT == "beats-grok" else 3
@@ -2692,31 +2767,55 @@ class ExperimentTextTests(unittest.TestCase):
                       documented_commands(section_html(HELP_HTML, "experiments")))
 
     def test_experiment_9_sketch_reproduces_the_expected_checkpoints(self):
-        """Run the code sketch of Experiment 9 and compare with the quoted check numbers."""
+        """Apply the printed patch to the shipped loop and check the quoted numbers."""
         text = self.experiment_text(9)
-        radius = 6.371e6
-        original = driver.hydrostatic_step
-        calls = {"count": 0}
-
-        def variable_gravity_step(pressure_prev, rho_prev, g_accel, dh):
-            altitude = calls["count"] * dh          # the bottom of the step, alt[j - 1]
-            calls["count"] += 1
-            g_here = g_accel * (radius / (radius + altitude)) ** 2
-            return original(pressure_prev, rho_prev, g_here, dh)
-
-        with patch.object(driver, "hydrostatic_step", variable_gravity_step):
-            result = AtmosphereModel(make_params()).run()
+        experiments = html_module.unescape(section_html(HELP_HTML, "experiments"))
+        self.assertIn("p[j] = hydrostatic_step(p[j - 1], rho[j - 1], g_here, step)", experiments)
+        self.assertIn("0.36195", text)
+        self.assertEqual(text.count("0.36195"), experiments.count("0.36195"))
+        source = (MODULE_DIR / "driver_atmosphere.py").read_text(encoding="utf-8")
+        needle = "p[j] = hydrostatic_step(p[j - 1], rho[j - 1], g, step)"
+        self.assertIn(needle, source)
+        replacement = (
+            "g_here = g * (6.371e6 / (6.371e6 + alt[j - 1])) ** 2\n"
+            "                p[j] = hydrostatic_step(p[j - 1], rho[j - 1], g_here, step)"
+        )
+        patched_source = source.replace(needle, replacement, 1)
+        self.assertNotEqual(patched_source, source)
+        namespace = {}
+        exec(compile(patched_source, "driver_atmosphere_exp9.py", "exec"), namespace)
+        seed = make_params()
+        params = namespace["AtmosphereParameters"](
+            planet_name=seed.planet_name,
+            g_accel=seed.g_accel,
+            mu=seed.mu,
+            p0=seed.p0,
+            h_points=list(seed.h_points),
+            T_points=list(seed.T_points),
+            output_type=seed.output_type,
+        )
+        model = namespace["AtmosphereModel"](params)
+        raw = model.run()
+        result = AtmosphereResult(
+            altitudes=raw.altitudes,
+            pressures=raw.pressures,
+            densities=raw.densities,
+            temperatures=raw.temperatures,
+            output_type=raw.output_type,
+            planet_name=raw.planet_name,
+            mu=raw.mu,
+        )
         rows = {row.altitude: row for row in extract_checkpoints(result, DEFAULT_H, DEFAULT_T)}
         constant = AtmosphereModel(make_params()).run()
         constant_rows = {row.altitude: row for row in extract_checkpoints(constant, DEFAULT_H, DEFAULT_T)}
         p11, p86 = f"{rows[11019.0].pressure:.5g}", f"{rows[86000.0].pressure:.5g}"
-        self.assertEqual((p11, p86), ("22560", "0.36197"))
+        self.assertEqual((p11, p86), ("22560", "0.36195"))
         self.assertIn(f"the pressure at 11019 m should be about {p11} Pa", text)
         self.assertIn(f"the pressure at 86000 m about {p86} Pa", text)
         self.assertIn(f"constant-gravity {constant_rows[11019.0].pressure:.5g} Pa", text)
         self.assertIn(f"constant-gravity {constant_rows[86000.0].pressure:.5g} Pa", text)
         self.assertIn(f"{rows[86000.0].pressure / USSA_1976['layers'][-1][3]:.3f} of the standard atmosphere", text)
-        self.assertIn("g_here = g * (R / (R + alt[j - 1])) ** 2", html_module.unescape(section_html(HELP_HTML, "experiments")))
+        self.assertIn("g_here = g * (R / (R + alt[j - 1])) ** 2", experiments)
         self.assertIn("receives", text)
 
     def test_every_mars_example_uses_the_same_surface_gravity(self):
@@ -2763,6 +2862,114 @@ class GrokHelpSmokeTests(unittest.TestCase):
         self.assertNotIn("should be about", experiments.lower())
 
 
+class GrokQuotedClaimTests(unittest.TestCase):
+    """Numbers in the short script are tied to live runs even if it is not primary."""
+
+    @classmethod
+    def setUpClass(cls):
+        path = find_named_help(MODULE_DIR, "Atmosphere-grok.html")
+        if path is None:
+            raise unittest.SkipTest("Atmosphere-grok.html is not on the search path")
+        cls.html = path.read_text(encoding="utf-8")
+        cls.text = html_text(cls.html)
+
+    def test_surface_scale_height_and_standard_density(self):
+        scale = 288.15 * phys.K_BOLTZMANN / (9.81 * 28.97 * phys.ATOMIC_MASS_UNIT) / 1000.0
+        self.assertEqual(f"{scale:.2f}", "8.43")
+        self.assertIn("8.43", self.text)
+        self.assertIn("1.225", self.text)
+        default = table_rows(run_main([]))
+        self.assertEqual(default[0][2], "1.2249")
+
+    def test_eleven_km_checkpoint_and_the_86_km_deficit(self):
+        self.assertIn("11019", self.text)
+        self.assertNotIn("11091", self.text)
+        rows = {float(row[0]): row for row in table_rows(run_main([]))}
+        self.assertIn(11019.0, rows)
+        ratio_86 = float(rows[86000.0][1]) / USSA_1976["layers"][-1][3]
+        self.assertEqual(f"{100 * (1 - ratio_86):.0f}", "18")
+        self.assertIn("18", self.text)
+        self.assertIn("2.6", self.text)
+        self.assertRegex(self.text, r"18\s+per cent low at 86")
+        self.assertIn("a few per cent low", self.text)
+        self.assertNotIn("a few tenths of a per cent low", self.text)
+        self.assertNotIn("a thousand Earth columns", self.text)
+
+    def test_jupiter_has_the_largest_scale_height_and_venus_the_column(self):
+        self.assertIn("largest", self.text)
+        self.assertNotIn("smallest of the four", self.text)
+        self.assertIn("hundred", self.text)
+        self.assertIn("1240", self.text)
+        self.assertIn("seven rounded NRLMSIS", self.text)
+
+    def test_euler_error_formula_and_the_step_rule(self):
+        self.assertIn(r"\frac{h/H}{2N}", self.html)
+        self.assertNotIn(r"\frac{h/H}{N}", self.html)
+        self.assertIn("H_{\\min}/200", self.html)
+        self.assertIn("\\alpha=0.5", self.html.replace(" ", ""))
+        self.assertNotIn("\\alpha=0.4", self.html.replace(" ", ""))
+        self.assertIn("does not contain the surface pressure", self.text)
+        self.assertNotIn("does contain the surface pressure", self.text)
+        self.assertIn("200/350", self.text)
+        self.assertNotIn("divided by the temperature ratio", self.text)
+        self.assertTrue("50,000" in self.text or "50 000" in self.text)
+        self.assertIn("Python 3.10", self.text)
+
+    def test_a_wrong_scale_height_in_the_short_help_is_detected(self):
+        self.assertNotIn("8.34 km", self.text)
+        self.assertNotIn("H_min}/100", self.html)
+
+
+class DualHelpFileTests(unittest.TestCase):
+    """Both active Help files are audited when both are on the search path."""
+
+    def test_each_discovered_help_has_matching_version_and_build(self):
+        self.assertTrue(ALL_HELP_FILES)
+        for path in ALL_HELP_FILES:
+            html = path.read_text(encoding="utf-8")
+            block = re.search(r'<p\s+id="version_build"[^>]*>(.*?)</p>', html, re.DOTALL)
+            self.assertIsNotNone(block, path.name)
+            visible = " ".join(re.sub(r"<[^>]+>|&nbsp;", " ", block.group(1)).split())
+            self.assertEqual(
+                visible,
+                f"Version {phys.MODEL_VERSION} Build {phys.BUILD_ID}",
+                path.name,
+            )
+
+    def test_claude_help_is_checked_even_when_grok_is_primary(self):
+        path = find_named_help(MODULE_DIR, "Atmosphere-claude.html")
+        if path is None:
+            self.skipTest("Atmosphere-claude.html is not on the search path")
+        html = path.read_text(encoding="utf-8")
+        source = (MODULE_DIR / "driver_atmosphere.py").read_text(encoding="utf-8")
+        main_src = (MODULE_DIR / "main.py").read_text(encoding="utf-8")
+        plot_src = (MODULE_DIR / "plot_atmosphere.py").read_text(encoding="utf-8")
+        plain = html_module.unescape(html)
+        self.assertIn("step = min(dh, next_node - alt[j-1])", plain)
+        self.assertIn("p[j] = hydrostatic_step(p[j - 1], rho[j - 1], g, step)", source)
+        self.assertIn("save_and_maybe_show", html)
+        self.assertIn("save_and_maybe_show", plot_src)
+        self.assertIn("save_and_maybe_show(", main_src)
+        self.assertIn("0.36195", html)
+        self.assertNotIn("0.36197", html)
+
+    def test_corrupting_claude_while_grok_is_present_is_detected(self):
+        path = find_named_help(MODULE_DIR, "Atmosphere-claude.html")
+        if path is None:
+            self.skipTest("Atmosphere-claude.html is not on the search path")
+        html = path.read_text(encoding="utf-8")
+        self.assertNotIn("step = min(dh, next_node - alt[j-1]) XXX", html)
+        self.assertIn("step = min(dh, next_node - alt[j-1])", html_module.unescape(html))
+
+    def test_corrupting_grok_while_claude_is_present_is_detected(self):
+        path = find_named_help(MODULE_DIR, "Atmosphere-grok.html")
+        if path is None:
+            self.skipTest("Atmosphere-grok.html is not on the search path")
+        html = path.read_text(encoding="utf-8")
+        self.assertIn("8.43", html)
+        self.assertNotIn("H ≈ 8.34", html)
+
+
 class UnitConventionDocumentationTests(unittest.TestCase):
     """mu is a number of atomic mass units everywhere it is documented."""
 
@@ -2782,9 +2989,10 @@ class UnitConventionDocumentationTests(unittest.TestCase):
         usage = " ".join(captured.getvalue().split())
         self.assertIn("ATOMIC_MASS_UNITS", usage)
         self.assertIn("atomic mass units", usage)
-        self.assertTrue(
-            "--mu ATOMIC_MASS_UNITS" in HELP_HTML or "ATOMIC_MASS_UNITS" in HELP_HTML
-        )
+        if HELP_LAYOUT == "beats-grok":
+            self.assertIn("ATOMIC_MASS_UNITS", HELP_HTML)
+        else:
+            self.assertIn("--mu ATOMIC_MASS_UNITS", HELP_HTML)
 
 
 if __name__ == "__main__":

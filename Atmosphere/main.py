@@ -15,8 +15,10 @@ profile. Every user-facing model input can be set at the command line:
     dry air). Larger values also reduce the atmospheric scale height.
 
 ``--save_plot PATH``
-    Write the figure to PATH (PNG, PDF, or any format Matplotlib accepts) in
-    addition to, or instead of, opening a window.
+    Write the figure to PATH. PATH must be nonempty. Matplotlib chooses the
+    format from the suffix (``.png``, ``.pdf``, ``.svg``, ...); a path
+    without a suffix is written as PNG. Combined with ``--no_show`` this
+    replaces the display window; without ``--no_show`` the window still opens.
 
 ``--no_show``
     Do not open a plot window. Useful with ``--save_plot`` or in batch runs.
@@ -118,6 +120,14 @@ def _positive_float(text):
         raise argparse.ArgumentTypeError(f"{text!r} is not a number.") from exc
     if not math.isfinite(value) or value <= 0.0:
         raise argparse.ArgumentTypeError("value must be a positive finite number.")
+    return value
+
+
+def _nonempty_path(text):
+    """Parse a nonempty plot-output path."""
+    value = text.strip()
+    if not value:
+        raise argparse.ArgumentTypeError("PATH must contain non-whitespace characters.")
     return value
 
 
@@ -240,9 +250,13 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--save_plot",
+        type=_nonempty_path,
         default=None,
         metavar="PATH",
-        help="write the figure to PATH instead of relying on a display window",
+        help=(
+            "write the figure to PATH (png, pdf, svg, ...). An empty path is "
+            "rejected. The window still opens unless --no_show is also given"
+        ),
     )
     parser.add_argument(
         "--no_show",
@@ -286,6 +300,13 @@ def print_checkpoints(result, h_points, T_points):
             f"{_format_value(row.temperature):>15}"
         )
     print("  (Unavailable means the checkpoint is outside the stored positive-pressure domain.)")
+    if result.altitudes:
+        print(
+            "  Numerical top: "
+            f"{_format_altitude(result.altitudes[-1])} m at "
+            f"{_format_value(result.temperatures[-1])} K "
+            "(stopping rule; last positive-pressure sample)."
+        )
 
 
 def main(argv=None):
@@ -309,11 +330,14 @@ def main(argv=None):
         f"{result.planet_name}: {result.output_type}"
     )
     print_checkpoints(result, args.h_points, args.T_points)
-    save_and_maybe_show(
-        extract_output(result),
-        save_path=args.save_plot,
-        show=not args.no_show,
-    )
+    try:
+        save_and_maybe_show(
+            extract_output(result),
+            save_path=args.save_plot,
+            show=not args.no_show,
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"Atmosphere plot error: {exc}") from exc
 
 
 if __name__ == "__main__":
