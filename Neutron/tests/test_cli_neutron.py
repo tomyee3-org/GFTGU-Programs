@@ -88,23 +88,29 @@ class CommandLineTests(unittest.TestCase):
         # e.g. a code-review snapshot that omits the documentation tree
         # entirely -- the synchronization check is skipped rather than
         # failed, since there is nothing to synchronize against.
+        # The Beats Help may also be named Neutron.html once it is adopted as
+        # the live Help; the first name found is used.
+        help_names = ('Neutron-claude.html', 'Neutron.html')
         candidates = [ROOT]
         for ancestor in (ROOT, *ROOT.parents):
             candidates.append(ancestor/'GFTGU-Documentation'/'Neutron')
             if ancestor.name != 'Neutron':
                 candidates.append(ancestor/'Neutron')
-        docs_dir = next(
-            (c for c in candidates if (c/'Neutron-claude.html').is_file()),
+        help_file = next(
+            (c/name for c in candidates for name in help_names
+             if (c/name).is_file()),
             None,
         )
-        if docs_dir is None:
+        if help_file is None:
             self.skipTest(
-                'Neutron-claude.html not found beside the program or in a '
-                'GFTGU-Documentation/Neutron/ tree; nothing to synchronize.'
+                'Neutron-claude.html (or Neutron.html) not found beside the '
+                'program or in a GFTGU-Documentation/Neutron/ tree; nothing to '
+                'synchronize.'
             )
+        docs_dir = help_file.parent
         self.assertIn(
             physics.BUILD_ID,
-            (docs_dir/'Neutron-claude.html').read_text(encoding='utf-8'),
+            help_file.read_text(encoding='utf-8'),
         )
         for optional in (
             docs_dir/'Neutron-ReleaseNotes.html',

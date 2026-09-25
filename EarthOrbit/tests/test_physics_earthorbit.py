@@ -68,26 +68,31 @@ def find_help_file(module_dir):
     Help files live under the sibling ``GFTGU-Documentation`` repository
     rather than beside the program modules inside ``GFTGU-Programs``.
     """
-    help_filename = "EarthOrbit.html"
+    # The Beats Help is named EarthOrbit-claude.html until it is adopted as
+    # the live Help, when it is renamed EarthOrbit.html; either name is
+    # accepted, and the first one found is used.  The Reference Guide version,
+    # EarthOrbit-original.html, is optional: the tests written for its text
+    # read it when it is present and skip otherwise.
+    help_filenames = ("EarthOrbit-claude.html", "EarthOrbit.html")
     program_name = "EarthOrbit"
-    candidates = [module_dir / help_filename]
+    candidates = [module_dir / name for name in help_filenames]
     for ancestor in (module_dir, *module_dir.parents):
-        candidates.append(
-            ancestor / "GFTGU-Documentation" / program_name / help_filename
-        )
-        if ancestor.name != program_name:
-            candidates.append(ancestor / program_name / help_filename)
+        for name in help_filenames:
+            candidates.append(ancestor / "GFTGU-Documentation" / program_name / name)
+            if ancestor.name != program_name:
+                candidates.append(ancestor / program_name / name)
     for candidate in candidates:
         if candidate.is_file():
             return candidate
     raise FileNotFoundError(
-        "Could not find EarthOrbit.html beside the program or in "
-        "GFTGU-Documentation/EarthOrbit/."
+        "Could not find EarthOrbit-claude.html (or EarthOrbit.html) beside the "
+        "program or in GFTGU-Documentation/EarthOrbit/."
     )
 
 
 HELP_FILE = find_help_file(MODULE_DIR)
 DOCUMENTATION_DIR = HELP_FILE.parent
+ORIGINAL_HELP_FILE = DOCUMENTATION_DIR / "EarthOrbit-original.html"
 RELEASE_NOTES_FILE = DOCUMENTATION_DIR / "EarthOrbit-ReleaseNotes.html"
 SAMPLE_OUTPUTS_FILE = (
     DOCUMENTATION_DIR / "SampleOutputs" / "EarthOrbit-SampleOutputs_Guide.html"
@@ -914,8 +919,48 @@ class PlotTests(unittest.TestCase):
                     plotter.plot_earth_orbit(*values)
 
 
+_HEADLESS_SHOW_WARNING = re.compile(
+    r"^.*: UserWarning: \w+ is non-interactive, and thus cannot be shown$"
+)
+
+
+def without_headless_show_warning(stderr):
+    """Remove Matplotlib's warning that a non-interactive figure cannot be shown.
+
+    With MPLBACKEND=Agg, plt.show() is silent on Linux without a display but
+    emits this warning, followed by the offending source line, on Windows,
+    macOS and Linux desktops.  Only that two-line warning is removed; any
+    other text is kept, so the empty-stderr checks stay strict.
+    """
+    lines = stderr.splitlines()
+    kept = []
+    index = 0
+    while index < len(lines):
+        if _HEADLESS_SHOW_WARNING.match(lines[index]):
+            index += 1
+            if index < len(lines) and lines[index].startswith((" ", "\t")):
+                index += 1
+            continue
+        kept.append(lines[index])
+        index += 1
+    return "\n".join(kept)
+
+
 class MainProgramTests(unittest.TestCase):
     """Command-line and documented console-interface contract tests."""
+
+    def test_headless_show_warning_filter_removes_only_that_warning(self):
+        warning = (
+            "C:\\repo\\EarthOrbit\\plot_earthorbit.py:56: UserWarning: "
+            "FigureCanvasAgg is non-interactive, and thus cannot be shown\n"
+            "  plt.show()\n"
+        )
+        self.assertEqual(without_headless_show_warning(warning), "")
+        self.assertEqual(without_headless_show_warning(""), "")
+        other = "main.py:10: RuntimeWarning: overflow encountered\n  x = y * z\n"
+        self.assertEqual(without_headless_show_warning(warning + other), other.rstrip("\n"))
+        self.assertEqual(without_headless_show_warning("Traceback (most recent call last):"),
+                         "Traceback (most recent call last):")
 
     def test_version_option(self):
         result = subprocess.run(
@@ -962,7 +1007,8 @@ class MainProgramTests(unittest.TestCase):
         ):
             with self.subTest(required=required):
                 self.assertIn(required, result.stdout)
-        self.assertEqual(result.stderr, "")
+        # plt.show() warns under Agg except on Linux without a display.
+        self.assertEqual(without_headless_show_warning(result.stderr), "")
 
     def test_command_line_defaults_match_driver_defaults(self):
         with mock.patch.object(sys, "argv", ["main.py"]):
@@ -1022,6 +1068,12 @@ class HelpFileTests(unittest.TestCase):
     def setUpClass(cls):
         cls.html = HELP_FILE.read_text(encoding="utf-8")
 
+    def _original_html(self):
+        """Text of the Reference Guide Help, for the tests written for it."""
+        if not ORIGINAL_HELP_FILE.is_file():
+            self.skipTest("EarthOrbit-original.html is not present; nothing else depends on it")
+        return ORIGINAL_HELP_FILE.read_text(encoding="utf-8")
+
     def test_help_file_exists(self):
         self.assertTrue(HELP_FILE.is_file())
 
@@ -1042,6 +1094,7 @@ class HelpFileTests(unittest.TestCase):
         self.assertEqual(len(parser.ids), len(set(parser.ids)))
 
     def test_help_describes_core_defaults_and_interfaces(self):
+        html = self._original_html()
         required_text = (
             '<td class="pname">--h0</td>',
             '<td class="pdefault">300.0</td>',
@@ -1061,12 +1114,16 @@ class HelpFileTests(unittest.TestCase):
         )
         for text in required_text:
             with self.subTest(text=text):
-                self.assertIn(text, self.html)
-        self.assertIn("number of trajectory samples", self.html)
+                self.assertIn(text, html)
+        self.assertIn("number of trajectory samples", html)
 
     def test_help_has_no_stale_inverse_square_energy_formula(self):
         self.assertNotIn("K_APPROX/r", self.html)
-        self.assertIn("MU_EARTH/r", self.html)
+
+    def test_original_help_gives_the_inverse_square_energy_formula(self):
+        html = self._original_html()
+        self.assertNotIn("K_APPROX/r", html)
+        self.assertIn("MU_EARTH/r", html)
 
     def test_help_contains_mathjax_offline_explanation(self):
         self.assertIn("MathJax", self.html)
@@ -1075,7 +1132,8 @@ class HelpFileTests(unittest.TestCase):
         self.assertIn("program itself, which needs no internet access", self.html)
 
     def test_help_contains_exactly_ten_ranked_exercises(self):
-        labels = re.findall(r'<div class="ec-num">EXP-(\d+) · ([^<]+)</div>', self.html)
+        html = self._original_html()
+        labels = re.findall(r'<div class="ec-num">EXP-(\d+) · ([^<]+)</div>', html)
         self.assertEqual([int(number) for number, _ in labels], list(range(1, 11)))
         expected_levels = (
             "INTRODUCTORY",
@@ -1092,24 +1150,27 @@ class HelpFileTests(unittest.TestCase):
         self.assertEqual(tuple(level for _, level in labels), expected_levels)
 
     def test_exercises_distinguish_the_two_force_laws(self):
-        self.assertIn(r"v_c=\sqrt{gr}", self.html)
-        self.assertIn("Requires <code>force_law=\"inverse_square\"</code>", self.html)
-        self.assertIn("it has no finite escape speed", self.html)
-        self.assertIn(r"T^2\propto r", self.html)
-        self.assertIn(r"T^2/r^3", self.html)
+        html = self._original_html()
+        self.assertIn(r"v_c=\sqrt{gr}", html)
+        self.assertIn("Requires <code>force_law=\"inverse_square\"</code>", html)
+        self.assertIn("it has no finite escape speed", html)
+        self.assertIn(r"T^2\propto r", html)
+        self.assertIn(r"T^2/r^3", html)
 
     def test_help_documents_validation_and_impact_endpoint(self):
-        self.assertIn("Accepted parameter values", self.html)
-        self.assertIn("must be an integer of at least 2", self.html)
-        self.assertIn("return_diagnostics", self.html)
-        self.assertIn("final plotted point may lie slightly below", self.html)
-        self.assertIn("Interpolate the Impact Point", self.html)
+        html = self._original_html()
+        self.assertIn("Accepted parameter values", html)
+        self.assertIn("must be an integer of at least 2", html)
+        self.assertIn("return_diagnostics", html)
+        self.assertIn("final plotted point may lie slightly below", html)
+        self.assertIn("Interpolate the Impact Point", html)
 
     def test_runnable_diagnostic_blocks_parse_and_execute(self):
+        html = self._original_html()
         namespaces = {}
         for number in (4, 9, 10):
             with self.subTest(experiment=number):
-                code = _exercise_code(self.html, number)
+                code = _exercise_code(html, number)
                 ast.parse(
                     code,
                     filename=f"EarthOrbit.html EXP-{number}",
@@ -1143,13 +1204,14 @@ class HelpFileTests(unittest.TestCase):
         self.assertTrue(np.all(exp10_speed_squared >= 0.0))
 
     def test_advanced_blocks_are_explicitly_runnable_starter_code(self):
+        html = self._original_html()
         for number in (9, 10):
             with self.subTest(experiment=number):
-                fragment = _exercise_fragment(self.html, number)
+                fragment = _exercise_fragment(html, number)
                 self.assertIn("Runnable starter code", fragment)
                 self.assertNotIn("run_earth_orbit(...", fragment)
 
-        exp9_tree = ast.parse(_exercise_code(self.html, 9))
+        exp9_tree = ast.parse(_exercise_code(html, 9))
         top_level_targets = {
             target.id
             for node in exp9_tree.body
@@ -1158,12 +1220,13 @@ class HelpFileTests(unittest.TestCase):
             if isinstance(target, ast.Name)
         }
         self.assertNotIn("force_law", top_level_targets)
-        self.assertNotIn("G_SURFACE", _exercise_code(self.html, 10))
+        self.assertNotIn("G_SURFACE", _exercise_code(html, 10))
 
     def test_cannon_trajectory_is_listed_as_direct_predecessor(self):
-        related = self.html.split('<section id="related">', 1)[1]
-        self.assertIn("<strong>CannonTrajectory</strong>", related)
-        self.assertIn("the simpler near-surface projectile calculation", related)
+        related = self.html.split('<section id="related">', 1)[1].split("</section>", 1)[0]
+        text = " ".join(re.sub(r"<[^>]+>", " ", related).split())
+        self.assertRegex(text, r"^Related Programs CannonTrajectory\b")
+        self.assertIn("the simpler near-surface projectile calculation", text.lower())
 
     def test_related_programs_give_no_chapter_numbers_or_links(self):
         # Help file names will change, and the chapter order of a new edition is not known.
@@ -1172,10 +1235,16 @@ class HelpFileTests(unittest.TestCase):
         self.assertNotRegex(re.sub(r"<[^>]+>", " ", related), r"\bChapter\b|\bCh\.|\bInvestigations?\b")
 
     def test_development_history_is_confined_to_license_provenance(self):
-        student_content = self.html.split('<section id="license">', 1)[0]
-        self.assertNotIn("Triana", student_content)
-        self.assertNotIn("original Java", student_content)
-        self.assertNotIn("porting", student_content.lower())
+        pages = [("Beats Help", self.html)]
+        if ORIGINAL_HELP_FILE.is_file():
+            pages.append(("Reference Guide", ORIGINAL_HELP_FILE.read_text(encoding="utf-8")))
+        for label, page in pages:
+            student_content = page.split('<section id="license">', 1)[0]
+            with self.subTest(help=label):
+                self.assertNotIn("Triana", student_content)
+                self.assertNotIn("original Java", student_content)
+                # a whole word, so that "reporting" is not mistaken for it
+                self.assertNotRegex(student_content.lower(), r"\bporting\b")
 
     def test_no_known_malformed_paragraph_nesting(self):
         self.assertIsNone(re.search(r"<p(?:\s[^>]*)?>\s*<p(?:\s[^>]*)?>", self.html))

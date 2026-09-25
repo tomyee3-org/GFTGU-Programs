@@ -26,10 +26,12 @@ CORE_MODULE_FILENAMES = (
     "plot_neutron.py",
 )
 # The Beats-format tutorial is the Help file this suite scrapes and requires.
-# ``Neutron-original.html`` (the pre-Beats Reference Guide) is not looked for
-# here and a passing run never depends on it existing.
+# It is named Neutron-claude.html until it is adopted as the live Help, when it
+# is renamed Neutron.html; either name is accepted, and the first one found is
+# used.  ``Neutron-original.html`` (the pre-Beats Reference Guide) is not looked
+# for here and a passing run never depends on it existing.
 PROGRAM_NAME = "Neutron"
-HELP_FILENAME = "Neutron-claude.html"
+HELP_FILENAMES = ("Neutron-claude.html", "Neutron.html")
 
 
 def find_module_dir(start: Path) -> Path:
@@ -198,21 +200,20 @@ def find_help_file(module_dir: Path) -> Path:
     Help files live under the sibling ``GFTGU-Documentation`` repository
     rather than beside the program modules inside ``GFTGU-Programs``. The
     program's documentation directory is still named ``Neutron`` even
-    though the file sought inside it is ``Neutron-claude.html``, so the
+    though the file sought inside it may be ``Neutron-claude.html``, so the
     directory name is kept separate from the Help filename.
     """
-    candidates = [module_dir / HELP_FILENAME]
+    candidates = [module_dir / name for name in HELP_FILENAMES]
     for ancestor in (module_dir, *module_dir.parents):
-        candidates.append(
-            ancestor / "GFTGU-Documentation" / PROGRAM_NAME / HELP_FILENAME
-        )
-        if ancestor.name != PROGRAM_NAME:
-            candidates.append(ancestor / PROGRAM_NAME / HELP_FILENAME)
+        for name in HELP_FILENAMES:
+            candidates.append(ancestor / "GFTGU-Documentation" / PROGRAM_NAME / name)
+            if ancestor.name != PROGRAM_NAME:
+                candidates.append(ancestor / PROGRAM_NAME / name)
     for candidate in candidates:
         if candidate.is_file():
             return candidate
     raise FileNotFoundError(
-        f"Could not find {HELP_FILENAME} beside the program or in "
+        f"Could not find {' or '.join(HELP_FILENAMES)} beside the program or in "
         f"GFTGU-Documentation/{PROGRAM_NAME}/."
     )
 

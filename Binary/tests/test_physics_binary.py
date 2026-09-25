@@ -54,20 +54,23 @@ def find_help_file(module_dir: Path) -> Path:
     Help files live under the sibling ``GFTGU-Documentation`` repository
     rather than beside the program modules inside ``GFTGU-Programs``.
     """
-    help_filename = "Binary.html"
+    # The Beats Help is named Binary-claude.html until it is adopted as the
+    # live Help, when it is renamed Binary.html; either name is accepted, and
+    # the first one found is used.  The Reference Guide version,
+    # Binary-original.html, is never used here.
+    help_filenames = ("Binary-claude.html", "Binary.html")
     program_name = "Binary"
-    candidates = [module_dir / help_filename]
+    candidates = [module_dir / name for name in help_filenames]
     for ancestor in (module_dir, *module_dir.parents):
-        candidates.append(
-            ancestor / "GFTGU-Documentation" / program_name / help_filename
-        )
-        if ancestor.name != program_name:
-            candidates.append(ancestor / program_name / help_filename)
+        for name in help_filenames:
+            candidates.append(ancestor / "GFTGU-Documentation" / program_name / name)
+            if ancestor.name != program_name:
+                candidates.append(ancestor / program_name / name)
     for candidate in candidates:
         if candidate.is_file():
             return candidate
     raise FileNotFoundError(
-        "Could not find Binary.html beside the program or in "
+        "Could not find Binary-claude.html (or Binary.html) beside the program or in "
         "GFTGU-Documentation/Binary/."
     )
 
@@ -1327,15 +1330,11 @@ class TestHelpFile(unittest.TestCase):
         self.assertEqual(match.group(1), physics.MODEL_VERSION)
         self.assertEqual(match.group(2), physics.BUILD_ID)
 
-    # Until the Release Notes and Sample Outputs Guide are brought up to date
-    # in the documentation round, they still carry the previous version and
-    # build.  This test is expected to fail for that reason alone; remove the
-    # decorator when those two documents are updated (an unexpected pass is
-    # reported as a failure, which is the reminder).  The commands they show
-    # are still checked by the next test.
-    @unittest.expectedFailure
     def test_release_and_sample_output_metadata_and_commands(self):
         docs = HELP_FILE.parent
+        if not ((docs / "Binary-ReleaseNotes.html").is_file()
+                and (docs / "SampleOutputs" / "Binary-SampleOutputs_Guide.html").is_file()):
+            self.skipTest("Release Notes and Sample Outputs Guide are not beside the Help file")
         for path in (docs / "Binary-ReleaseNotes.html",
                      docs / "SampleOutputs" / "Binary-SampleOutputs_Guide.html"):
             with self.subTest(path=path):

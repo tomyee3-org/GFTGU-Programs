@@ -33,7 +33,13 @@ CORE_MODULE_FILENAMES = (
     "main.py",
     "plot_mercpert.py",
 )
-HELP_FILENAME = "MercPert.html"
+# The Beats Help is named MercPert-claude.html until it is adopted as the live
+# Help, when it is renamed MercPert.html; either name is accepted, and the first
+# one found is used.  The Reference Guide version, MercPert-original.html, is
+# optional: the tests written for its text read it when it is present and skip
+# otherwise.
+HELP_FILENAMES = ("MercPert-claude.html", "MercPert.html")
+PROGRAM_NAME = "MercPert"
 
 
 def find_module_dir(start: Path) -> Path:
@@ -58,39 +64,33 @@ def find_help_file(module_dir: Path) -> Path:
     Help files live under the sibling ``GFTGU-Documentation`` repository
     rather than beside the program modules inside ``GFTGU-Programs``.
     """
-    program_name = Path(HELP_FILENAME).stem
-    candidates = [module_dir / HELP_FILENAME]
+    candidates = [module_dir / name for name in HELP_FILENAMES]
     for ancestor in (module_dir, *module_dir.parents):
-        candidates.append(
-            ancestor / "GFTGU-Documentation" / program_name / HELP_FILENAME
-        )
-        if ancestor.name != program_name:
-            candidates.append(ancestor / program_name / HELP_FILENAME)
+        for name in HELP_FILENAMES:
+            candidates.append(ancestor / "GFTGU-Documentation" / PROGRAM_NAME / name)
+            if ancestor.name != PROGRAM_NAME:
+                candidates.append(ancestor / PROGRAM_NAME / name)
     for candidate in candidates:
         if candidate.is_file():
             return candidate
     raise FileNotFoundError(
-        f"Could not find {HELP_FILENAME} beside the program or in "
-        f"GFTGU-Documentation/{program_name}/."
+        f"Could not find {' or '.join(HELP_FILENAMES)} beside the program or in "
+        f"GFTGU-Documentation/{PROGRAM_NAME}/."
     )
 
 
 MODULE_DIR = find_module_dir(Path(__file__))
 HELP_FILE = find_help_file(MODULE_DIR)
-BEATS_HELP_FILENAME = "MercPert-claude.html"
+# The Help file found above is the Beats tutorial, under either of its names.
+BEATS_HELP_FILE: Optional[Path] = HELP_FILE
+ORIGINAL_HELP_FILE = HELP_FILE.parent / "MercPert-original.html"
 
 
-def find_beats_help_file(help_file: Path) -> Optional[Path]:
-    """Return the Beats-format tutorial Help beside the classic Help, if any.
-
-    The Beats file is optional in a flattened upload, so its tests skip
-    rather than fail when it is absent.
-    """
-    candidate = help_file.parent / BEATS_HELP_FILENAME
-    return candidate if candidate.is_file() else None
-
-
-BEATS_HELP_FILE = find_beats_help_file(HELP_FILE)
+def original_help_text(test: unittest.TestCase) -> str:
+    """Text of the Reference Guide Help, for the tests written for it."""
+    if not ORIGINAL_HELP_FILE.is_file():
+        test.skipTest("MercPert-original.html is not present; nothing else depends on it")
+    return ORIGINAL_HELP_FILE.read_text(encoding="utf-8")
 if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 
@@ -236,7 +236,7 @@ class MetadataAndCompatibilityTests(unittest.TestCase):
             self.assertIn(flag, help_text)
 
     def test_help_contains_required_scientific_sections(self) -> None:
-        help_text = HELP_FILE.read_text(encoding="utf-8")
+        help_text = original_help_text(self)
         inspector = _HelpInspector()
         inspector.feed(help_text)
         for section_id in (
@@ -285,7 +285,7 @@ class MetadataAndCompatibilityTests(unittest.TestCase):
     def test_help_contains_six_valid_embedded_gallery_images(self) -> None:
         inspector = _HelpInspector()
         inspector.feed(
-            HELP_FILE.read_text(encoding="utf-8")
+            original_help_text(self)
         )
         self.assertEqual(len(inspector.images), 6)
         for attributes in inspector.images:
@@ -297,7 +297,7 @@ class MetadataAndCompatibilityTests(unittest.TestCase):
             self.assertTrue(decoded.startswith(b"\x89PNG\r\n\x1a\n"))
 
     def test_exercises_are_ranked_in_approximate_difficulty_order(self) -> None:
-        help_text = HELP_FILE.read_text(encoding="utf-8")
+        help_text = original_help_text(self)
         suggestions = re.search(
             r'<section id="suggestions">(.*?)</section>',
             help_text,
@@ -1013,9 +1013,9 @@ class TerminologyTests(unittest.TestCase):
 
     def _help_texts(self):
         texts = [(HELP_FILE.name, HELP_FILE.read_text(encoding="utf-8"))]
-        if BEATS_HELP_FILE is not None:
-            texts.append((BEATS_HELP_FILE.name,
-                          BEATS_HELP_FILE.read_text(encoding="utf-8")))
+        if ORIGINAL_HELP_FILE.is_file():
+            texts.append((ORIGINAL_HELP_FILE.name,
+                          ORIGINAL_HELP_FILE.read_text(encoding="utf-8")))
         return texts
 
     def test_help_mentions_jupiter_only_as_a_mass_reference(self) -> None:
@@ -1038,7 +1038,7 @@ class TerminologyTests(unittest.TestCase):
 
 
 @unittest.skipIf(BEATS_HELP_FILE is None,
-                 f"{BEATS_HELP_FILENAME} is not present beside {HELP_FILENAME}")
+                 "the Beats Help is not present")
 class BeatsHelpTests(unittest.TestCase):
     """Structural checks on the Beats-format tutorial Help."""
 

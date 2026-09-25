@@ -35,7 +35,12 @@ CORE_MODULE_FILES = (
     "main.py",
     "plot_cannon.py",
 )
-HELP_FILE = "CannonTrajectory.html"
+# The Beats Help is named CannonTrajectory-claude.html until it is adopted as
+# the live Help, when it is renamed CannonTrajectory.html; either name is
+# accepted, and the first one found is used.  The Reference Guide version,
+# CannonTrajectory-original.html, is never used here.
+HELP_FILENAMES = ("CannonTrajectory-claude.html", "CannonTrajectory.html")
+PROGRAM_NAME = "CannonTrajectory"
 
 
 def find_module_dir(start):
@@ -60,23 +65,21 @@ def find_help_file(module_dir):
     Documentation folders no longer use chapter-number prefixes, and the
     Help files live under the sibling ``GFTGU-Documentation`` repository
     rather than beside the program modules inside ``GFTGU-Programs``.
-    The previous fallback ``module_dir.parent / HELP_FILE`` pointed at
+    The previous fallback ``module_dir.parent / <Help file>`` pointed at
     ``GFTGU-Programs/CannonTrajectory.html``, which is not a real layout.
     """
-    program_name = Path(HELP_FILE).stem
-    candidates = [module_dir / HELP_FILE]
+    candidates = [module_dir / name for name in HELP_FILENAMES]
     for ancestor in (module_dir, *module_dir.parents):
-        candidates.append(
-            ancestor / "GFTGU-Documentation" / program_name / HELP_FILE
-        )
-        if ancestor.name != program_name:
-            candidates.append(ancestor / program_name / HELP_FILE)
+        for name in HELP_FILENAMES:
+            candidates.append(ancestor / "GFTGU-Documentation" / PROGRAM_NAME / name)
+            if ancestor.name != PROGRAM_NAME:
+                candidates.append(ancestor / PROGRAM_NAME / name)
     for candidate in candidates:
         if candidate.is_file():
             return candidate
     raise FileNotFoundError(
-        f"Could not find {HELP_FILE} beside the program or in "
-        f"GFTGU-Documentation/{program_name}/."
+        f"Could not find {' or '.join(HELP_FILENAMES)} beside the program or in "
+        f"GFTGU-Documentation/{PROGRAM_NAME}/."
     )
 
 
@@ -227,7 +230,7 @@ class TestModuleDiscovery(unittest.TestCase):
             flat_dir = Path(temporary)
             for name in CORE_MODULE_FILES:
                 shutil.copy2(MODULE_DIR / name, flat_dir / name)
-            shutil.copy2(HELP_PATH, flat_dir / HELP_FILE)
+            shutil.copy2(HELP_PATH, flat_dir / HELP_PATH.name)
             flat_test = flat_dir / "test_physics_cannon.py"
             shutil.copy2(Path(__file__), flat_test)
 
@@ -253,7 +256,8 @@ class TestMetadataAndCompatibility(unittest.TestCase):
 
     def test_build_coverage_is_exactly_the_executable_core(self):
         self.assertEqual(tuple(physics.BUILD_ID_COVERS), CORE_MODULE_FILES)
-        self.assertNotIn(HELP_FILE, physics.BUILD_ID_COVERS)
+        for name in HELP_FILENAMES:
+            self.assertNotIn(name, physics.BUILD_ID_COVERS)
         self.assertFalse(any("test" in name for name in physics.BUILD_ID_COVERS))
 
     def test_build_id_matches_independent_calculation(self):
@@ -2190,13 +2194,13 @@ class TestMaintenanceItems(unittest.TestCase):
             copy = Path(temporary)
             for name in CORE_MODULE_FILES:
                 shutil.copy2(MODULE_DIR / name, copy / name)
-            shutil.copy2(HELP_PATH, copy / HELP_FILE)
+            shutil.copy2(HELP_PATH, copy / HELP_PATH.name)
             (copy / "tests").mkdir()
             shutil.copy2(Path(__file__), copy / "tests" / Path(__file__).name)
             (copy / "CannonTrajectory-ReleaseNotes.html").write_text("<p>notes</p>", encoding="utf-8")
             baseline = self.build_id_in_copy(copy)
             self.assertEqual(baseline, physics.BUILD_ID)
-            with (copy / HELP_FILE).open("a", encoding="utf-8") as handle:
+            with (copy / HELP_PATH.name).open("a", encoding="utf-8") as handle:
                 handle.write("\n<!-- documentation-only edit -->\n")
             with (copy / "tests" / Path(__file__).name).open("a", encoding="utf-8") as handle:
                 handle.write("\n# test-only edit\n")

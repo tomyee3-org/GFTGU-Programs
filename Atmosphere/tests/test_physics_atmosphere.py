@@ -108,22 +108,25 @@ def find_help_file(module_dir: Path) -> Path:
     Help files live under the sibling ``GFTGU-Documentation`` repository
     rather than beside the program modules inside ``GFTGU-Programs``.
     """
-    help_filename = "Atmosphere.html"
+    # The Beats Help is named Atmosphere-claude.html until it is adopted as
+    # the live Help, when it is renamed Atmosphere.html; either name is
+    # accepted, and the first one found is used.  The Reference Guide version,
+    # Atmosphere-original.html, is never used here.
+    help_filenames = ("Atmosphere-claude.html", "Atmosphere.html")
     program_name = "Atmosphere"
-    candidates = [module_dir / help_filename]
+    candidates = [module_dir / name for name in help_filenames]
     for ancestor in (module_dir, *module_dir.parents):
-        candidates.append(ancestor / "Atmosphere-Documentation" / help_filename)
-        candidates.append(
-            ancestor / "GFTGU-Documentation" / program_name / help_filename
-        )
-        if ancestor.name != program_name:
-            candidates.append(ancestor / program_name / help_filename)
+        for name in help_filenames:
+            candidates.append(ancestor / "Atmosphere-Documentation" / name)
+            candidates.append(ancestor / "GFTGU-Documentation" / program_name / name)
+            if ancestor.name != program_name:
+                candidates.append(ancestor / program_name / name)
     for candidate in candidates:
         if candidate.is_file():
             return candidate
     raise FileNotFoundError(
-        "Could not find Atmosphere.html beside the program or in "
-        "GFTGU-Documentation/Atmosphere/ or Atmosphere-Documentation/."
+        "Could not find Atmosphere-claude.html (or Atmosphere.html) beside the "
+        "program or in GFTGU-Documentation/Atmosphere/ or Atmosphere-Documentation/."
     )
 
 

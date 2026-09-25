@@ -32,7 +32,13 @@ CORE_MODULE_FILES = (
     "main.py",
     "plot_multiple.py",
 )
-HELP_FILE = "Multiple.html"
+# The Beats Help is named Multiple-claude.html until it is adopted as the live
+# Help, when it is renamed Multiple.html; either name is accepted, and the first
+# one found is used.  The Reference Guide version, Multiple-original.html, is
+# optional: the tests written for its text read it when it is present and skip
+# otherwise.
+HELP_FILENAMES = ("Multiple-claude.html", "Multiple.html")
+PROGRAM_NAME = "Multiple"
 
 
 def find_module_dir(start) -> Path:
@@ -55,39 +61,33 @@ def find_help_file(module_dir):
     Help files live under the sibling ``GFTGU-Documentation`` repository
     rather than beside the program modules inside ``GFTGU-Programs``.
     """
-    program_name = Path(HELP_FILE).stem
-    candidates = [module_dir / HELP_FILE]
+    candidates = [module_dir / name for name in HELP_FILENAMES]
     for ancestor in (module_dir, *module_dir.parents):
-        candidates.append(
-            ancestor / "GFTGU-Documentation" / program_name / HELP_FILE
-        )
-        if ancestor.name != program_name:
-            candidates.append(ancestor / program_name / HELP_FILE)
+        for name in HELP_FILENAMES:
+            candidates.append(ancestor / "GFTGU-Documentation" / PROGRAM_NAME / name)
+            if ancestor.name != PROGRAM_NAME:
+                candidates.append(ancestor / PROGRAM_NAME / name)
     for candidate in candidates:
         if candidate.is_file():
             return candidate
     raise FileNotFoundError(
-        f"Could not find {HELP_FILE} beside the program or in "
-        f"GFTGU-Documentation/{program_name}/."
+        f"Could not find {' or '.join(HELP_FILENAMES)} beside the program or in "
+        f"GFTGU-Documentation/{PROGRAM_NAME}/."
     )
 
 
-BEATS_HELP_FILENAME = "Multiple-claude.html"
-
-
-def find_beats_help_file(help_file: Path) -> Optional[Path]:
-    """Return the Beats-format tutorial Help beside the classic Help, if any.
-
-    The Beats file is optional in a flattened upload, so its tests skip
-    rather than fail when it is absent.
-    """
-    candidate = help_file.parent / BEATS_HELP_FILENAME
-    return candidate if candidate.is_file() else None
+def original_help_text(test) -> str:
+    """Text of the Reference Guide Help, for the tests written for it."""
+    if not ORIGINAL_HELP_FILE.is_file():
+        test.skipTest("Multiple-original.html is not present; nothing else depends on it")
+    return ORIGINAL_HELP_FILE.read_text(encoding="utf-8")
 
 
 MODULE_DIR = find_module_dir(Path(__file__))
 HELP_PATH = find_help_file(MODULE_DIR)
-BEATS_HELP_FILE = find_beats_help_file(HELP_PATH)
+# The Help file found above is the Beats tutorial, under either of its names.
+BEATS_HELP_FILE: Optional[Path] = HELP_PATH
+ORIGINAL_HELP_FILE = HELP_PATH.parent / "Multiple-original.html"
 if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 
@@ -1371,7 +1371,12 @@ class TestBuildDocumentationAndCompatibility(unittest.TestCase):
         self.assertEqual(match.group(2), phys.BUILD_ID)
 
     def test_help_describes_current_defaults_and_modes(self):
-        help_text = HELP_PATH.read_text(encoding="utf-8")
+        self._check_defaults_and_modes(HELP_PATH.read_text(encoding="utf-8"), original=False)
+
+    def test_original_help_describes_current_defaults_and_modes(self):
+        self._check_defaults_and_modes(original_help_text(self), original=True)
+
+    def _check_defaults_and_modes(self, help_text, original):
         required_fragments = (
             "60000",
             "0.005",
@@ -1392,8 +1397,10 @@ class TestBuildDocumentationAndCompatibility(unittest.TestCase):
             "Intermediate",
             "Advanced",
             "E_internal",
-            "console samples are independent of",
         )
+        if original:
+            # this sentence belongs to the Reference Guide's wording
+            required_fragments += ("console samples are independent of",)
         for fragment in required_fragments:
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, help_text)
@@ -1410,7 +1417,7 @@ class TestBuildDocumentationAndCompatibility(unittest.TestCase):
         self.assertEqual(args.display_frame, "com")
 
     def test_help_defines_current_output_terminology(self):
-        help_text = HELP_PATH.read_text(encoding="utf-8")
+        help_text = original_help_text(self)
         self.assertIn(
             "not an <code>output_type</code> value",
             help_text,
@@ -1419,22 +1426,28 @@ class TestBuildDocumentationAndCompatibility(unittest.TestCase):
         self.assertNotIn("output_type='current positions'", help_text)
 
     def test_help_documents_build_id_coverage(self):
-        help_text = HELP_PATH.read_text(encoding="utf-8")
+        help_text = original_help_text(self)
         self.assertIn(
             "Build identifier covers the four Python program modules",
             help_text,
         )
         self.assertIn("Help-only or test-only edits do not change it", help_text)
 
-    def test_help_has_correct_energy_equation_without_malformed_residue(self):
+    def test_help_has_no_malformed_equation_residue(self):
         help_text = HELP_PATH.read_text(encoding="utf-8")
+        for residue in (r'\]=""', 'div="">', "gm_am_b", "</b}"):
+            with self.subTest(residue=residue):
+                self.assertNotIn(residue, help_text)
+
+    def test_help_has_correct_energy_equation_without_malformed_residue(self):
+        help_text = original_help_text(self)
         self.assertIn(r"\frac{Gm_A m_B}{r_{AB}}", help_text)
         for residue in (r'\]=""', 'div="">', "gm_am_b", "</b}"):
             with self.subTest(residue=residue):
                 self.assertNotIn(residue, help_text)
 
     def test_help_preserves_and_orders_key_exercises(self):
-        help_text = HELP_PATH.read_text(encoding="utf-8")
+        help_text = original_help_text(self)
         titles = (
             "Two-body sanity check",
             "Default three-body encounter",
@@ -1459,7 +1472,7 @@ class TestBuildDocumentationAndCompatibility(unittest.TestCase):
         self.assertIn("Triana/Java", license_and_after)
 
     def test_help_scenario_cards_each_have_one_difficulty_badge(self):
-        help_text = HELP_PATH.read_text(encoding="utf-8")
+        help_text = original_help_text(self)
         heads = re.findall(
             r'<div class="sc-head"><div class="sc-title">(.*?)</div>'
             r'<span class="diff diff-\w+">(.*?)</span></div>',
