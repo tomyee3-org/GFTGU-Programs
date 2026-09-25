@@ -9,7 +9,7 @@ import math
 from numbers import Real
 from typing import List, Optional, Tuple
 
-MODEL_VERSION = "1.5.1"
+MODEL_VERSION = "1.6.0"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -125,7 +125,12 @@ class TemperatureProfile:
         self._validated_token = self._token()
 
     def _ensure_validated(self) -> None:
-        """Run ``validate()`` only when the profile object looks new or edited."""
+        """Re-validate whenever the profile object looks new or edited.
+
+        The public ``get_temp()`` path always calls ``validate()``.  The
+        integrator uses ``_temperature_at()`` after one validation so a
+        dense profile is not rescanned at every Euler step.
+        """
         if self._validated_token != self._token():
             self.validate()
 
@@ -135,15 +140,20 @@ class TemperatureProfile:
         highest measurement, use T = beta * p^power, with beta fixed so that
         T is continuous at the first integration point above the highest
         supplied temperature measurement.
+
+        Every public call re-validates the profile, so an in-place edit of
+        an interior altitude, an interior temperature, or ``power`` is
+        rejected instead of interpolating the corrupted lists.
         """
+        self.validate()
+        return self._temperature_at(altitude, pressure)
+
+    def _temperature_at(self, altitude: float, pressure: float) -> float:
+        """Trusted interpolation.  The caller must already have validated."""
         if not _is_finite_number(altitude):
             raise ValueError("altitude must be a finite number.")
         if not _is_finite_number(pressure) or pressure < 0.0:
             raise ValueError("pressure must be a finite non-negative number.")
-
-        # Validate when the lists look new or replaced.  The integrator calls
-        # this once per step, so the check itself must not scan the profile.
-        self._ensure_validated()
 
         # If we are still below or within measured range, do linear interpolation
         if altitude <= self.h[-1]:

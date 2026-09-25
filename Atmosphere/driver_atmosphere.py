@@ -138,19 +138,22 @@ class AtmosphereModel:
             return proposed
         target = altitude + proposed
         try:
-            t_target = self.temp_profile.get_temp(target, pressure)
+            t_target = self.temp_profile._temperature_at(target, pressure)
         except ValueError:
             return proposed
-        t_floor = min(temperature, t_target)
-        if t_floor <= 0.0 or not math.isfinite(t_target):
+        if t_target <= 0.0 or not math.isfinite(t_target):
             return proposed
-        relative = abs(t_target - temperature) / t_floor
+        # Bound |ΔT| by a fraction of the *current* temperature.  Using
+        # min(T, T_target) as the denominator made a hot-to-cold ramp take
+        # steps sized from the cold endpoint even while the air was still
+        # hot, which could exhaust the point budget on a valid profile.
+        relative = abs(t_target - temperature) / temperature
         if relative <= MAX_RELATIVE_TEMP_JUMP:
             return proposed
         # A landing a few micrometres wide cannot change ln p by a useful
         # amount even at the coldest temperature; leave those micro-steps
         # alone so a dense sounding still fits in the point budget.
-        local_scale = t_floor / (
+        local_scale = temperature / (
             self.params.g_accel * self.params.mu * phys.ATOMIC_MASS_UNIT / phys.K_BOLTZMANN
         )
         if local_scale > 0.0 and proposed / local_scale < 1e-5:
@@ -242,7 +245,10 @@ class AtmosphereModel:
             if retry_count >= max_retries:
                 raise RuntimeError(
                     "Could not reach the numerical zero-pressure boundary "
-                    "after repeated step-size increases."
+                    "after repeated step-size increases. The profile may be "
+                    "too tall, too cold, or too steep for the 50,000-point "
+                    "budget: shorten it, space the nodes farther apart, or "
+                    "raise the coldest temperature."
                 )
             retry_count += 1
             # Each retry is a fresh integration. The upper-atmosphere
@@ -292,10 +298,12 @@ class AtmosphereModel:
                     last_step = j
                     break
 
-                Temp[j] = self.temp_profile.get_temp(alt[j], p[j])
+                Temp[j] = self.temp_profile._temperature_at(alt[j], p[j])
                 rho[j] = ideal_gas_density(p[j], mu, Temp[j])
 
-            # If still zero, all steps were used without crossing zero pressure: increase dh.
+            # If still zero, all steps were used without crossing zero pressure.
+            # Doubling dh does not enlarge a temperature-capped step, but it
+            # still helps a tall profile whose first pass was not capped.
             if last_step == 0:
                 dh *= 2.0
                 if not math.isfinite(dh):

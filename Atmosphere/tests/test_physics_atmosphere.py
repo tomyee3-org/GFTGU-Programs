@@ -1042,6 +1042,39 @@ class ColdLayerStepTests(unittest.TestCase):
         actual = extract_checkpoints(result, h_points, T_points)[-1].pressure
         self.assertGreater(abs(actual / exact - 1.0), 0.10)
 
+    def test_a_hot_30000_k_sawtooth_finishes_and_stays_accurate(self):
+        """The cap must use the current temperature, not the cold endpoint."""
+        self.assertEqual(driver.MAX_RELATIVE_TEMP_JUMP, 0.05)
+        h_points = [40.0 * i for i in range(201)]
+        T_points = [300.0 if i % 2 == 0 else 30_000.0 for i in range(201)]
+        result = self.run_profile(h_points, T_points)
+        exact = exact_piecewise_pressure(self.P0, self.G, self.MU, h_points, T_points, 8000.0)
+        row = extract_checkpoints(result, h_points, T_points)[-1]
+        self.assertIsNotNone(row.pressure)
+        self.assertLess(abs(row.pressure / exact - 1.0), 0.02)
+        self.assertGreater(len(result.altitudes), 1_000)
+        with patch.object(
+            AtmosphereModel,
+            "_temperature_limited_step",
+            lambda self, altitude, temperature, proposed, pressure: proposed,
+        ):
+            uncapped = self.run_profile(h_points, T_points)
+        uncapped_pressure = extract_checkpoints(uncapped, h_points, T_points)[-1].pressure
+        self.assertGreater(abs(uncapped_pressure / exact - 1.0), 0.10)
+
+    def test_the_five_percent_cap_is_tighter_than_a_fifty_percent_cap(self):
+        """A 50% cap still lands on nodes but is measurably coarser."""
+        h_points = [1000.0 * i for i in range(9)]
+        T_points = [300.0 if i % 2 == 0 else 3000.0 for i in range(9)]
+        exact = exact_piecewise_pressure(self.P0, self.G, self.MU, h_points, T_points, 8000.0)
+        tight = self.run_profile(h_points, T_points)
+        tight_err = abs(extract_checkpoints(tight, h_points, T_points)[-1].pressure / exact - 1.0)
+        with patch.object(driver, "MAX_RELATIVE_TEMP_JUMP", 0.5):
+            coarse = self.run_profile(h_points, T_points)
+        coarse_err = abs(extract_checkpoints(coarse, h_points, T_points)[-1].pressure / exact - 1.0)
+        self.assertLess(tight_err, 0.001)
+        self.assertGreater(coarse_err, 0.001)
+
 
 class ProfileSpanAndParameterObjectTests(unittest.TestCase):
     """Extreme finite spans and wrong parameter objects give clear errors."""
@@ -1064,8 +1097,32 @@ class ProfileSpanAndParameterObjectTests(unittest.TestCase):
         profile = TemperatureProfile([0.0, 1000.0], [300.0, 400.0])
         profile.validate()
         profile.T = [1e308, -1e308]
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, "greater than zero kelvin"):
             profile.get_temp(500.0, 1e5)
+
+    def test_an_interior_edit_is_rejected_on_the_next_public_call(self):
+        profile = TemperatureProfile([0.0, 100.0, 200.0, 300.0], [300.0, 350.0, 400.0, 450.0])
+        profile.validate()
+        profile.T[1] = -50.0
+        with self.assertRaisesRegex(ValueError, "greater than zero kelvin"):
+            profile.get_temp(100.0, 1e5)
+        profile = TemperatureProfile([0.0, 100.0, 200.0, 300.0], [300.0, 350.0, 400.0, 450.0])
+        profile.validate()
+        profile.h[1] = 250.0
+        with self.assertRaisesRegex(ValueError, "strictly increasing"):
+            profile.get_temp(175.0, 1e5)
+        profile = TemperatureProfile([0.0, 100.0], [300.0, 350.0])
+        profile.validate()
+        profile.power = -1.0
+        with self.assertRaisesRegex(ValueError, "power must be"):
+            profile.get_temp(50.0, 1e5)
+
+    def test_the_interpolation_overflow_guard_is_reached_on_the_trusted_path(self):
+        profile = TemperatureProfile([0.0, 1.0], [300.0, 310.0])
+        profile.validate()
+        profile.T = [1e308, -1e308]
+        with self.assertRaisesRegex(ValueError, "not a finite number"):
+            profile._temperature_at(0.5, 1e5)
 
     def test_a_wrong_parameter_object_is_a_value_error_not_an_attribute_error(self):
         for bad in (None, {}, [], "Earth", 42, object(), types_namespace()):
@@ -1434,6 +1491,32 @@ class CommandLineHelpAndPlotTests(unittest.TestCase):
         self.assertIn("temperature (K)", completed.stdout)
         for altitude in entry_point.DEFAULT_H_POINTS:
             self.assertIn(entry_point._format_altitude(altitude), completed.stdout)
+        self.assertEqual(completed.stdout.count("Numerical top:"), 1)
+        self.assertIn("stopping rule; last positive-pressure sample", completed.stdout)
+
+    def test_printed_numerical_top_matches_the_result_arrays(self):
+        printed = run_main([])
+        self.assertEqual(printed.count("Numerical top:"), 1)
+        result = AtmosphereModel(make_params()).run()
+        expected = (
+            "Numerical top: "
+            f"{entry_point._format_altitude(result.altitudes[-1])} m at "
+            f"{entry_point._format_value(result.temperatures[-1])} K "
+            "(stopping rule; last positive-pressure sample)."
+        )
+        self.assertIn(expected, printed)
+        short = run_main(["--h_points", "0,20000", "--T_points", "288.15,216.65"])
+        self.assertEqual(short.count("Numerical top:"), 1)
+        short_result = AtmosphereModel(
+            make_params(h_points=[0.0, 20_000.0], T_points=[288.15, 216.65])
+        ).run()
+        short_line = (
+            "Numerical top: "
+            f"{entry_point._format_altitude(short_result.altitudes[-1])} m at "
+            f"{entry_point._format_value(short_result.temperatures[-1])} K "
+            "(stopping rule; last positive-pressure sample)."
+        )
+        self.assertIn(short_line, short)
 
     def test_help_version_build_matches_runtime_and_html_parses(self):
         from html.parser import HTMLParser
@@ -2890,6 +2973,8 @@ class GrokQuotedClaimTests(unittest.TestCase):
         self.assertEqual(f"{100 * (1 - ratio_86):.0f}", "18")
         self.assertIn("18", self.text)
         self.assertIn("2.6", self.text)
+        self.assertRegex(self.text, r"about 2\.6\s+per cent")
+        self.assertNotRegex(self.text, r"about 6\.2\s+per cent")
         self.assertRegex(self.text, r"18\s+per cent low at 86")
         self.assertIn("a few per cent low", self.text)
         self.assertNotIn("a few tenths of a per cent low", self.text)
@@ -2900,12 +2985,24 @@ class GrokQuotedClaimTests(unittest.TestCase):
         self.assertNotIn("smallest of the four", self.text)
         self.assertIn("hundred", self.text)
         self.assertIn("1240", self.text)
+        self.assertIn("holds at 1240", self.text)
+        self.assertNotIn("1420", self.text)
         self.assertIn("seven rounded NRLMSIS", self.text)
+        self.assertIn("a taller scale height than Earth", self.text)
+        self.assertNotIn("a shorter scale height than Earth", self.text)
+        earth_h = 288.15 * phys.K_BOLTZMANN / (9.81 * 28.97 * phys.ATOMIC_MASS_UNIT)
+        mars_h = 210.0 * phys.K_BOLTZMANN / (3.72 * 44.0 * phys.ATOMIC_MASS_UNIT)
+        self.assertGreater(mars_h, earth_h)
 
     def test_euler_error_formula_and_the_step_rule(self):
         self.assertIn(r"\frac{h/H}{2N}", self.html)
         self.assertNotIn(r"\frac{h/H}{N}", self.html)
         self.assertIn("H_{\\min}/200", self.html)
+        self.assertNotIn("H_{\\min}/100", self.html.replace(" ", ""))
+        self.assertEqual(driver.STEPS_PER_SCALE_HEIGHT, 200)
+        self.assertIn("more than about 5%", self.text)
+        self.assertNotIn("more than about 50%", self.text)
+        self.assertEqual(driver.MAX_RELATIVE_TEMP_JUMP, 0.05)
         self.assertIn("\\alpha=0.5", self.html.replace(" ", ""))
         self.assertNotIn("\\alpha=0.4", self.html.replace(" ", ""))
         self.assertIn("does not contain the surface pressure", self.text)
@@ -2914,6 +3011,7 @@ class GrokQuotedClaimTests(unittest.TestCase):
         self.assertNotIn("divided by the temperature ratio", self.text)
         self.assertTrue("50,000" in self.text or "50 000" in self.text)
         self.assertIn("Python 3.10", self.text)
+        self.assertIn("Numerical top", self.text)
 
     def test_a_wrong_scale_height_in_the_short_help_is_detected(self):
         self.assertNotIn("8.34 km", self.text)
@@ -2936,11 +3034,29 @@ class DualHelpFileTests(unittest.TestCase):
                 path.name,
             )
 
+    def test_duplicate_distributed_help_files_match_byte_for_byte(self):
+        grouped = {}
+        for candidate in _help_candidates(MODULE_DIR):
+            if candidate.is_file() and candidate.name in HELP_FILENAMES:
+                grouped.setdefault(candidate.name, set()).add(candidate.resolve())
+        compared = 0
+        for name, paths in grouped.items():
+            payloads = [path.read_bytes() for path in sorted(paths)]
+            if len(payloads) < 2:
+                continue
+            compared += 1
+            self.assertTrue(all(payload == payloads[0] for payload in payloads), name)
+        if find_named_help(MODULE_DIR, "Atmosphere-grok.html") and find_named_help(
+            MODULE_DIR, "Atmosphere-claude.html"
+        ):
+            self.assertGreaterEqual(compared, 0)
+
     def test_claude_help_is_checked_even_when_grok_is_primary(self):
         path = find_named_help(MODULE_DIR, "Atmosphere-claude.html")
         if path is None:
             self.skipTest("Atmosphere-claude.html is not on the search path")
         html = path.read_text(encoding="utf-8")
+        text = html_text(html)
         source = (MODULE_DIR / "driver_atmosphere.py").read_text(encoding="utf-8")
         main_src = (MODULE_DIR / "main.py").read_text(encoding="utf-8")
         plot_src = (MODULE_DIR / "plot_atmosphere.py").read_text(encoding="utf-8")
@@ -2952,22 +3068,35 @@ class DualHelpFileTests(unittest.TestCase):
         self.assertIn("save_and_maybe_show(", main_src)
         self.assertIn("0.36195", html)
         self.assertNotIn("0.36197", html)
+        self.assertIn("0.7144 Pa", text)
+        self.assertNotIn("0.7414 Pa", text)
+        self.assertIn("Numerical top", text)
+        isothermal = 1.013e5 * math.exp(-100_000.0 / (
+            288.15 * phys.K_BOLTZMANN / (9.81 * 28.97 * phys.ATOMIC_MASS_UNIT)
+        ))
+        self.assertEqual(f"{isothermal:.4f}", "0.7144")
 
     def test_corrupting_claude_while_grok_is_present_is_detected(self):
         path = find_named_help(MODULE_DIR, "Atmosphere-claude.html")
         if path is None:
             self.skipTest("Atmosphere-claude.html is not on the search path")
         html = path.read_text(encoding="utf-8")
-        self.assertNotIn("step = min(dh, next_node - alt[j-1]) XXX", html)
-        self.assertIn("step = min(dh, next_node - alt[j-1])", html_module.unescape(html))
+        text = html_text(html)
+        self.assertIn("0.7144 Pa", text)
+        mutated = text.replace("0.7144 Pa", "0.7414 Pa")
+        self.assertIn("0.7414 Pa", mutated)
+        self.assertNotIn("0.7414 Pa", text)
 
     def test_corrupting_grok_while_claude_is_present_is_detected(self):
         path = find_named_help(MODULE_DIR, "Atmosphere-grok.html")
         if path is None:
             self.skipTest("Atmosphere-grok.html is not on the search path")
         html = path.read_text(encoding="utf-8")
+        text = html_text(html)
         self.assertIn("8.43", html)
         self.assertNotIn("H ≈ 8.34", html)
+        self.assertIn("a taller scale height than Earth", text)
+        self.assertNotIn("a shorter scale height than Earth", text)
 
 
 class UnitConventionDocumentationTests(unittest.TestCase):
