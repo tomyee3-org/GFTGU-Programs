@@ -9,7 +9,7 @@ crossing, and the reason the integration terminated.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import physics_relativistic_orbit as phys
 from physics_relativistic_orbit import (
@@ -33,25 +33,30 @@ class RelativisticOrbitParams:
     model: str = "schwarzschild"  # "schwarzschild" or "newtonian"
 
 
-@dataclass
+@dataclass(frozen=True)
 class RelativisticOrbitResult:
+    """The integrated orbit and its diagnostics.
+
+    The result is frozen and its sequences are tuples, so a result cannot be
+    changed after integrate_relativistic_orbit() returns it.
+    """
     model_version: str
     build_id: str
-    x: list[float]
-    y: list[float]
-    vx: list[float]
-    vy: list[float]
-    tau: list[float]
-    azimuth_unwrapped: list[float]
+    x: tuple[float, ...]
+    y: tuple[float, ...]
+    vx: tuple[float, ...]
+    vy: tuple[float, ...]
+    tau: tuple[float, ...]
+    azimuth_unwrapped: tuple[float, ...]
     n_orbits: float
     final_step: int
     fell_into_hole: bool
     termination_reason: str
     model: str
-    periapsis_indices: list[int] = field(default_factory=list)
-    periapsis_tau: list[float] = field(default_factory=list)
-    periapsis_radius: list[float] = field(default_factory=list)
-    periapsis_azimuth: list[float] = field(default_factory=list)
+    periapsis_indices: tuple[int, ...] = ()
+    periapsis_tau: tuple[float, ...] = ()
+    periapsis_radius: tuple[float, ...] = ()
+    periapsis_azimuth: tuple[float, ...] = ()
     mean_periapsis_advance: float | None = None
     max_fractional_h_drift: float = 0.0
     max_fractional_energy_drift: float = 0.0
@@ -380,21 +385,21 @@ def integrate_relativistic_orbit(
     return RelativisticOrbitResult(
         model_version=phys.MODEL_VERSION,
         build_id=phys.BUILD_ID,
-        x=x,
-        y=y,
-        vx=vx,
-        vy=vy,
-        tau=tau,
-        azimuth_unwrapped=azimuth_unwrapped,
+        x=tuple(x),
+        y=tuple(y),
+        vx=tuple(vx),
+        vy=tuple(vy),
+        tau=tuple(tau),
+        azimuth_unwrapped=tuple(azimuth_unwrapped),
         n_orbits=n_orbits,
         final_step=accepted_steps,
         fell_into_hole=fell_into_hole,
         termination_reason=termination_reason,
         model=model,
-        periapsis_indices=periapsis_indices,
-        periapsis_tau=periapsis_tau,
-        periapsis_radius=periapsis_radius,
-        periapsis_azimuth=periapsis_azimuth,
+        periapsis_indices=tuple(periapsis_indices),
+        periapsis_tau=tuple(periapsis_tau),
+        periapsis_radius=tuple(periapsis_radius),
+        periapsis_azimuth=tuple(periapsis_azimuth),
         mean_periapsis_advance=mean_advance,
         max_fractional_h_drift=max_h_drift,
         max_fractional_energy_drift=max_energy_drift,

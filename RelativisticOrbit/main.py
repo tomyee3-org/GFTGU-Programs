@@ -16,7 +16,9 @@ Use ``python main.py --help`` for defaults and examples. Input parameters:
 
 The integration parameter is proper time tau. The x-y plot uses areal radius
 and azimuth; its axes are orbital diagram coordinates, not global flat-space
-Cartesian coordinates.
+Cartesian coordinates. After the run summary, the program prints the orbit
+predicted from the constants of motion (physics.predict_orbit): its kind,
+turning points and exact apsidal advance, an outside check on the integration.
 """
 
 import argparse
@@ -74,7 +76,8 @@ def positive_int(text):
     return value
 
 
-def parse_args(argv=None):
+def build_parser():
+    """Return the command-line parser; its defaults are the current params."""
     parser = argparse.ArgumentParser(
         prog="RelativisticOrbit",
         description="Compare proper-time Schwarzschild orbits with a Newtonian central-force model.",
@@ -105,9 +108,15 @@ def parse_args(argv=None):
     parser.add_argument("--show_periapsides", action=argparse.BooleanOptionalAction,
                         default=show_periapsides,
                         help="mark detected minimum-radius points in the orbit plot")
-    # argparse normally reads a leading minus sign as an option. Bind signed
-    # scientific notation first so --u_init -2e8 is interpreted as one value.
-    raw = list(sys.argv[1:] if argv is None else argv)
+    return parser
+
+
+def _bind_signed_numbers(raw):
+    """Join a numeric option and a following negative value into one word.
+
+    argparse normally reads a leading minus sign as an option. Binding signed
+    scientific notation first lets --u_init -2e8 be read as one value.
+    """
     numbers = {"x_init", "u_init", "dt", "eps1", "eps2", "max_steps", "max_orbits"}
     normalized = []
     index = 0
@@ -126,12 +135,51 @@ def parse_args(argv=None):
                 continue
         normalized.append(word)
         index += 1
-    args = parser.parse_args(normalized)
+    return normalized
+
+
+def parse_args(argv=None):
+    parser = build_parser()
+    raw = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(_bind_signed_numbers(raw))
     if args.eps2 >= args.eps1:
         parser.error("--eps2 must be smaller than --eps1")
     if args.model == "schwarzschild" and args.x_init <= physics.HORIZON_RADIUS:
         parser.error("--x_init must lie outside the Schwarzschild horizon")
     return args
+
+
+def _angle_text(radians):
+    return f"{radians:.6g} rad = {math.degrees(radians):.6g} deg"
+
+
+def prediction_lines(run_params):
+    """Summary lines computed from the constants of motion, not from the run."""
+    prediction = physics.predict_orbit(run_params.x_init, run_params.u_init, run_params.model)
+    lines = ["  predicted from the constants of motion:"]
+    try:
+        circular = physics.circular_proper_time_speed(run_params.x_init, run_params.model)
+    except ValueError:
+        lines.append("    circular dy/dtau: none (x_init is not above 3GM/c^2)")
+    else:
+        lines.append(f"    circular dy/dtau: {circular:.6g} m/s at x_init")
+    if prediction.kind in ("bound", "circular (stable)", "circular (unstable)"):
+        lines.append(f"    motion          : {prediction.kind}, periapsis "
+                     f"{prediction.periapsis_radius:.6g} m, apoapsis {prediction.apoapsis_radius:.6g} m")
+    elif prediction.kind == "marginal":
+        lines.append("    motion          : marginal (whirls toward the unstable circular orbit at "
+                     f"{prediction.periapsis_radius:.6g} m)")
+    elif prediction.kind == "plunge":
+        lines.append("    motion          : plunge (no inner turning point; the orbit crosses the horizon)")
+    elif prediction.kind == "escape":
+        lines.append("    motion          : escape (no outer turning point)")
+    else:
+        lines.append("    motion          : radial (zero angular momentum)")
+    if prediction.apsidal_advance is not None:
+        lines.append(f"    apsidal advance : {_angle_text(prediction.apsidal_advance)}")
+    if prediction.weak_field_advance is not None and run_params.model.lower() == "schwarzschild":
+        lines.append(f"    weak-field 6piGM/(c^2 p): {_angle_text(prediction.weak_field_advance)}")
+    return lines
 
 
 def main(argv=None):
@@ -164,10 +212,15 @@ def main(argv=None):
     print(f"  periapsides found : {len(result.periapsis_indices)}")
     print(f"  max |Δh/h0|       : {result.max_fractional_h_drift:.3e}")
     print(f"  max |ΔE/E0|       : {result.max_fractional_energy_drift:.3e}")
+    if result.periapsis_radius:
+        print(f"  periapsis radius  : min {min(result.periapsis_radius):.6g} m, "
+              f"max {max(result.periapsis_radius):.6g} m")
     if result.mean_periapsis_advance is not None:
         degrees = math.degrees(result.mean_periapsis_advance)
         print("  mean periapsis advance per radial period: "
               f"{result.mean_periapsis_advance:.6g} rad = {degrees:.6g} deg")
+    for line in prediction_lines(run_params):
+        print(line)
     plot_relativistic_orbit(result, show_isco=args.show_isco,
                             show_periapsides=args.show_periapsides)
     return result

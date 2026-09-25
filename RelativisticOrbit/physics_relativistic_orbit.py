@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import math
 from numbers import Real
+from typing import NamedTuple, Optional
 
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.1.1"
+MODEL_VERSION = "1.2.0"
 BUILD_ID_COVERS = (
     "physics_relativistic_orbit.py",
     "driver_relativistic_orbit.py",
@@ -236,14 +237,24 @@ def effective_specific_energy(
     return energy
 
 
-def circular_proper_time_speed(radius: float) -> float:
+def circular_proper_time_speed(radius: float, model: str = "schwarzschild") -> float:
     """
-    Return dy/dtau for a timelike circular Schwarzschild geodesic.
+    Return dy/dtau for a circular orbit of the selected model.
 
+    schwarzschild: sqrt(GM/(r - 3GM/c^2)), the timelike circular geodesic.
     Valid only for radius > 3 GM/c^2.  Circular timelike geodesics between
     3 GM/c^2 and 6 GM/c^2 are unstable; those above 6 GM/c^2 are stable.
+
+    newtonian: sqrt(GM/r), for any positive radius.
     """
     _require_finite_real("radius", radius)
+    if _model_key(model) == "newtonian":
+        if radius <= 0.0:
+            raise ValueError("radius must be positive.")
+        speed2 = GM_SUN / radius
+        if not math.isfinite(speed2):
+            raise ValueError("radius is too small for a finite circular speed.")
+        return math.sqrt(speed2)
 
     denominator = radius - 3.0 * GM_SUN / C2
     if denominator <= 0.0:
@@ -252,3 +263,181 @@ def circular_proper_time_speed(radius: float) -> float:
     if not math.isfinite(speed2):
         raise ValueError("radius is too close to 3GM/c^2 for a finite result.")
     return math.sqrt(speed2)
+
+
+# ---------------------------------------------------------------------------
+# Exact orbit prediction from the constants of motion
+# ---------------------------------------------------------------------------
+
+class OrbitPrediction(NamedTuple):
+    """What the constants of motion say about an orbit, before integrating it.
+
+    kind is one of "bound", "circular (stable)", "circular (unstable)",
+    "marginal", "plunge", "escape" or "radial".  A marginal orbit lies on
+    the boundary between bound and plunging orbits and whirls ever closer to
+    the unstable circular orbit at periapsis_radius.  Radii are areal radii in metres;
+    advances are radians per radial period.  Values that do not apply to the
+    kind are None.  A NamedTuple is immutable and, unlike a dataclass, stays
+    importable when this module is loaded on its own from a file path.
+    """
+    kind: str
+    periapsis_radius: Optional[float]
+    apoapsis_radius: Optional[float]
+    apsidal_advance: Optional[float]
+    weak_field_advance: Optional[float]
+
+
+def _complete_elliptic_k(m: float) -> float:
+    """Complete elliptic integral K(m), m = k^2 in [0, 1), by the AGM."""
+    if not 0.0 <= m < 1.0:
+        raise ValueError("elliptic parameter must satisfy 0 <= m < 1.")
+    a, b = 1.0, math.sqrt(1.0 - m)
+    for _ in range(64):
+        if abs(a - b) <= 4.0e-16 * a:
+            break
+        a, b = 0.5 * (a + b), math.sqrt(a * b)
+    return math.pi / (2.0 * a)
+
+
+def _elliptic_k_excess(m: float) -> float:
+    """Return (2/pi) K(m) - 1 without cancellation when m is small."""
+    if m < 0.1:
+        # (2/pi) K(m) = sum_n [C(2n, n) / 4^n]^2 m^n
+        total, coefficient, power = 0.0, 1.0, 1.0
+        for n in range(1, 60):
+            coefficient *= (2 * n - 1) / (2 * n)
+            power *= m
+            term = coefficient * coefficient * power
+            total += term
+            if term <= 1.0e-18 * total:
+                break
+        return total
+    return 2.0 * _complete_elliptic_k(m) / math.pi - 1.0
+
+
+def weak_field_advance(periapsis_radius: float, apoapsis_radius: float) -> float:
+    """Weak-field apsidal advance 6 pi GM / (c^2 p), p = semi-latus rectum."""
+    _require_finite_real("periapsis_radius", periapsis_radius)
+    _require_finite_real("apoapsis_radius", apoapsis_radius)
+    semi_latus_rectum = 2.0 * periapsis_radius * apoapsis_radius / (
+        periapsis_radius + apoapsis_radius
+    )
+    return 6.0 * math.pi * GM_SUN / (C2 * semi_latus_rectum)
+
+
+def predict_orbit(
+    x_init: float,
+    u_init: float,
+    model: str = "schwarzschild",
+) -> OrbitPrediction:
+    """Classify the orbit and give its turning points and exact apsidal advance.
+
+    The particle starts at a turning point (its initial velocity is purely
+    transverse).  With u = 1/r and h = x_init * u_init, the energy integral
+    of the orbit equation gives
+
+        (du/dphi)^2 = (2GM/c^2) u^3 - u^2 + (2GM/h^2) u + 2E/h^2
+
+    (the cubic term only in Schwarzschild mode).  In the scaled variable
+    w = u * x_init, so that the start is w = 1, this is
+
+        (dw/dphi)^2 = A w^3 - w^2 + B w + (1 - A - B)
+                    = (w - 1)(A w^2 + (A - 1) w + (A + B - 1)),
+
+        A = 2GM/(c^2 x_init),   B = 2GM/(x_init u_init^2).
+
+    The other roots decide whether the orbit is bound, plunges or escapes.
+    For a bound Schwarzschild orbit between roots w1 < w2 with third root
+    w3 = 1/A - w1 - w2, the azimuth swept per radial period is
+
+        4 K(m) / sqrt(A (w3 - w1)),   m = (w2 - w1)/(w3 - w1),
+
+    and the apsidal advance is that minus 2 pi.  This is exact for the
+    equation the program integrates, so it is an outside check on the
+    step-by-step orbit.
+    """
+    _require_finite_real("x_init", x_init)
+    _require_finite_real("u_init", u_init)
+    if x_init <= 0.0:
+        raise ValueError("x_init must be positive.")
+    key = _model_key(model)
+    if key == "schwarzschild" and x_init <= HORIZON_RADIUS:
+        raise ValueError("x_init must lie outside the Schwarzschild horizon.")
+    if u_init == 0.0:
+        return OrbitPrediction("radial", None, None, None, None)
+
+    a = 2.0 * GM_SUN / (C2 * x_init) if key == "schwarzschild" else 0.0
+    # So far from the mass that the cubic term cannot be represented: the
+    # Newtonian turning points apply and the advance is the weak-field one.
+    far = key == "schwarzschild" and a < 1.0e-200
+    b = (2.0 * GM_SUN / x_init) / abs(u_init) / abs(u_init)
+    if not math.isfinite(b):
+        # The angular momentum is too small to matter: the particle falls
+        # almost straight in.
+        if key == "schwarzschild":
+            return OrbitPrediction("plunge", None, x_init, None, None)
+        return OrbitPrediction("bound", 0.0, x_init, 0.0, 0.0)
+
+    slope = 3.0 * a - 2.0 + b  # d/dw of the right-hand side at w = 1
+    q1 = a - 1.0
+    q0 = a + b - 1.0
+    if key == "schwarzschild" and not far:
+        others = []
+        disc = q1 * q1 - 4.0 * a * q0
+        if disc >= 0.0:
+            root = math.sqrt(disc)
+            # Numerically stable pair of quadratic roots.
+            qq = -0.5 * (q1 + math.copysign(root, q1))
+            others = sorted((qq / a, q0 / qq if qq != 0.0 else math.inf))
+    else:
+        others = [-q0 / q1]  # = b - 1
+
+    if any(abs(r - 1.0) <= 1.0e-9 for r in others):
+        # w = 1 is a double root: a circular orbit.
+        stable = key == "newtonian" or x_init > ISCO_RADIUS
+        kind = "circular (stable)" if stable else "circular (unstable)"
+        advance = weak = None
+        if key == "newtonian":
+            advance = weak = 0.0
+        elif stable:
+            # Small radial oscillations: 2 pi / sqrt(1 - 6GM/(c^2 r)) per period.
+            advance = 2.0 * math.pi / math.sqrt(1.0 - 3.0 * a) - 2.0 * math.pi
+            # The weak-field formula describes an oscillating orbit; an
+            # unstable circular orbit has none, so it is given only here.
+            weak = weak_field_advance(x_init, x_init)
+        return OrbitPrediction(kind, x_init, x_init, advance, weak)
+
+    if slope > 0.0:
+        # w increases: the particle moves inward from an apoapsis.
+        inner = [r for r in others if r > 1.0]
+        if not inner:
+            return OrbitPrediction("plunge", None, x_init, None, None)
+        w1, w2 = 1.0, inner[0]
+    else:
+        # w decreases: the particle moves outward from a periapsis.
+        outer = [r for r in others if r < 1.0]
+        if not outer or outer[-1] <= 0.0:
+            return OrbitPrediction("escape", x_init, None, None, None)
+        w1, w2 = outer[-1], 1.0
+
+    periapsis, apoapsis = x_init / w2, x_init / w1
+    if key == "newtonian":
+        return OrbitPrediction("bound", periapsis, apoapsis, 0.0, 0.0)
+    weak = weak_field_advance(periapsis, apoapsis)
+    if far:
+        return OrbitPrediction("bound", periapsis, apoapsis, weak, weak)
+    # sweep/(2 pi) = [(2/pi) K(m)] / sqrt(A (w3 - w1)), with w3 = 1/A - w1 - w2
+    # because the three roots sum to 1/A, so A (w3 - w1) = 1 - A (2 w1 + w2).
+    # Both factors are written as 1 + (small excess) so that a weak-field
+    # advance does not vanish in the subtraction of 2 pi.
+    w3 = 1.0 / a - w1 - w2
+    if w3 - w2 <= 1.0e-9 * w2:
+        # w2 is (to rounding) a double root: the orbit is on the boundary
+        # between bound and plunging and whirls ever closer to the unstable
+        # circular orbit at x_init / w2 without returning.
+        return OrbitPrediction("marginal", periapsis, apoapsis, None, None)
+    m = (w2 - w1) / (w3 - w1)
+    k_excess = _elliptic_k_excess(m)
+    root_excess = math.expm1(-0.5 * math.log1p(-a * (2.0 * w1 + w2)))
+    advance = 2.0 * math.pi * (k_excess + root_excess + k_excess * root_excess)
+    return OrbitPrediction("bound", periapsis, apoapsis, advance, weak)
