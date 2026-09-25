@@ -19,8 +19,9 @@ the command line:
     an ordinary finite-radius zero-pressure surface.
 
 ``--max_points N``
-    Grid-point capacity for each integration attempt (default 2000, minimum
-    3). This controls radial coverage, not the resolution of a successful run.
+    Grid-point capacity for each integration attempt (default 2000, from 3 to
+    1000000). A model that needs more points is restarted with a doubled
+    radial step, so raising it refines a run only by removing restarts.
 
 ``--steps_per_scale N``
     Positive number of Euler steps per characteristic radial scale (default
@@ -36,10 +37,13 @@ the command line:
     temperature, but is invalid for mass because enclosed mass is zero at the
     center. Omit this switch for a linear axis.
 
-Each run also prints the surface radius, total mass, and linearly interpolated
-pressure, density, temperature, and enclosed mass at 0%, 25%, 50%, 75%, and
-90% of the surface radius. Numerical results are printed to five significant
-figures.
+Each run also prints the surface radius and total mass; the radial step, the
+number of grid points and the number of step doublings (restarts); the
+polytropic index and the radius and mass of the exact Lane-Emden solution of
+the same polytrope, with the relative difference of the integrated values;
+and linearly interpolated pressure, density, temperature, and enclosed mass
+at 0%, 25%, 50%, 75%, and 90% of the surface radius. Numerical results are
+printed to five significant figures.
 
 Examples
 --------
@@ -54,6 +58,7 @@ import math
 
 import physics_star
 from driver_star import (
+    MAX_POINTS_LIMIT,
     OUTPUT_TYPES,
     integrate_star,
     interpolate_profile_checkpoints,
@@ -82,8 +87,11 @@ def _finite_radius_gamma(text):
     return value
 
 
-def _integer_at_least(minimum):
-    """Return an argparse converter for integers at or above minimum."""
+def _integer_at_least(minimum, maximum=None):
+    """Return an argparse converter for integers at or above minimum.
+
+    When maximum is given, larger integers are rejected as well.
+    """
     def converter(text):
         try:
             value = int(text)
@@ -92,6 +100,10 @@ def _integer_at_least(minimum):
         if value < minimum:
             raise argparse.ArgumentTypeError(
                 f"value must be an integer of at least {minimum}."
+            )
+        if maximum is not None and value > maximum:
+            raise argparse.ArgumentTypeError(
+                f"value must be an integer of at most {maximum}."
             )
         return value
 
@@ -142,10 +154,13 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--max_points",
-        type=_integer_at_least(3),
+        type=_integer_at_least(3, MAX_POINTS_LIMIT),
         default=2000,
         metavar="N",
-        help="grid-point capacity per attempt; controls coverage, not resolution",
+        help=(
+            "grid-point capacity per attempt; a model needing more points "
+            "restarts with a doubled step"
+        ),
     )
     parser.add_argument(
         "--steps_per_scale",
@@ -180,11 +195,46 @@ def _five_significant(value):
     return f"{value:.5g}"
 
 
+def _print_numerical_grid(result):
+    """Print the radial step actually used and how it was reached."""
+    print("\n  Numerical grid")
+    print(f"  Radial step (m): {_five_significant(result.radial_step)}")
+    print(f"  Grid points, centre to surface: {len(result.radius)}")
+    print(f"  Restarts (radial step doubled): {result.restart_count}")
+
+
+def _print_lane_emden_comparison(result):
+    """Print the exact Lane-Emden radius and mass beside the integrated ones."""
+    print("\n  Lane-Emden solution of the same polytrope (exact)")
+    try:
+        exact = physics_star.lane_emden_solution(
+            result.pressure[0], result.density[0], result.gamma
+        )
+    except (ValueError, OverflowError) as exc:
+        print(f"  not computed: {exc}")
+        return
+    radius_difference = result.radius[-1] / exact.radius - 1.0
+    mass_difference = result.mass[-1] / exact.mass - 1.0
+    print(f"  Polytropic index n = 1/(gamma - 1): {_five_significant(exact.n)}")
+    print(
+        f"  Lane-Emden radius (m):     {_five_significant(exact.radius)}   "
+        f"integrated radius differs by {_five_significant(radius_difference)}"
+    )
+    print(
+        f"  Lane-Emden mass (kg):      {_five_significant(exact.mass)}   "
+        f"integrated mass differs by {_five_significant(mass_difference)}"
+    )
+
+
 def print_structure_summary(result):
     """Print global and interpolated stellar properties to five figures."""
     print("\nStellar structure summary")
     print(f"  Radius (m):     {_five_significant(result.radius[-1])}")
     print(f"  Total mass (kg): {_five_significant(result.mass[-1])}")
+    if hasattr(result, "radial_step") and hasattr(result, "restart_count"):
+        _print_numerical_grid(result)
+    if getattr(result, "gamma", None) is not None:
+        _print_lane_emden_comparison(result)
     print("\n  Interior checkpoints (linear interpolation in radius)")
     print(
         "  r/R     radius (m)    pressure (Pa)  density (kg/m^3)  "

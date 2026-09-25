@@ -9,8 +9,8 @@ adaptive integrator.
 
 from dataclasses import dataclass
 from bisect import bisect_left
-from typing import get_args, List, Literal, Sequence
-from math import isfinite, pi
+from typing import get_args, List, Literal, Optional, Sequence
+from math import inf, isfinite, nextafter, pi
 from numbers import Real
 
 import physics_star as phys
@@ -27,6 +27,10 @@ from physics_star import (
 OutputType = Literal["pressure", "density", "temperature", "mass"]
 OUTPUT_TYPES = get_args(OutputType)
 
+# Largest accepted grid-point capacity.  Each attempt allocates five lists of
+# this length, so the limit keeps the memory of one run to tens of megabytes.
+MAX_POINTS_LIMIT = 1_000_000
+
 
 @dataclass
 class StarResult:
@@ -42,6 +46,7 @@ class StarResult:
     output_type: OutputType
     radial_step: float
     restart_count: int
+    gamma: Optional[float] = None
 
     @property
     def last_index(self) -> int:
@@ -153,8 +158,11 @@ def _validate_inputs(p_c, T_c, mu, gamma, max_points, steps_per_scale, output_ty
             "gamma must be greater than 1.2. Polytropes with gamma <= 6/5 "
             "do not have an ordinary finite-radius zero-pressure surface."
         )
-    if not isinstance(max_points, int) or isinstance(max_points, bool) or max_points < 3:
-        raise ValueError("max_points must be an integer of at least 3.")
+    if (not isinstance(max_points, int) or isinstance(max_points, bool)
+            or not 3 <= max_points <= MAX_POINTS_LIMIT):
+        raise ValueError(
+            f"max_points must be an integer from 3 to {MAX_POINTS_LIMIT}."
+        )
     if (not isinstance(steps_per_scale, int) or isinstance(steps_per_scale, bool)
             or steps_per_scale <= 0):
         raise ValueError("steps_per_scale must be a positive integer.")
@@ -208,7 +216,15 @@ def integrate_star(
         radius[1] = dr
         pressure[1] = p_c
         density[1] = rho_c
-        mass[1] = 4.0 * pi * dr**3 * rho_c / 3.0
+        try:
+            mass[1] = 4.0 * pi * dr**3 * rho_c / 3.0
+        except OverflowError:
+            mass[1] = float("inf")
+        if not isfinite(mass[1]):
+            raise OverflowError(
+                "The mass of the first central sphere is outside the finite "
+                "floating-point range."
+            )
         temperature[1] = T_c
 
         surface_found = False
@@ -231,6 +247,10 @@ def integrate_star(
                 dr_surface = frac * dr
 
                 radius[j] = r_prev + dr_surface
+                if radius[j] <= r_prev:
+                    # The crossing lies within rounding of the last point; keep
+                    # the radii strictly increasing by the smallest amount.
+                    radius[j] = nextafter(r_prev, inf)
                 pressure[j] = 0.0
                 density[j] = 0.0
                 temperature[j] = temperature_from_prho(0.0, 0.0, mu)
@@ -264,6 +284,7 @@ def integrate_star(
                 output_type=output_type,
                 radial_step=dr,
                 restart_count=restart_count,
+                gamma=float(gamma),
             )
 
         # The initial radial spacing did not span the whole object.  Double it
