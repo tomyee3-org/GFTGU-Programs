@@ -29,6 +29,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from fractions import Fraction
 from typing import NamedTuple
 import unittest
 from unittest import mock
@@ -1036,6 +1037,147 @@ class TestOrbitPrediction(unittest.TestCase):
                                               "apsidal_advance", "weak_field_advance"))
 
 
+def _sampled_kind(x_init, u_init):
+    """Kind of orbit found by sampling the sign of the scaled cubic exactly.
+
+    Independent of predict_orbit()'s discriminant logic: the orbit plunges if
+    (w - 1) q(w) stays positive all the way from the start to the horizon,
+    escapes if it stays positive all the way out to w = 0, and is otherwise
+    bound.
+    """
+    x = Fraction(x_init)
+    gm = Fraction(physics.GM_SUN)
+    a = 2 * gm / (Fraction(physics.C2) * x)
+    b = 2 * gm / (x * Fraction(u_init) ** 2)
+
+    def f(w):
+        return (w - 1) * (a * w * w + (a - 1) * w + a + b - 1)
+
+    cells = 4000
+    if f(1 + Fraction(1, 10**9)) > 0:
+        horizon = x / Fraction(physics.HORIZON_RADIUS)
+        inside = (1 + (horizon - 1) * Fraction(k, cells) for k in range(1, cells + 1))
+        return "bound" if any(f(w) < 0 for w in inside) else "plunge"
+    outside = (Fraction(k, cells) for k in range(1, cells))
+    return "bound" if any(f(w) < 0 for w in outside) else "escape"
+
+
+class TestPredictionAtBoundaries(unittest.TestCase):
+    """The ISCO, the other kind boundaries, and very large radii."""
+
+    def test_exact_isco_circle_is_marginally_stable(self):
+        radius = physics.ISCO_RADIUS
+        prediction = physics.predict_orbit(radius, physics.circular_proper_time_speed(radius))
+        self.assertEqual(prediction.kind, "circular (marginally stable)")
+        self.assertEqual((prediction.periapsis_radius, prediction.apoapsis_radius), (radius, radius))
+        self.assertIsNone(prediction.apsidal_advance)
+        self.assertIsNone(prediction.weak_field_advance)
+
+    def test_circles_near_the_isco_are_labelled_consistently(self):
+        radius = physics.ISCO_RADIUS
+        for step in range(-2000, 2001, 7):
+            x_init = radius * (1 + step * 1e-12)
+            kind = physics.predict_orbit(x_init, physics.circular_proper_time_speed(x_init)).kind
+            with self.subTest(step=step):
+                if step > 1:
+                    self.assertEqual(kind, "circular (stable)")
+                elif step < -1:
+                    self.assertEqual(kind, "circular (unstable)")
+                else:
+                    self.assertTrue(kind.startswith("circular"), kind)
+        for factor, kind in ((1 + 1e-6, "circular (stable)"), (1 - 1e-6, "circular (unstable)")):
+            x_init = radius * factor
+            with self.subTest(factor=factor):
+                self.assertEqual(
+                    physics.predict_orbit(x_init, physics.circular_proper_time_speed(x_init)).kind, kind)
+
+    def test_isco_circle_through_the_command_line(self):
+        output = run_cli(("--x_init", "8859.750228300749", "--u_init", "173085256.32731956",
+                          "--max_steps", "1", "--dt", "1e-8")).stdout
+        self.assertIn("circular dy/dtau: 1.73085e+08 m/s at x_init", output)
+        self.assertIn("motion          : circular (marginally stable), periapsis 8859.75 m", output)
+        self.assertNotIn("plunge", output)
+        self.assertNotIn("apsidal advance", output)
+
+    def test_kinds_near_the_isco_agree_with_an_independent_sign_sampling(self):
+        for offset in (-0.2, -1e-2, -1e-3, 1e-3, 1e-2, 0.5):
+            x_init = physics.ISCO_RADIUS * (1 + offset)
+            circle = physics.circular_proper_time_speed(x_init)
+            for push in (-1e-2, -1e-3, -1e-4, 1e-4, 1e-3, 1e-2, 0.05):
+                u_init = circle * (1 + push)
+                with self.subTest(offset=offset, push=push):
+                    self.assertEqual(physics.predict_orbit(x_init, u_init).kind,
+                                     _sampled_kind(x_init, u_init))
+
+    def test_kind_changes_once_across_the_plunge_boundary(self):
+        # Consecutive representable starting values near 1.04444e8 m/s: the
+        # kind must switch from plunge to bound once, never back and forth.
+        low, high = 1.044e8, 1.045e8
+        for _ in range(80):
+            middle = 0.5 * (low + high)
+            if physics.predict_orbit(15_000.0, middle).kind == "plunge":
+                low = middle
+            else:
+                high = middle
+        value = low
+        for _ in range(200):
+            value = math.nextafter(value, 0.0)
+        kinds = []
+        for _ in range(400):
+            kinds.append(physics.predict_orbit(15_000.0, value).kind)
+            value = math.nextafter(value, math.inf)
+        order = {"plunge": 0, "marginal": 1, "bound": 2}
+        ranks = [order[kind] for kind in kinds]
+        self.assertEqual(ranks, sorted(ranks))
+        self.assertEqual((kinds[0], kinds[-1]), ("plunge", "bound"))
+
+    def test_weak_field_advance_at_very_large_radii(self):
+        m = physics.GM_SUN / physics.C2
+        for radius in (1e155, 1e300, 1e308):
+            with self.subTest(radius=radius):
+                self.assertAlmostEqual(physics.weak_field_advance(radius, radius) / (6 * math.pi * m / radius),
+                                       1.0, delta=1e-14)
+        self.assertAlmostEqual(physics.weak_field_advance(15_000.0, 23954.438830190225),
+                               6 * math.pi * m / (2 * 15_000.0 * 23954.438830190225
+                                                  / (15_000.0 + 23954.438830190225)), delta=1e-14)
+        for bad in ((0.0, 1.0), (-1.0, 1.0), (1.0, math.inf)):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                physics.weak_field_advance(*bad)
+
+    def test_matched_speed_and_radius_scales_give_finite_positive_advances(self):
+        import random
+
+        generator = random.Random(2125)
+        for _ in range(3000):
+            x_init = 10 ** generator.uniform(math.log10(1e4), 307.5)
+            u_init = math.sqrt(physics.GM_SUN / x_init) * generator.uniform(0.75, 1.3)
+            try:
+                prediction = physics.predict_orbit(x_init, u_init)
+            except ValueError:
+                continue
+            if prediction.kind != "bound":
+                continue
+            with self.subTest(x_init=x_init, u_init=u_init):
+                self.assertGreater(prediction.weak_field_advance, 0.0)
+                self.assertGreater(prediction.apsidal_advance, 0.0)
+                self.assertTrue(math.isfinite(prediction.apsidal_advance))
+                if x_init > 1e10:
+                    self.assertAlmostEqual(
+                        prediction.apsidal_advance / prediction.weak_field_advance, 1.0, delta=1e-5)
+        far = physics.predict_orbit(1e155, 1.1 * math.sqrt(physics.GM_SUN / 1e155))
+        self.assertAlmostEqual(far.weak_field_advance / far.apsidal_advance, 1.0, delta=1e-12)
+        self.assertGreater(far.weak_field_advance, 0.0)
+
+    def test_unrepresentable_turning_point_is_reported_cleanly(self):
+        with self.assertRaisesRegex(ValueError, "too large to represent"):
+            physics.predict_orbit(1e308, 0.9 * math.sqrt(2 * physics.GM_SUN / 1e308))
+        cli = importlib.import_module("main")
+        run_params = RelativisticOrbitParams(1e308, 1.0, 1e-6, 1, 1, 0.05, 1e-4)
+        with mock.patch.object(physics, "predict_orbit", side_effect=ValueError("too big")):
+            lines = cli.prediction_lines(run_params)
+        self.assertEqual(lines[-1], "    motion          : not predicted (too big)")
+
+
 class TestSciPyOracleRegeneration(unittest.TestCase):
     """Maintenance: regenerate the stored DOP853 oracle when SciPy is present."""
 
@@ -1552,7 +1694,8 @@ class TestHelpReference(unittest.TestCase):
         m = physics.GM_SUN / physics.C2
         starts = ((15_000.0, 1.8e8), (15_000.0, 0.0), (15_000.0, 1.044e8),
                   (5 * m, physics.circular_proper_time_speed(5 * m)),
-                  (8 * m, physics.circular_proper_time_speed(8 * m)))
+                  (8 * m, physics.circular_proper_time_speed(8 * m)),
+                  (physics.ISCO_RADIUS, physics.circular_proper_time_speed(physics.ISCO_RADIUS)))
         for x_init, u_init in starts:
             run_params = RelativisticOrbitParams(x_init, u_init, 1e-6, 1, 1, 0.05, 1e-4)
             motion = cli.prediction_lines(run_params)[2].split(": ", 1)[1]
@@ -1566,7 +1709,8 @@ class TestHelpReference(unittest.TestCase):
             if len(row) == 3 and not row[0].startswith("--") and row[0] != "Name"
             and not row[0].startswith("(")
         }
-        for name in ("GM_SUN", "C", "HORIZON_RADIUS", "PHOTON_ORBIT_RADIUS", "ISCO_RADIUS"):
+        for name in ("GM_SUN", "C", "HORIZON_RADIUS", "PHOTON_ORBIT_RADIUS", "ISCO_RADIUS",
+                     "CIRCULAR_TOLERANCE", "ISCO_TOLERANCE"):
             with self.subTest(name=name):
                 self.assertAlmostEqual(float(rows[name]) / getattr(physics, name), 1.0, delta=2e-6)
 

@@ -155,7 +155,10 @@ def _angle_text(radians):
 
 def prediction_lines(run_params):
     """Summary lines computed from the constants of motion, not from the run."""
-    prediction = physics.predict_orbit(run_params.x_init, run_params.u_init, run_params.model)
+    try:
+        prediction = physics.predict_orbit(run_params.x_init, run_params.u_init, run_params.model)
+    except ValueError as exc:
+        prediction, failure = None, exc
     lines = ["  predicted from the constants of motion:"]
     try:
         circular = physics.circular_proper_time_speed(run_params.x_init, run_params.model)
@@ -163,7 +166,10 @@ def prediction_lines(run_params):
         lines.append("    circular dy/dtau: none (x_init is not above 3GM/c^2)")
     else:
         lines.append(f"    circular dy/dtau: {circular:.6g} m/s at x_init")
-    if prediction.kind in ("bound", "circular (stable)", "circular (unstable)"):
+    if prediction is None:
+        lines.append(f"    motion          : not predicted ({failure})")
+        return lines
+    if prediction.kind == "bound" or prediction.kind.startswith("circular"):
         lines.append(f"    motion          : {prediction.kind}, periapsis "
                      f"{prediction.periapsis_radius:.6g} m, apoapsis {prediction.apoapsis_radius:.6g} m")
     elif prediction.kind == "marginal":
