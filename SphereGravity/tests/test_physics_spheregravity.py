@@ -1211,19 +1211,18 @@ class TestBeatsHelpStructure(unittest.TestCase):
         self.assertNotIn("Java", before_license)
         self.assertIn("Java", license_and_after)
 
-    def test_relative_links_resolve_when_the_documentation_tree_is_present(self):
-        docs_root = HELP_FILE.parent.parent
-        if docs_root.name != "GFTGU-Documentation" or not (docs_root / "Star").is_dir():
-            self.skipTest("the sibling documentation folders are not present in this layout")
+    def test_related_programs_are_named_without_links_or_chapter_numbers(self):
+        """Help file names will change, and the chapter order of a new edition is not known."""
         relative = [h for h in STRUCTURE.hrefs
                     if not h.startswith(("#", "http://", "https://", "mailto:"))]
-        self.assertEqual(len(relative), 4)
-        for href in relative:
-            with self.subTest(href=href):
-                self.assertTrue((HELP_FILE.parent / href).is_file(), href)
+        self.assertEqual(relative, [])
+        related = html_text(section_html(HELP_HTML, "related"))
+        for name in ("Atmosphere", "Star", "Neutron", "RelativisticOrbit"):
+            self.assertIn(name, related)
+        self.assertNotRegex(related, r"\bChapter\b|\bCh\.|\bInvestigation\b")
 
-    def test_links_into_this_folder_from_other_help_files_resolve(self):
-        """Links TO SphereGravity from the other modules' Help pages still work."""
+    def test_no_other_help_file_links_into_this_folder(self):
+        """Other modules' Help pages name SphereGravity but do not link to its Help file."""
         docs_root = HELP_FILE.parent.parent
         if docs_root.name != "GFTGU-Documentation" or not (docs_root / "Star").is_dir():
             self.skipTest("the sibling documentation folders are not present in this layout")
@@ -1233,12 +1232,9 @@ class TestBeatsHelpStructure(unittest.TestCase):
             if page.parent == HELP_FILE.parent:
                 continue
             for href in re.findall(r'href="([^"#]*)', page.read_text(encoding="utf-8", errors="replace")):
-                if f"../{folder}/" in href:
-                    inbound.append((page, href))
-        self.assertGreaterEqual(len(inbound), 1)  # Star.html links here
-        for page, href in inbound:
-            with self.subTest(page=page.name, href=href):
-                self.assertTrue((page.parent / href).is_file(), f"{page.name}: {href}")
+                if f"../{folder}/" in href or href.startswith(f"{folder}/"):
+                    inbound.append((page.name, href))
+        self.assertEqual(inbound, [])
 
 
 class TestBeatsHelpBeats(unittest.TestCase):
@@ -1943,15 +1939,16 @@ class TestOriginalHelpCompatibility(unittest.TestCase):
             exec(code, namespace)
         self.assertTrue(output.getvalue().startswith("1.1 "))
 
-    def test_original_relative_links_resolve_when_the_documentation_tree_is_present(self):
-        docs_root = self.original.parent.parent
-        if docs_root.name != "GFTGU-Documentation" or not (docs_root / "Star").is_dir():
-            self.skipTest("the sibling documentation folders are not present in this layout")
-        links = re.findall(r'href="(\.\./[^"]+)"', self.help_text)
-        self.assertEqual(len(links), 4)
-        for href in links:
-            with self.subTest(href=href):
-                self.assertTrue((self.original.parent / href).is_file(), href)
+    def test_original_names_related_programs_without_links_or_chapter_numbers(self):
+        links = [h for h in re.findall(r'href="([^"]*)"', self.help_text)
+                 if not h.startswith(("#", "http://", "https://", "mailto:"))]
+        self.assertEqual(links, [])
+        related = re.search(r'<h2 id="related">(.*?)(?=<!--|<h2 |</body>)', self.help_text, re.DOTALL)
+        self.assertIsNotNone(related)
+        text = html_text(related.group(1))
+        for name in ("Atmosphere", "Star", "Neutron", "RelativisticOrbit"):
+            self.assertIn(name, text)
+        self.assertNotRegex(text, r"\bChapter\b|\bCh\.|\bInvestigation\b")
 
 
 if __name__ == "__main__":
