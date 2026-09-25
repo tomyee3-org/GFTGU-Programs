@@ -1163,7 +1163,13 @@ class HelpFileTests(unittest.TestCase):
     def test_cannon_trajectory_is_listed_as_direct_predecessor(self):
         related = self.html.split('<section id="related">', 1)[1]
         self.assertIn("<strong>CannonTrajectory</strong>", related)
-        self.assertIn("Investigations 4.1 and 4.2", related)
+        self.assertIn("the simpler near-surface projectile calculation", related)
+
+    def test_related_programs_give_no_chapter_numbers_or_links(self):
+        # Help file names will change, and the chapter order of a new edition is not known.
+        related = self.html.split('<section id="related">', 1)[1].split("</section>", 1)[0]
+        self.assertNotIn("<a ", related)
+        self.assertNotRegex(re.sub(r"<[^>]+>", " ", related), r"\bChapter\b|\bCh\.|\bInvestigations?\b")
 
     def test_development_history_is_confined_to_license_provenance(self):
         student_content = self.html.split('<section id="license">', 1)[0]

@@ -1524,16 +1524,15 @@ class TestHelpStructure(unittest.TestCase):
         self.assertNotIn("Java", before_license)
         self.assertIn("Java", license_and_after)
 
-    def test_relative_links_resolve_when_the_documentation_tree_is_present(self):
-        docs_root = HELP_FILE.parent.parent
-        if docs_root.name != "GFTGU-Documentation" or not (docs_root / "Orbit").is_dir():
-            self.skipTest("the sibling documentation folders are not present in this layout")
+    def test_related_programs_are_named_without_links_or_chapter_numbers(self):
+        # Help file names will change, and the chapter order of a new edition is not known.
         relative = [h for h in STRUCTURE.hrefs
                     if not h.startswith(("#", "http://", "https://", "mailto:"))]
-        self.assertEqual(len(relative), 3)
-        for href in relative:
-            with self.subTest(href=href):
-                self.assertTrue((HELP_FILE.parent / href).is_file(), href)
+        self.assertEqual(relative, [])
+        related = section_html(HELP_HTML, "related")
+        for name in ("Orbit", "MercPert", "Binary"):
+            self.assertIn(f"<strong>{name}</strong>", related)
+        self.assertNotRegex(re.sub(r"<[^>]+>", " ", related), r"\bChapter\b|\bCh\.|\bInvestigations?\b")
 
 
 class TestHelpBeats(unittest.TestCase):

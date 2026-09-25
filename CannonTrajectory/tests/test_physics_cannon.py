@@ -1194,7 +1194,7 @@ BEAT_QUOTES = {
 
 CARRIED_SECTION_SHA256 = {
     "parameters": "f50de08513258e8a8e1cc0228ab276786910f7fb2ea5923b2fc484b4beb43322",
-    "related": "ebb26ad08d44fefca5cb0aa58e630b7668882941fc86b4dce21e8eb5f0c56578",
+    "related": "f0fc7fc216469d0f73b5e4a3a58055f69b07cef8ae92ece267c1d3e248d4b488",
     "license": "a1e3040a10e833a6b6cf84912c769c0460134487b8a3e3089745527364ec6e4a",
 }
 CARRIED_EXPERIMENT_SHA256 = (
@@ -1994,6 +1994,15 @@ class TestBeatsHelp(unittest.TestCase):
             for name in CARRIED_SECTION_SHA256
         }
         self.assertEqual(digests, CARRIED_SECTION_SHA256)
+
+    def test_related_programs_give_no_chapter_numbers_or_links(self):
+        # Help file names will change, and the chapter order of a new edition is not known.
+        related = self.section("related")
+        self.assertEqual(descendants(related, lambda node: node.tag == "a"), [])
+        text = self.text("related")
+        for name in ("EarthOrbit", "Orbit", "RelativisticOrbit"):
+            self.assertIn(name, text)
+        self.assertNotRegex(text, r"\bChapter\b|\bCh\.|\bInvestigations?\b")
 
     def test_experiment_checks_quote_the_live_runs(self):
         cards = [normalized_text(card) for card in self.experiment_cards()]

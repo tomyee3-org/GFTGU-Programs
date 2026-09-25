@@ -1283,9 +1283,13 @@ class HelpStructureTests(unittest.TestCase):
     def test_first_edition_investigations_are_retained(self):
         self.assertIn("Investigations 10.1, 10.2, and 10.3", HELP_HTML)
 
-    def test_related_program_links_are_module_relative_html_links(self):
-        related = re.findall(r'<a href="([^"#]+)"', section_html(HELP_HTML, "related"))
-        self.assertEqual(related, ["../Star/Star.html", "../Random2/Random2.html"])
+    def test_related_programs_are_named_without_links_or_chapter_numbers(self):
+        # Help file names will change, and the chapter order of a new edition is not known.
+        related = section_html(HELP_HTML, "related")
+        self.assertEqual(re.findall(r'<a\s[^>]*href="([^"]*)"', related), [])
+        self.assertIn("<strong>Star</strong>", related)
+        self.assertIn("<strong>Random2</strong>", related)
+        self.assertNotRegex(re.sub(r"<[^>]+>", " ", related), r"\bChapter\b|\bCh\.|\bInvestigations?\b")
 
     def test_relative_links_resolve_when_the_documentation_tree_is_present(self):
         docs_root = HELP_FILE.parent.parent
