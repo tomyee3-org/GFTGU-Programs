@@ -889,6 +889,27 @@ class TestNumericalRange(unittest.TestCase):
         self.assertIn("  1.00001  ", output.getvalue())
         self.assertIn("  0.99999  ", output.getvalue())
 
+    def test_radius_labels_give_back_every_accepted_radius(self):
+        radii = (0.99999999999, 1.00000000001, 1 - 1e-15, 1 + 2.3e-16 * 2, 0.5, 2.0,
+                 0.1, 1 / 3, 2.0000000000001, 1e100)
+        output = io.StringIO()
+        with redirect_stdout(output):
+            entry_point.print_comparison(100, 0.001, radii)
+        labels = [line.split()[0] for line in output.getvalue().splitlines()
+                  if re.match(r"^\s+\d", line)]
+        self.assertEqual([float(label) for label in labels], [float(r) for r in radii])
+        self.assertEqual(len(set(labels)), len(labels))
+        self.assertNotIn("1", labels)
+        # the usual labels stay short
+        self.assertEqual(labels[4:7], ["0.5", "2", "0.1"])
+        self.assertEqual(labels[-1], "1e+100")
+
+    def test_both_sides_of_the_jump_are_labelled_distinctly_in_the_cli(self):
+        run = run_cli(("--radii", "0.99999999999", "1.00000000001"))
+        rows = [line.split() for line in run.stdout.splitlines() if re.match(r"^\s+\d", line)]
+        self.assertEqual([row[0] for row in rows], ["0.99999999999", "1.00000000001"])
+        self.assertEqual([row[2] for row in rows], ["0", "0.012566"])
+
 
 class TestComparisonTableOptions(unittest.TestCase):
     def test_radii_option_parses_and_rejects(self):
@@ -1201,6 +1222,24 @@ class TestBeatsHelpStructure(unittest.TestCase):
             with self.subTest(href=href):
                 self.assertTrue((HELP_FILE.parent / href).is_file(), href)
 
+    def test_links_into_this_folder_from_other_help_files_resolve(self):
+        """Links TO SphereGravity from the other modules' Help pages still work."""
+        docs_root = HELP_FILE.parent.parent
+        if docs_root.name != "GFTGU-Documentation" or not (docs_root / "Star").is_dir():
+            self.skipTest("the sibling documentation folders are not present in this layout")
+        folder = HELP_FILE.parent.name
+        inbound = []
+        for page in sorted(docs_root.glob("*/*.html")):
+            if page.parent == HELP_FILE.parent:
+                continue
+            for href in re.findall(r'href="([^"#]*)', page.read_text(encoding="utf-8", errors="replace")):
+                if f"../{folder}/" in href:
+                    inbound.append((page, href))
+        self.assertGreaterEqual(len(inbound), 1)  # Star.html links here
+        for page, href in inbound:
+            with self.subTest(page=page.name, href=href):
+                self.assertTrue((page.parent / href).is_file(), f"{page.name}: {href}")
+
 
 class TestBeatsHelpBeats(unittest.TestCase):
     TAGS = {"LAW": "law", "DEFINITION": "def", "DERIVED": "der", "ALGORITHM": "alg"}
@@ -1461,7 +1500,7 @@ class TestBeatsHelpQuotedNumbers(unittest.TestCase):
         3: set(),
         4: set(),
         5: {"0.012444", "0.005", "1257", "0.15"},
-        6: {"0.15", "-0.15", "5.3e-06", "1000", "4.995"},
+        6: {"0.15", "-0.15", "5.3e-06", "1000", "4.995", "-7.3164e-05", "-1.1429e-04"},
         7: set(),
         8: {"1000", "4.995"},
     }
@@ -1603,6 +1642,49 @@ class TestBeatsHelpQuantitativeClaims(unittest.TestCase):
         self.assertEqual(f"{(1 + rows[5.0][2]) / (1 + mass) - 1:.1e}", "5.3e-06")
         self.assertEqual(f"{rel[-1]:.1e}", "5.3e-06")
 
+    def test_beat6_equation_17_holds_on_each_side_of_the_shell(self):
+        """Eq. (17) has separate exterior and interior forms, each checked at a table radius."""
+        n_div = 100
+        h = math.pi / n_div
+        q = physics.compute_shell_mass(n_div) / physics.compute_continuum_shell_mass()
+        radius, plotted = physics.compute_acceleration_profile_optimized(n_div, "relative difference")
+        rows = _table("python main.py")
+        full = _table("python main.py --radii 0.25 0.5 0.75 1.5 2 3 4")
+        for r in (0.25, 0.5, 0.75, 1.5, 2.0, 3.0, 4.0):
+            index = int(round(r / physics.RADIUS_STEP))
+            self.assertAlmostEqual(radius[index], r, delta=1e-12)
+            _, g = physics.compute_acceleration_at_radii(n_div, [r])
+            mass = physics.compute_continuum_shell_mass()
+            delta = g[0] / mass if r < 1 else g[0] / (mass / r**2) - 1
+            self.assertEqual(f"{delta:.5g}", f"{full[r][2]:.5g}")
+            with self.subTest(radius=r):
+                if r < 1:
+                    exact = delta / q
+                    approximate = delta * (1 - h * h / 24)
+                    wrong = (1 + delta) / q - 1  # the exterior form used inside
+                    # is off by the whole mass error, about h^2/24
+                    self.assertAlmostEqual(abs(wrong - plotted[index]) / (h * h / 24), 1.0, delta=1e-3)
+                else:
+                    exact = (1 + delta) / q - 1
+                    approximate = delta - h * h / 24
+                self.assertAlmostEqual(plotted[index], exact, delta=1e-13 * max(1.0, abs(exact)) + 1e-17)
+                self.assertAlmostEqual(approximate / plotted[index], 1.0, delta=1e-3)
+        # the numbers quoted in Beat 6 for r = 0.5
+        index = int(round(0.5 / physics.RADIUS_STEP))
+        self.assertEqual(f"{rows[0.5][2]:.4e}", "-7.3167e-05")
+        self.assertEqual(f"{plotted[index]:.4e}", "-7.3164e-05")
+        self.assertEqual(f"{(1 + rows[0.5][2]) / q - 1:.4e}", "-1.1429e-04")
+        self.assertGreater(abs((1 + rows[0.5][2]) / q - 1 - plotted[index]), 0.5 * abs(plotted[index]))
+        # the equation itself states both domains
+        beat = section_html(HELP_HTML, "beat6")
+        block = re.search(r'<span class="eq-label">\(17\)</span>(.*?\\\])\s*</div>', beat, re.DOTALL)
+        self.assertIsNotNone(block)
+        equation = block.group(1)
+        self.assertIn(r"\delta_{\rm plot}=\frac{\delta}{M_{\rm num}/M}\quad(r&lt;1)", equation)
+        self.assertIn(r"1+\delta_{\rm plot}=\frac{1+\delta}{M_{\rm num}/M}\quad(r&gt;1)", equation)
+        self.assertIn(r"\delta\left(1-\frac{h^{2}}{24}\right)\quad(r&lt;1)", equation)
+        self.assertIn(r"\delta-\frac{h^{2}}{24}\quad(r&gt;1)", equation)
+
     def test_beat7_epsilon_scaling(self):
         base = _table("python main.py --outputType acceleration")
         double = _table("python main.py --epsilon 0.002 --outputType acceleration")
@@ -1701,6 +1783,57 @@ class TestOriginalHelpCompatibility(unittest.TestCase):
         cls.parser = HelpHTMLParser()
         cls.parser.feed(cls.help_text)
         cls.parser.close()
+
+    def test_original_equation_7_is_the_plotted_quantity(self):
+        block = re.search(r'<div class="eq-label">Eq\. 7 [^<]*</div>(.*?)</div>', self.help_text, re.DOTALL)
+        self.assertIsNotNone(block)
+        equation = block.group(1)
+        self.assertIn(r"\dfrac{g_\text{num}(r) - M_\text{num}/r^2}{M_\text{num}/r^2}", equation)
+        self.assertIn(r"\dfrac{g_\text{num}(r)}{M_\text{num}}", equation)
+        self.assertNotIn("g_\\text{Newton}", equation)
+        self.assertNotRegex(equation, r"\{M\}")
+        # Eq. 7 as written reproduces the returned profile, inside and outside.
+        n_div = 100
+        mass_num = physics.compute_shell_mass(n_div)
+        radius, plotted = physics.compute_acceleration_profile_textbook(n_div, "relative difference")
+        _, accel = physics.compute_acceleration_profile_textbook(n_div, "acceleration")
+        for r in (0.5, 0.9, 1.1, 2.0, 4.995):
+            index = int(round(r / physics.RADIUS_STEP))
+            expected = accel[index] / mass_num if r < 1 else accel[index] / (mass_num / r**2) - 1
+            with self.subTest(radius=r):
+                self.assertAlmostEqual(plotted[index], expected, delta=1e-15)
+
+    def test_original_distinguishes_the_plot_from_the_table(self):
+        text = html_text(self.help_text)
+        q = physics.compute_shell_mass(100) / physics.compute_continuum_shell_mass()
+        radius, plotted = physics.compute_acceleration_profile_optimized(100, "relative difference")
+        at = lambda r: plotted[int(round(r / physics.RADIUS_STEP))]
+        table = _table("python main.py --radii 1.1 2")
+        # the worked example of the two normalizations at r = 2
+        self.assertIn(r"the plot at \(r=2\) shows \(5.03\times10^{-5}\), while the table prints 9.1423e-05", text)
+        self.assertEqual(f"{at(2.0):.2e}", "5.03e-05")
+        self.assertEqual(f"{table[2.0][2]:.5g}", "9.1423e-05")
+        self.assertAlmostEqual((1 + at(2.0)) * q - 1, table[2.0][2], delta=5e-10)
+        _, g = physics.compute_acceleration_at_radii(100, [0.5])
+        self.assertAlmostEqual(at(0.5) * q, g[0] / physics.compute_continuum_shell_mass(), delta=1e-15)
+        # the Quick Start figures at r = 1.1
+        self.assertIn(r"the plotted relative difference at \(r=1.1\) is about \(2.5\times10^{-3}\)", text)
+        self.assertIn(r"gives \(2.6\times10^{-3}\) there", text)
+        self.assertEqual(f"{at(1.1):.1e}", "2.5e-03")
+        self.assertEqual(f"{table[1.1][2]:.1e}", "2.6e-03")
+        # the convergence table and Experiment 3 quote the plotted value at r = 1.1
+        self.assertIn(r"Plotted relative difference at \(r=1.1\) (Eq. 7)", text)
+        for n_div, quoted in ((1000, "2.5e-05"), (10000, "2.5e-07")):
+            _, profile = physics.compute_acceleration_profile_optimized(n_div, "relative difference")
+            with self.subTest(n_div=n_div):
+                self.assertEqual(f"{profile[220]:.1e}", quoted)
+
+    def test_original_overview_and_printed_results_match_the_radii_option(self):
+        text = html_text(self.help_text)
+        self.assertNotIn("seven fixed radii", text)
+        self.assertIn("at seven default radii, or at those supplied by --radii", text)
+        self.assertNotIn("All reported numbers use five significant figures", text)
+        self.assertIn("the radius labels use up to ten, and more when needed to show a radius exactly", text)
 
     def test_original_stamp_matches_the_program(self):
         match = re.search(

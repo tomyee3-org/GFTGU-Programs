@@ -168,8 +168,15 @@ def _format_value(value):
 
 
 def _format_radius(value):
-    """Format a comparison radius with enough digits to tell it from 1."""
-    return f"{value:.10g}"
+    """Format a comparison radius so that the label gives back the radius exactly.
+
+    Ten significant figures are used when they suffice; otherwise the shortest
+    exact form, so that radii very close to 1 are never labelled "1".
+    """
+    label = f"{value:.10g}"
+    if float(label) != value:
+        label = repr(float(value))
+    return label
 
 
 def print_comparison(nDiv, epsilon, radii=REPORT_RADII):
