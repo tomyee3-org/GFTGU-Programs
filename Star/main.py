@@ -39,8 +39,10 @@ the command line:
 
 Each run also prints the surface radius and total mass; the radial step, the
 number of grid points and the number of step doublings (restarts); the
-polytropic index and the radius and mass of the exact Lane-Emden solution of
-the same polytrope, with the relative difference of the integrated values;
+polytropic index and the radius and mass of the Lane-Emden solution of the
+same polytrope, computed as a numerical reference, with the relative
+difference of the integrated values and a warning if that reference is
+uncertain in its seventh significant figure;
 and linearly interpolated pressure, density, temperature, and enclosed mass
 at 0%, 25%, 50%, 75%, and 90% of the surface radius. Numerical results are
 printed to five significant figures.
@@ -204,26 +206,35 @@ def _print_numerical_grid(result):
 
 
 def _print_lane_emden_comparison(result):
-    """Print the exact Lane-Emden radius and mass beside the integrated ones."""
-    print("\n  Lane-Emden solution of the same polytrope (exact)")
+    """Print the Lane-Emden reference radius and mass beside the integrated ones."""
+    print("\n  Lane-Emden solution of the same polytrope (numerical reference)")
     try:
-        exact = physics_star.lane_emden_solution(
+        reference = physics_star.lane_emden_solution(
             result.pressure[0], result.density[0], result.gamma
         )
     except (ValueError, OverflowError) as exc:
         print(f"  not computed: {exc}")
         return
-    radius_difference = result.radius[-1] / exact.radius - 1.0
-    mass_difference = result.mass[-1] / exact.mass - 1.0
-    print(f"  Polytropic index n = 1/(gamma - 1): {_five_significant(exact.n)}")
+    radius_difference = result.radius[-1] / reference.radius - 1.0
+    mass_difference = result.mass[-1] / reference.mass - 1.0
+    index = _five_significant(reference.n)
+    if float(index) >= 5.0:
+        # n is below 5 for every accepted gamma; show enough figures to say so.
+        index = f"{reference.n:.12g}"
+    print(f"  Polytropic index n = 1/(gamma - 1): {index}")
     print(
-        f"  Lane-Emden radius (m):     {_five_significant(exact.radius)}   "
+        f"  Lane-Emden radius (m):     {_five_significant(reference.radius)}   "
         f"integrated radius differs by {_five_significant(radius_difference)}"
     )
     print(
-        f"  Lane-Emden mass (kg):      {_five_significant(exact.mass)}   "
+        f"  Lane-Emden mass (kg):      {_five_significant(reference.mass)}   "
         f"integrated mass differs by {_five_significant(mass_difference)}"
     )
+    if reference.relative_uncertainty > physics_star.LANE_EMDEN_UNCERTAINTY_WARNING:
+        print(
+            "  Warning: gamma is so close to 6/5 that these Lane-Emden values "
+            f"are uncertain by about {reference.relative_uncertainty:.1g} (relative)."
+        )
 
 
 def print_structure_summary(result):

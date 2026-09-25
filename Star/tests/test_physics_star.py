@@ -1032,12 +1032,15 @@ class TestOriginalHelpCompatibility(unittest.TestCase):
     def test_original_describes_the_new_summary_lines_and_limits(self):
         text = " ".join(html.unescape(re.sub(r"<[^>]+>", " ", self.html)).split())
         for phrase in ("Numerical grid", "Restarts (radial step doubled)",
-                       "Lane-Emden solution of the same polytrope (exact)",
+                       "Lane-Emden solution of the same polytrope (numerical reference)",
+                       "Warning: gamma is so close to 6/5",
                        "measure the error of the Euler integration",
                        "from 3 to 1000000"):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, text)
         self.assertNotIn("at least 3.", text)
+        self.assertNotIn("(exact)", text)
+        self.assertNotIn("exact Lane", text)
 
     def test_original_gives_no_chapter_numbers_and_links_to_no_other_help(self):
         text = " ".join(html.unescape(re.sub(r"<[^>]+>", " ", self.html)).split())
@@ -1105,6 +1108,91 @@ class TestLaneEmden(unittest.TestCase):
             with self.subTest(n=n):
                 self.assertAlmostEqual(coarse[0] / fine[0], 1.0, delta=1e-9)
                 self.assertAlmostEqual(coarse[1] / fine[1], 1.0, delta=1e-8)
+
+    # xi_1 at n = 4.9999999 from an independent solution of the Lane-Emden
+    # equation in ln xi with SciPy's DOP853 at rtol = 2.5e-14.
+    NEAR_LIMIT_DOP853_XI = 176425245.63096824
+
+    def test_solution_uses_the_half_step_and_reports_the_step_difference(self):
+        n = phys.polytropic_index(1.36)
+        coarse = phys.lane_emden_surface(n)
+        half = phys.lane_emden_surface(n, phys.LANE_EMDEN_RELATIVE_STEP / 2)
+        solution = phys.lane_emden_solution(DEFAULTS["p_c"], 49186.69619012853, 1.36)
+        self.assertEqual((solution.xi_1, solution.mass_factor), half)
+        self.assertEqual(solution.relative_uncertainty,
+                         max(abs(coarse[0] / half[0] - 1), abs(coarse[1] / half[1] - 1)))
+        self.assertEqual(phys.lane_emden_surface(n, None), coarse)
+        self.assertEqual(phys.lane_emden_surface(n, phys.LANE_EMDEN_RELATIVE_STEP), coarse)
+
+    def test_relative_step_is_validated(self):
+        for bad in (0.0, -1e-3, 0.2, math.nan, math.inf, True, "0.001"):
+            with self.subTest(relative_step=bad), self.assertRaises(ValueError):
+                phys.lane_emden_surface(2.0, bad)
+
+    def test_uncertainty_is_small_below_n_4_99(self):
+        # the Help promises eight significant figures or more for n below 4.99
+        worst = 0.0
+        for n in (0.0, 0.01, 0.05, 0.075, 0.1, 0.2, 0.5, 0.9, 1.0, 1.5, 2.0, 1 / 0.36,
+                  3.0, 3.5, 4.0, 4.5, 4.9, 4.95, 4.99):
+            coarse = phys.lane_emden_surface(n)
+            half = phys.lane_emden_surface(n, phys.LANE_EMDEN_RELATIVE_STEP / 2)
+            worst = max(worst, abs(coarse[0] / half[0] - 1), abs(coarse[1] / half[1] - 1))
+        self.assertLess(worst, 1e-8)
+        default = phys.lane_emden_solution(DEFAULTS["p_c"], 49186.69619012853, 1.36)
+        self.assertLess(default.relative_uncertainty, 1e-9)
+
+    def test_near_limit_uncertainty_covers_the_independent_value(self):
+        solution = phys.lane_emden_solution(DEFAULTS["p_c"], 49186.69619012853, 1.200000004)
+        self.assertEqual(f"{solution.n:.12g}", "4.9999999")
+        error = abs(solution.xi_1 / self.NEAR_LIMIT_DOP853_XI - 1)
+        self.assertLess(error, solution.relative_uncertainty)
+        self.assertGreater(solution.relative_uncertainty, phys.LANE_EMDEN_UNCERTAINTY_WARNING)
+        # the full-step value alone is 3.5e-6 away: seven figures would be wrong
+        coarse = phys.lane_emden_surface(solution.n)[0]
+        self.assertGreater(abs(coarse / self.NEAR_LIMIT_DOP853_XI - 1), 1e-6)
+        self.assertLess(error, 1e-6)
+
+    def test_warning_threshold_lies_about_1_3e_minus_7_from_six_fifths(self):
+        rho_c = 49186.69619012853
+        for offset, warns in ((5e-8, True), (1.1e-7, True), (2e-7, False), (5e-7, False),
+                              (1e-3, False), (0.16, False)):
+            solution = phys.lane_emden_solution(DEFAULTS["p_c"], rho_c, 1.2 + offset)
+            with self.subTest(offset=offset):
+                self.assertEqual(
+                    solution.relative_uncertainty > phys.LANE_EMDEN_UNCERTAINTY_WARNING, warns)
+
+    def test_uncertainty_bounds_an_independent_solution_when_scipy_is_available(self):
+        try:
+            import numpy as np
+            from scipy.integrate import solve_ivp
+        except ImportError:
+            self.skipTest("SciPy is not installed")
+
+        def reference(n):
+            start = 1e-6
+            theta = 1 - start**2 / 6 + n * start**4 / 120
+            dtheta = -start / 3 + n * start**3 / 30
+
+            def rhs(t, y):
+                xi = np.exp(t)
+                return [xi * y[1], xi * (-(max(y[0], 0.0) ** n)) - 2 * y[1]]
+
+            def surface(t, y):
+                return y[0]
+            surface.terminal, surface.direction = True, -1
+            sol = solve_ivp(rhs, [np.log(start), np.log(1e13)], [theta, dtheta],
+                            method="DOP853", rtol=2.5e-14, atol=1e-30, events=surface)
+            xi = float(np.exp(sol.t_events[0][0]))
+            return xi, float(-xi * xi * sol.y_events[0][0][1])
+
+        rho_c = 49186.69619012853
+        for gamma in (1.5, 1.36, 1.25, 1.21, 1.2 + 1e-5, 1.2 + 4e-8, 1.200000004, 1.2000000001):
+            solution = phys.lane_emden_solution(DEFAULTS["p_c"], rho_c, gamma)
+            xi, omega = reference(solution.n)
+            error = max(abs(solution.xi_1 / xi - 1), abs(solution.mass_factor / omega - 1))
+            with self.subTest(gamma=gamma):
+                # the reference itself is good to about 1e-12
+                self.assertLessEqual(error, max(solution.relative_uncertainty, 2e-12))
 
     def test_rejected_indices_and_exponents(self):
         for bad in (-0.1, 5.0, 5.5, math.nan, math.inf, True, "1"):
@@ -1250,6 +1338,35 @@ class TestPrintedSummary(unittest.TestCase):
         lines = text.splitlines()
         self.assertEqual(lines[3], "  Radius (m):     6.9674e+08")
         self.assertEqual(lines[4], "  Total mass (kg): 1.9825e+30")
+
+    def test_lane_emden_header_and_no_warning_for_the_default(self):
+        text = run_cli(()).stdout
+        self.assertIn("\n  Lane-Emden solution of the same polytrope (numerical reference)\n", text)
+        self.assertNotIn("(exact)", text)
+        self.assertNotIn("Warning", text)
+
+    def test_near_limit_summary_warns_and_prints_the_index_to_more_figures(self):
+        text = run_cli(("--gamma", "1.200000004")).stdout
+        lines = text.splitlines()
+        mass_line = next(i for i, line in enumerate(lines) if line.startswith("  Lane-Emden mass (kg):"))
+        self.assertEqual(
+            lines[mass_line + 1],
+            "  Warning: gamma is so close to 6/5 that these Lane-Emden values are uncertain "
+            "by about 4e-06 (relative).")
+        self.assertEqual(summary_value(text, "Polytropic index n = 1/(gamma - 1)"), "4.9999999")
+        # a gamma slightly further from 6/5 is still within seven figures
+        text = run_cli(("--gamma", "1.2000005")).stdout
+        self.assertNotIn("Warning", text)
+        self.assertEqual(summary_value(text, "Polytropic index n = 1/(gamma - 1)"), "4.99998750003")
+
+    def test_warning_follows_the_threshold_constant(self):
+        result = integrate()
+        with mock.patch.object(phys, "LANE_EMDEN_UNCERTAINTY_WARNING", 1e-15), \
+                redirect_stdout(io.StringIO()) as out:
+            star_main.print_structure_summary(result)
+        text = out.getvalue()
+        self.assertIn("  Warning: gamma is so close to 6/5 that these Lane-Emden values are "
+                      "uncertain by about", text)
 
     def test_restart_is_reported(self):
         text = run_cli(("--max_points", "1000")).stdout
@@ -1694,7 +1811,7 @@ class TestBeatsHelpReference(unittest.TestCase):
             if len(row) == 3 and row[0].isupper() or (len(row) == 3 and row[0] == "k_BOLTZMANN")
         }
         for name in ("G_NEWTON", "k_BOLTZMANN", "MPROTON", "LANE_EMDEN_RELATIVE_STEP",
-                     "LANE_EMDEN_MAX_XI"):
+                     "LANE_EMDEN_UNCERTAINTY_WARNING", "LANE_EMDEN_MAX_XI"):
             with self.subTest(name=name):
                 self.assertEqual(float(rows[name]), float(getattr(phys, name)))
         self.assertEqual(float(rows["MAX_POINTS_LIMIT"]), driver_star.MAX_POINTS_LIMIT)
@@ -1771,7 +1888,7 @@ class TestBeatsHelpQuotedNumbers(unittest.TestCase):
         2: {"0.015647", "0.3327"},
         3: {"1399", "35.2"},
         4: {"1.1", "1.1000", "1.2100"},
-        5: {"35.2", "36.62"},
+        5: {"35.2", "36.62", "4.99"},
         6: {"1.888", "1.995", "2000"},
         7: set(),
         8: {"1.2000000001"},
@@ -1811,7 +1928,7 @@ class TestBeatsHelpQuotedNumbers(unittest.TestCase):
             c + "\n" + beat_run(c).stdout for c in dict.fromkeys(documented_commands(HELP_HTML))
             if c not in REJECTED_COMMANDS
         )
-        allowed = {"0.25", "0.75", "1000000", "2.8e+30"}
+        allowed = {"0.25", "0.75", "1000000", "2.8e+30", "4.99"}
         for section in ("overview", "beats", "equations", "algorithm", "modules", "quickstart",
                         "parameters", "output", "summary", "experiments"):
             text = self.visible(section_html(HELP_HTML, section))
@@ -1926,6 +2043,12 @@ class TestBeatsHelpQuantitativeClaims(unittest.TestCase):
         self.assertEqual((f"{xi:.5g}", f"{omega:.5g}"), ("6.1212", "2.0876"))
         self.assertEqual(f"{xi**3 / (3 * omega):.4g}", "36.62")
         self.assertEqual(f"{1 / 0.36:.5g}", "2.7778")
+        # the precision claim of Beat 5 is tested in TestLaneEmden
+        body = html_text(section_html(HELP_HTML, "beat5"))
+        self.assertIn("below 4.99", body)
+        self.assertIn("1.3\\times10^{-7}", body)
+        self.assertNotIn("usually about ten", body)
+        self.assertNotIn("at least seven", body)
 
     def test_beat6_first_order_convergence(self):
         base = _summary("python main.py")
@@ -1967,6 +2090,11 @@ class TestBeatsHelpQuantitativeClaims(unittest.TestCase):
         artefact = _summary("python main.py --gamma 1.2000000001")
         self.assertEqual(artefact["radius_error"], -1.0)
         self.assertTrue(1e7 < artefact["le_radius"] / artefact["radius"] < 1e8)
+        text = beat_run("python main.py --gamma 1.2000000001").stdout
+        self.assertIn("  Warning: gamma is so close to 6/5 that these Lane-Emden values are "
+                      "uncertain by about 0.0001 (relative).", text)
+        self.assertEqual(summary_value(text, "Polytropic index n = 1/(gamma - 1)"), "4.9999999975")
+        self.assertNotIn("Warning", beat_run("python main.py --gamma 1.21").stdout)
         # the Lane-Emden solution is refused only for gamma within about 1e-12 of 6/5
         rho_c = 49186.69619012853
         phys.lane_emden_solution(DEFAULTS["p_c"], rho_c, 1.2 + 1e-12)

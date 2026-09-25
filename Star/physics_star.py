@@ -265,20 +265,32 @@ def temperature_from_prho(p: float, rho: float, mu: float) -> float:
 
 
 # ---------------------------------------------------------------------------
-# The Lane-Emden solution: the exact solution of the same three equations
+# The Lane-Emden solution of the same three equations, computed as a reference
 # ---------------------------------------------------------------------------
 
 # Beyond this dimensionless radius the Lane-Emden surface is not sought.  It
 # is reached only for polytropic indices within about 2e-11 of n = 5, that is
 # for gamma within about 1e-12 of 6/5.
 LANE_EMDEN_MAX_XI = 1.0e12
-# Relative step of the Runge-Kutta integration in xi; it gives about ten
-# significant figures, far more than the five that are printed.
+# Relative step of the Runge-Kutta integration in xi.  The solution is
+# computed with this step and with half of it; the half-step values are
+# returned, and the relative difference between the two is returned as an
+# estimate of their uncertainty; against an independent high-accuracy solver
+# it has been larger than the actual error.
 LANE_EMDEN_RELATIVE_STEP = 1.0e-3
+# Above this estimated relative uncertainty the Lane-Emden values may not be
+# good to seven significant figures, and the printed summary says so.  The
+# uncertainty of xi_1 grows as 1/(5 - n); it passes this level only for
+# gamma within about 1.3e-7 of 6/5.
+LANE_EMDEN_UNCERTAINTY_WARNING = 1.0e-7
 
 
 class LaneEmdenSolution(NamedTuple):
-    """Surface of the Lane-Emden function theta_n and the physical star."""
+    """Surface of the Lane-Emden function theta_n and the physical star.
+
+    relative_uncertainty is the larger relative change of xi_1 and of the
+    mass factor between the full-step and half-step integrations.
+    """
 
     n: float
     xi_1: float
@@ -286,6 +298,7 @@ class LaneEmdenSolution(NamedTuple):
     length_scale: float
     radius: float
     mass: float
+    relative_uncertainty: float = 0.0
 
 
 def polytropic_index(gamma: float) -> float:
@@ -296,7 +309,7 @@ def polytropic_index(gamma: float) -> float:
     return 1.0 / (gamma - 1.0)
 
 
-def lane_emden_surface(n: float):
+def lane_emden_surface(n: float, relative_step: float = None):
     """Return (xi_1, -xi_1**2 theta'(xi_1)) for the Lane-Emden equation.
 
     The equation (1/xi^2) d/dxi (xi^2 dtheta/dxi) = -theta**n, with
@@ -306,12 +319,20 @@ def lane_emden_surface(n: float):
     n < 1, and refined a thousandfold in three stages once a step crosses the
     zero.  The first zero of theta is located on a cubic Hermite interpolant
     of the final step, and the mass factor is completed with the integral of
-    xi**2 theta**n over the last short interval.  A ValueError is raised if
-    n is not in [0, 5) or the surface lies beyond LANE_EMDEN_MAX_XI.
+    xi**2 theta**n over the last short interval.  relative_step defaults to
+    LANE_EMDEN_RELATIVE_STEP.  A ValueError is raised if n is not in [0, 5)
+    or the surface lies beyond LANE_EMDEN_MAX_XI.
+
+    The error of xi_1 grows as 1/(5 - n), from about 1e-13 for moderate n to
+    about 3e-6 at n = 4.9999999; lane_emden_solution() estimates it.
     """
     _validate_finite_real("n", n)
     if not 0.0 <= n < 5.0:
         raise ValueError("the polytropic index n must satisfy 0 <= n < 5.")
+    step = LANE_EMDEN_RELATIVE_STEP if relative_step is None else relative_step
+    _validate_finite_real("relative_step", step)
+    if not 0.0 < step <= 0.1:
+        raise ValueError("relative_step must satisfy 0 < relative_step <= 0.1.")
 
     def slope(xi, theta, dtheta):
         return dtheta, -(max(theta, 0.0) ** n) - 2.0 * dtheta / xi
@@ -321,7 +342,7 @@ def lane_emden_surface(n: float):
     dtheta = -xi / 3.0 + n * xi**3 / 30.0
     refine = 1.0
     while True:
-        h = LANE_EMDEN_RELATIVE_STEP * max(1.0, xi) * refine
+        h = step * max(1.0, xi) * refine
         if n < 1.0:
             # theta**n has an unbounded slope at theta = 0 when n < 1, so take
             # shorter steps as theta approaches zero.
@@ -372,16 +393,19 @@ def lane_emden_surface(n: float):
 
 
 def lane_emden_solution(p_c: float, rho_c: float, gamma: float) -> LaneEmdenSolution:
-    """Return the exact radius and mass of the polytrope with these central values.
+    """Return the Lane-Emden radius and mass of the polytrope with these central values.
 
     With n = 1/(gamma - 1) and a = sqrt((n + 1)/(4 pi)) * radial_scale(p_c,
     rho_c), the radius is xi_1 a and the mass 4 pi a**3 rho_c (-xi_1**2
-    theta'(xi_1)).  These are the exact solution of the equations that
-    integrate_star() steps through, so the difference between the two is the
-    error of the numerical integration.
+    theta'(xi_1)).  The Lane-Emden solution is the exact solution of the
+    equations that integrate_star() steps through; it is computed here as a
+    numerical reference, far more accurately than integrate_star(), and
+    relative_uncertainty estimates its remaining error.
     """
     n = polytropic_index(gamma)
-    xi_1, mass_factor = lane_emden_surface(n)
+    coarse = lane_emden_surface(n, LANE_EMDEN_RELATIVE_STEP)
+    xi_1, mass_factor = lane_emden_surface(n, LANE_EMDEN_RELATIVE_STEP / 2.0)
+    uncertainty = max(abs(coarse[0] / xi_1 - 1.0), abs(coarse[1] / mass_factor - 1.0))
     length = sqrt((n + 1.0) / (4.0 * pi)) * radial_scale(p_c, rho_c)
     radius = _require_positive_finite_result("Lane-Emden radius", xi_1 * length)
     try:
@@ -389,4 +413,4 @@ def lane_emden_solution(p_c: float, rho_c: float, gamma: float) -> LaneEmdenSolu
     except OverflowError:
         mass = float("inf")
     mass = _require_positive_finite_result("Lane-Emden mass", mass)
-    return LaneEmdenSolution(n, xi_1, mass_factor, length, radius, mass)
+    return LaneEmdenSolution(n, xi_1, mass_factor, length, radius, mass, uncertainty)
