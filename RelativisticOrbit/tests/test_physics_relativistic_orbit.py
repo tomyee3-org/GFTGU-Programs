@@ -1017,6 +1017,10 @@ class TestOrbitPrediction(unittest.TestCase):
         for _ in range(20_000):
             x_init = 10 ** generator.uniform(math.log10(2954.0), 308)
             u_init = generator.choice((-1, 1)) * 10 ** generator.uniform(-320, 300)
+            if generator.random() < 0.3:
+                # Starts close to, but resolvably off, a circular orbit.
+                circle = physics.circular_proper_time_speed(max(x_init, 4430.0))
+                u_init = circle * (1 + generator.choice((-1, 1)) * 10 ** generator.uniform(-16, -2))
             model = generator.choice(("schwarzschild", "newtonian"))
             try:
                 prediction = physics.predict_orbit(x_init, u_init, model)
@@ -1090,6 +1094,63 @@ class TestPredictionAtBoundaries(unittest.TestCase):
             with self.subTest(factor=factor):
                 self.assertEqual(
                     physics.predict_orbit(x_init, physics.circular_proper_time_speed(x_init)).kind, kind)
+
+    def test_resolvable_changes_of_speed_are_not_circles(self):
+        radius = physics.ISCO_RADIUS
+        circle = physics.circular_proper_time_speed(radius)
+        kinds = [physics.predict_orbit(radius, circle * factor).kind
+                 for factor in (1 - 1e-13, 1.0, 1 + 1e-13)]
+        self.assertEqual(kinds, ["plunge", "circular (marginally stable)", "bound"])
+        m = physics.GM_SUN / physics.C2
+        for radius in (5 * m, 8 * m, 1e6, 1e12):
+            circle = physics.circular_proper_time_speed(radius)
+            for factor in (1 - 1e-13, 1 + 1e-13):
+                with self.subTest(radius=radius, factor=factor):
+                    self.assertFalse(
+                        physics.predict_orbit(radius, circle * factor).kind.startswith("circular"))
+        # The 14-significant-digit value of the 8GM/c^2 circular speed is a
+        # resolvable change of speed, so it is a (nearly circular) bound orbit.
+        self.assertEqual(physics.predict_orbit(11813.0003044, 134071263.04595).kind, "bound")
+        self.assertEqual(physics.predict_orbit(11813.0003044, 134071263.04595919).kind,
+                         "circular (stable)")
+
+    def test_circles_just_off_the_isco_are_not_the_isco(self):
+        radius = physics.ISCO_RADIUS
+        for factor, kind in ((1 - 1e-14, "circular (unstable)"), (1 + 1e-14, "circular (stable)")):
+            x_init = radius * factor
+            with self.subTest(factor=factor):
+                self.assertNotEqual(x_init, radius)
+                self.assertEqual(
+                    physics.predict_orbit(x_init, physics.circular_proper_time_speed(x_init)).kind, kind)
+
+    def test_the_program_s_own_circular_speed_is_always_recognised(self):
+        import random
+
+        generator = random.Random(22)
+        for _ in range(2000):
+            x_init = 10 ** generator.uniform(math.log10(4430.0), 300)
+            with self.subTest(x_init=x_init):
+                self.assertTrue(physics.predict_orbit(
+                    x_init, physics.circular_proper_time_speed(x_init)).kind.startswith("circular"))
+            x_newton = 10 ** generator.uniform(-3, 300)
+            with self.subTest(x_newton=x_newton):
+                self.assertEqual(physics.predict_orbit(
+                    x_newton, physics.circular_proper_time_speed(x_newton, "newtonian"),
+                    "newtonian").kind, "circular (stable)")
+        for offset in (1e-9, 1e-6, 1e-3, 1.0, 100.0):
+            x_init = physics.PHOTON_ORBIT_RADIUS + offset
+            with self.subTest(offset=offset):
+                self.assertEqual(physics.predict_orbit(
+                    x_init, physics.circular_proper_time_speed(x_init)).kind, "circular (unstable)")
+
+    def test_circular_speed_is_accurate_close_to_the_photon_orbit(self):
+        exact_photon = 3 * Fraction(physics.GM_SUN) / Fraction(physics.C2)
+        for offset in (1e-9, 1e-6, 1e-3, 1.0):
+            radius = physics.PHOTON_ORBIT_RADIUS + offset
+            exact = math.sqrt(float(Fraction(physics.GM_SUN) / (Fraction(radius) - exact_photon)))
+            with self.subTest(offset=offset):
+                self.assertAlmostEqual(physics.circular_proper_time_speed(radius) / exact, 1.0,
+                                       delta=4e-16)
 
     def test_isco_circle_through_the_command_line(self):
         output = run_cli(("--x_init", "8859.750228300749", "--u_init", "173085256.32731956",
@@ -1710,7 +1771,7 @@ class TestHelpReference(unittest.TestCase):
             and not row[0].startswith("(")
         }
         for name in ("GM_SUN", "C", "HORIZON_RADIUS", "PHOTON_ORBIT_RADIUS", "ISCO_RADIUS",
-                     "CIRCULAR_TOLERANCE", "ISCO_TOLERANCE"):
+                     "CIRCULAR_ULPS", "ISCO_ULPS"):
             with self.subTest(name=name):
                 self.assertAlmostEqual(float(rows[name]) / getattr(physics, name), 1.0, delta=2e-6)
 
@@ -1884,8 +1945,7 @@ class TestHelpQuantitativeClaims(unittest.TestCase):
         self.assertEqual(f"{3 * m:.1f}", "4429.9")
         self.assertAlmostEqual(212197265.2804 / physics.circular_proper_time_speed(7383.12519025),
                                1.001, delta=1e-6)
-        self.assertAlmostEqual(134071263.04595 / physics.circular_proper_time_speed(11813.0003044),
-                               1.0, delta=1e-9)
+        self.assertEqual(134071263.04595919, physics.circular_proper_time_speed(11813.0003044))
         prediction = physics.predict_orbit(7383.12519025, 212197265.2804)
         self.assertEqual(f"{(prediction.apsidal_advance + 2 * math.pi) / (2 * math.pi):.2f}", "4.89")
         self.assertAlmostEqual(prediction.apoapsis_radius / 7383.12519025, 2.0, delta=0.05)

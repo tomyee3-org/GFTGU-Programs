@@ -17,7 +17,7 @@ from typing import NamedTuple, Optional
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.3.0"
+MODEL_VERSION = "1.4.0"
 BUILD_ID_COVERS = (
     "physics_relativistic_orbit.py",
     "driver_relativistic_orbit.py",
@@ -260,6 +260,12 @@ def circular_proper_time_speed(radius: float, model: str = "schwarzschild") -> f
     denominator = radius - 3.0 * GM_SUN / C2
     if denominator <= 0.0:
         raise ValueError("No timelike circular Schwarzschild geodesic exists at or below 3GM/c^2.")
+    # Form r - 3GM/c^2 exactly from the floating-point radius and constants,
+    # so that the result stays accurate to rounding close to 3GM/c^2, where
+    # the subtraction would otherwise lose most of its digits.
+    exact = Fraction(radius) - 3 * Fraction(GM_SUN) / Fraction(C2)
+    if exact > 0:
+        denominator = float(exact)
     speed2 = GM_SUN / denominator
     if not math.isfinite(speed2):
         raise ValueError("radius is too close to 3GM/c^2 for a finite result.")
@@ -333,12 +339,16 @@ def weak_field_advance(periapsis_radius: float, apoapsis_radius: float) -> float
     return advance
 
 
-# Tolerances of predict_orbit(), on dimensionless quantities of order one.
-# A start whose radial force balance |3A + B - 2| is within CIRCULAR_TOLERANCE
-# of zero is taken to be circular; a circular start with |1 - 3A| within
-# ISCO_TOLERANCE is taken to be exactly at the innermost stable circular orbit.
-CIRCULAR_TOLERANCE = 1.0e-12
-ISCO_TOLERANCE = 1.0e-12
+# Rounding allowances of predict_orbit(), in units in the last place (ulp).
+# A start is taken to be circular when its radial force balance
+# s = 3A + B - 2 is no larger than the change that CIRCULAR_ULPS ulp of
+# u_init would make, so that the program's own circular speed, which is
+# correct to within rounding, is recognised as circular while any resolvable
+# change of speed is not.  A circle is taken to be exactly at the innermost
+# stable circular orbit when 1 - 3A is no larger than the change that
+# ISCO_ULPS ulp of x_init would make.
+CIRCULAR_ULPS = 8
+ISCO_ULPS = 4
 
 
 def _to_float(value: Fraction, what: str) -> float:
@@ -376,7 +386,10 @@ def predict_orbit(
     outwards.  The discriminant of q is (1 - 3A)^2 - 4 A s.  The kind of orbit
     follows from the signs of s, of the discriminant, of 1 - 3A and of
     q(0) = A + B - 1, which are evaluated in exact rational arithmetic from
-    the floating-point inputs, so that the kind never depends on rounding.
+    the floating-point inputs.  The only allowances for rounding are the
+    two ulp allowances above: a start within CIRCULAR_ULPS ulp of a
+    circular speed is circular, and a circle within ISCO_ULPS ulp of
+    6GM/c^2 is the innermost stable circular orbit.
 
     For a bound Schwarzschild orbit between roots w1 < w2 with third root w3,
     the azimuth swept per radial period is
@@ -404,12 +417,18 @@ def predict_orbit(
     s = 3 * a + b - 2
     q0 = a + b - 1
 
-    if abs(s) <= CIRCULAR_TOLERANCE:
+    # ds/du = -2B/u and d(1 - 3A)/dx = 3A/x turn the ulp allowances into
+    # allowances on s and on 1 - 3A.
+    circular = False
+    if abs(s) < Fraction(1, 10**6):
+        allowance = CIRCULAR_ULPS * 2.0 * float(b) * math.ulp(abs(u_init)) / abs(u_init)
+        circular = abs(s) <= Fraction(allowance)
+    if circular:
         # w = 1 is a double root: a circular orbit.
         if key == "newtonian":
             return OrbitPrediction("circular (stable)", x_init, x_init, 0.0, 0.0)
         margin = 1 - 3 * a
-        if abs(margin) <= ISCO_TOLERANCE:
+        if abs(margin) <= Fraction(ISCO_ULPS * 3.0 * float(a) * math.ulp(x_init) / x_init):
             # Marginally stable: the radial oscillation period is infinite.
             return OrbitPrediction("circular (marginally stable)", x_init, x_init, None, None)
         if margin < 0:
