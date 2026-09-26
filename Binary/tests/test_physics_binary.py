@@ -2345,20 +2345,71 @@ class HelpStructure:
 
 
 def documented_commands(html):
-    """Every ``python main.py ...`` command shown in a code block, as argv lists."""
+    """Every ``python main.py ...`` command in ``<pre>`` or inline ``<code>``.
+
+    Audit42 P2-02: an exercise command that lives only inside ``<code>``
+    is still a student-facing command and must parse and run. Commands
+    already inside ``<pre>`` are not counted again from inner ``<code>``.
+    """
     commands = []
-    for block in re.findall(r"<pre[^>]*>(.*?)</pre>", html, re.DOTALL):
+    blocks = re.findall(r"<pre[^>]*>(.*?)</pre>", html, re.DOTALL)
+    outside_pre = re.sub(r"<pre[^>]*>.*?</pre>", " ", html, flags=re.DOTALL)
+    blocks.extend(re.findall(r"<code[^>]*>(.*?)</code>", outside_pre, re.DOTALL))
+    for block in blocks:
         text = html_module.unescape(re.sub(r"<[^>]+>", "", block))
         text = re.sub(r"\\\n\s*", " ", text)
-        for line in text.splitlines():
-            line = line.strip()
-            if line.startswith("python main.py"):
-                argv = shlex.split(line)
-                assert argv[:2] == ["python", "main.py"], line
-                if argv[2:] and argv[2] in ("--help", "-h", "--version"):
-                    continue
-                commands.append(argv[2:])
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line.startswith("python main.py"):
+                continue
+            argv = shlex.split(line)
+            assert argv[:2] == ["python", "main.py"], line
+            flags = argv[2:]
+            if flags and flags[0] in ("--help", "-h", "--version"):
+                continue
+            commands.append(flags)
     return commands
+
+
+def documentation_tree_present(module_dir: Path) -> bool:
+    """True when Notes, Guide, or the sibling Documentation folder is in view."""
+    for ancestor in (module_dir, *module_dir.parents):
+        docs = ancestor / "GFTGU-Documentation" / "Binary"
+        if docs.is_dir() and any(docs.glob("Binary-*.html")):
+            return True
+        if (docs / "SampleOutputs" / "Binary-SampleOutputs_Guide.html").is_file():
+            return True
+    for folder in (module_dir, module_dir.parent):
+        if (folder / "Binary-ReleaseNotes.html").is_file():
+            return True
+        if (folder / "SampleOutputs" / "Binary-SampleOutputs_Guide.html").is_file():
+            return True
+    return False
+
+
+def help_copies_by_name(module_dir: Path) -> dict[str, list[Path]]:
+    """Every on-disk copy of each Help filename, program-side then Documentation."""
+    grouped: dict[str, list[Path]] = {name: [] for name in HELP_FILENAMES}
+    seen: set[Path] = set()
+
+    def add(path: Path) -> None:
+        if not path.is_file():
+            return
+        resolved = path.resolve()
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        grouped[path.name].append(path)
+
+    for name in HELP_FILENAMES:
+        add(module_dir / name)
+    for ancestor in (module_dir, *module_dir.parents):
+        docs = ancestor / "GFTGU-Documentation" / "Binary"
+        for name in HELP_FILENAMES:
+            add(docs / name)
+            if ancestor.name != "Binary":
+                add(ancestor / "Binary" / name)
+    return grouped
 
 
 class TestBothHelpFiles(unittest.TestCase):
@@ -2428,6 +2479,26 @@ class TestBothHelpFiles(unittest.TestCase):
         for argv in commands:
             with self.subTest(argv=argv):
                 entry.parse_args(argv)
+        masses = [argv[argv.index("--MB") + 1] for argv in commands if "--MB" in argv]
+        self.assertTrue(any(float(value) > 0.0 for value in masses))
+        self.assertFalse(any(float(value) <= 0.0 for value in masses))
+
+    def test_dense_help_is_required_when_the_documentation_tree_is_present(self):
+        if not documentation_tree_present(MODULE_DIR):
+            self.skipTest("no documentation tree is on the search path")
+        self.assertIsNotNone(HELP_FILE)
+        self.assertTrue(HELP_FILE.is_file())
+        self.assertNotEqual(HELP_FILE.name, "Binary-grok.html")
+
+    def test_duplicate_help_copies_match_byte_for_byte(self):
+        grouped = help_copies_by_name(MODULE_DIR)
+        for name, copies in grouped.items():
+            if len(copies) < 2:
+                continue
+            reference = copies[0].read_bytes()
+            for path in copies[1:]:
+                with self.subTest(name=name, path=str(path)):
+                    self.assertEqual(path.read_bytes(), reference)
 
 
 class TestGrokQuotedFacts(unittest.TestCase):
@@ -2435,8 +2506,21 @@ class TestGrokQuotedFacts(unittest.TestCase):
 
     These pins stay on Binary-grok.html. They do not copy Claude's
     lab-manual sections. A governing-law mutant (r^2 -> r^3 in Beat 0)
-    must fail this class.
+    must fail this class, as must a sign flip in Beat 1's B-x equation.
     """
+
+    GROK_DISPLAY_EQUATIONS = (
+        r"F=\frac{GM_A M_B}{r^2}",
+        r"\ddot x_A=-\frac{G M_B\,\Delta x}{r^3}",
+        r"\ddot y_A=-\frac{G M_B\,\Delta y}{r^3}",
+        r"\ddot x_B=+\frac{G M_A\,\Delta x}{r^3}",
+        r"\ddot y_B=+\frac{G M_A\,\Delta y}{r^3}",
+        r"K=\tfrac12 M_A(v_A^2+u_A^2)+\tfrac12 M_B(v_B^2+u_B^2)",
+        r"U=-\frac{G M_A M_B}{r}",
+        r"E=K+U",
+        r"T=2\pi\sqrt{\frac{a^3}{G(M_A+M_B)}}",
+        r"e=\frac{v_p-v_a}{v_p+v_a}",
+    )
 
     @classmethod
     def setUpClass(cls):
@@ -2444,10 +2528,19 @@ class TestGrokQuotedFacts(unittest.TestCase):
             raise unittest.SkipTest("Binary-grok.html is not in the documentation tree")
         cls.html = GROK_HELP_FILE.read_text(encoding="utf-8")
         cls.beat0 = html_text(section_html(cls.html, "beat0"))
+        cls.beat1 = html_text(section_html(cls.html, "beat1"))
+        cls.beat2 = html_text(section_html(cls.html, "beat2"))
+        cls.beat3 = html_text(section_html(cls.html, "beat3"))
         cls.beat4 = html_text(section_html(cls.html, "beat4"))
         cls.beat5 = html_text(section_html(cls.html, "beat5"))
         cls.beat6 = html_text(section_html(cls.html, "beat6"))
+        cls.beat7 = html_text(section_html(cls.html, "beat7"))
         cls.experiments = html_text(section_html(cls.html, "experiments"))
+        cls.commands = documented_commands(cls.html)
+
+    def _compact_display_math(self):
+        blocks = re.findall(r"\\\[(.*?)\\\]", self.html, re.DOTALL)
+        return " ".join(re.sub(r"\s+", "", block) for block in blocks)
 
     def test_beat_0_states_inverse_square_not_inverse_cube(self):
         html = section_html(self.html, "beat0")
@@ -2457,42 +2550,104 @@ class TestGrokQuotedFacts(unittest.TestCase):
         self.assertNotIn("one eighth", self.beat0)
         self.assertIn("6.67430", self.beat0)
 
+    def test_display_equations_are_frozen(self):
+        compact = self._compact_display_math()
+        for equation in self.GROK_DISPLAY_EQUATIONS:
+            with self.subTest(equation=equation):
+                self.assertIn(re.sub(r"\s+", "", equation), compact)
+
+    def test_beat_1_acceleration_signs_match_the_code(self):
+        html = re.sub(r"\s+", "", section_html(self.html, "beat1"))
+        self.assertIn(r"\ddotx_A=-\frac{GM_B\,\Deltax}{r^3}", html)
+        self.assertIn(r"\ddoty_A=-\frac{GM_B\,\Deltay}{r^3}", html)
+        self.assertIn(r"\ddotx_B=+\frac{GM_A\,\Deltax}{r^3}", html)
+        self.assertIn(r"\ddoty_B=+\frac{GM_A\,\Deltay}{r^3}", html)
+        self.assertNotIn(r"\ddotx_B=-\frac{GM_A\,\Deltax}{r^3}", html)
+        axA, ayA, axB, ayB = physics.accelerations(
+            2.0e30, 1.0e30, 5.0e10, 1.0e10, -2.0e10, -3.0e10,
+        )
+        self.assertLess(axA, 0.0)
+        self.assertLess(ayA, 0.0)
+        self.assertGreater(axB, 0.0)
+        self.assertGreater(ayB, 0.0)
+        force_scale = max(abs(2.0e30 * axA), abs(1.0e30 * axB), 1.0)
+        self.assertLess(abs(2.0e30 * axA + 1.0e30 * axB) / force_scale, 1e-12)
+        self.assertLess(abs(2.0e30 * ayA + 1.0e30 * ayB) / force_scale, 1e-12)
+        self.assertIn("inverse mass ratio", self.beat1)
+        self.assertIn("M_B/(M_A+M_B)", self.beat1.replace(" ", ""))
+
+    def test_beat_2_and_3_energy_claims(self):
+        beat2_html = re.sub(r"\s+", "", section_html(self.html, "beat2"))
+        beat3_html = section_html(self.html, "beat3")
+        self.assertIn(r"\tfrac12(M_A+M_B)V_{\mathrm{CM}}^2", beat2_html)
+        self.assertNotIn(r"\tfrac13(M_A+M_B)V_{\mathrm{CM}}^2", beat2_html)
+        compact3 = re.sub(r"\s+", "", beat3_html)
+        self.assertIn(r"K=\tfrac12M_A", compact3)
+        self.assertNotIn(r"K=\tfrac13M_A", compact3)
+        self.assertIn("Energy separates bound from unbound", beat3_html)
+        self.assertIn("--uInitA 38091.14", beat3_html)
+        self.assertIn("--uInitA 60000", beat3_html)
+
     def test_beat_4_hodograph_and_apsidal_product(self):
         html = section_html(self.html, "beat4")
         self.assertIn(r"e=\frac{v_p-v_a}{v_p+v_a}", html.replace(" ", ""))
         self.assertNotIn(r"e=\frac{v_a-v_p}{v_p+v_a}", html.replace(" ", ""))
+        self.assertIn(r"a^3", html)
+        self.assertNotIn(r"a^2}{G(M_A+M_B)}", html.replace(" ", ""))
         self.assertIn("r_p v_p=r_a v_a", self.beat4)
 
     def test_beat_5_and_6_name_the_corrector_and_the_step_growth(self):
         self.assertIn("about the centre of mass", self.beat5)
         self.assertIn("at or near closest approach", self.beat5)
         self.assertNotIn("the dip there barely moves", self.beat5)
+        self.assertIn("at most ten times", self.beat5)
+        self.assertNotIn("at most two times", self.beat5)
         self.assertIn("grow 10 per cent toward the ceiling", self.beat6.replace("  ", " "))
+        self.assertIn("Forty halvings", self.beat6)
+        self.assertNotIn("Ten halvings", self.beat6)
         self.assertIn("10^{-12}", self.html)
+
+    def test_beat_7_names_the_scaling_and_the_hard_ellipse(self):
+        self.assertIn(r"(\Delta t)^2", section_html(self.html, "beat7"))
+        self.assertNotIn(r"(\Delta t)^1", section_html(self.html, "beat7"))
+        self.assertIn("0.999", self.beat7)
 
     def test_experiment_4_uses_the_relative_escape_speed(self):
         text = self.experiments
         self.assertIn("38091.14", text)
         self.assertNotIn("reduced mass", text)
         self.assertRegex(text, r"2G\(M_A\+M_B\)")
-        # The printed 38091.14 m/s is half the relative escape speed
-        # for the equal-mass Beat 3 start, not sqrt(2GM/r) with one mass.
         mu = physics.G * (2e30 + 2e30)
         relative = math.sqrt(2.0 * mu / 9.2e10)
         each = 0.5 * relative
         self.assertAlmostEqual(each / 38091.14, 1.0, delta=2e-7)
         one_mass = math.sqrt(2.0 * physics.G * 2e30 / 9.2e10)
         self.assertGreater(abs(one_mass - 38091.14) / 38091.14, 0.3)
-        # Unequal masses: reduced-mass square root matches neither body.
         reduced = (2e30 * 1e30) / 3e30
         bogus = math.sqrt(2.0 * physics.G * reduced / 9.2e10)
         v_rel = math.sqrt(2.0 * physics.G * 3e30 / 9.2e10)
         self.assertGreater(abs(bogus - (1e30 / 3e30) * v_rel) / v_rel, 0.1)
 
-    def test_experiment_6_does_not_send_the_student_to_e_near_one(self):
+    def test_experiment_6_is_a_mild_ellipse_that_runs(self):
         self.assertIn("Orbit", self.experiments)
-        self.assertIn("17000", self.experiments)
-        self.assertNotIn("--MB 2e32 and put B at the origin at rest.", self.experiments)
+        self.assertIn("500000", self.experiments)
+        self.assertNotIn("17000", section_html(self.html, "experiments"))
+        exp6 = [argv for argv in self.commands if "--MB" in argv and "2e32" in argv]
+        self.assertEqual(len(exp6), 1)
+        argv = exp6[0]
+        self.assertIn("500000", argv)
+        self.assertNotEqual(argv[argv.index("--MB") + 1], "0")
+        parsed = entry.parse_args(argv)
+        self.assertGreater(parsed.MB, 0.0)
+        self.assertAlmostEqual(parsed.uInitA, 500000.0)
+        printed = printed_run(argv)
+        fields = printed_fields(printed)
+        self.assertTrue(fields["Initial Keplerian orbit"].startswith("elliptic"))
+        eccentricity = float(fields["Initial Keplerian orbit"].split()[-1])
+        self.assertLess(eccentricity, 0.2)
+        self.assertGreater(eccentricity, 0.10)
+        self.assertGreater(int(fields["Accepted steps"]), 100)
+        self.assertNotIn("outside the numerical range", printed)
 
 
 class HelpLayoutRecogniserTests(unittest.TestCase):
