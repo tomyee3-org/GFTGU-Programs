@@ -320,11 +320,12 @@ class AtmosphereModel:
             if last_step == 0:
                 if not used_full_euler_step:
                     raise RuntimeError(
-                        "The temperature profile is too steep for the "
-                        "50,000-point budget: every Euler step was shorter "
-                        "than the nominal increment, so doubling the step "
-                        "cannot help. Shorten the profile, space the nodes "
-                        "farther apart, or raise the coldest temperature."
+                        "The temperature profile is too steep or too finely "
+                        "sampled for the 50,000-point budget: every Euler "
+                        "step was shorter than the nominal increment, so "
+                        "doubling the step cannot help. Shorten the profile, "
+                        "space the nodes farther apart, or raise the coldest "
+                        "temperature."
                     )
                 dh *= 2.0
                 if not math.isfinite(dh):

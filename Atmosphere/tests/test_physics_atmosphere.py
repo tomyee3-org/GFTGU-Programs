@@ -1075,7 +1075,7 @@ class ColdLayerStepTests(unittest.TestCase):
             return real_step(pressure_prev, rho_prev, g_accel, dh)
 
         with patch.object(driver, "hydrostatic_step", counted), self.assertRaisesRegex(
-            RuntimeError, "every Euler step was shorter than the nominal increment"
+            RuntimeError, "too steep or too finely sampled"
         ):
             self.run_profile(h_points, T_points)
         # One pass of at most MAX_STEPS, not 25 doubled restarts (~1.25e6 steps).
@@ -1182,6 +1182,19 @@ class ProfileSpanAndParameterObjectTests(unittest.TestCase):
         profile.h[-1] = 150.0
         self.assertEqual(profile.get_temp(150.0, 10_000.0), 400.0)
         self.assertEqual(profile.get_temp(200.0, 10_000.0), 400.0)
+
+    def test_a_valid_interior_temperature_edit_drops_the_cached_coefficient(self):
+        """The token mix must see an interior T edit, not only the endpoints."""
+        profile = TemperatureProfile([0.0, 50.0, 100.0], [300.0, 300.0, 300.0])
+        profile.get_temp(200.0, 10_000.0)
+        self.assertAlmostEqual(profile.beta, 300.0 / (10_000.0 ** 0.5))
+        self.assertTrue(profile.reached_top)
+        profile.T[1] = 320.0
+        profile.get_temp(50.0, 10_000.0)
+        self.assertFalse(profile.reached_top)
+        self.assertEqual(profile.beta, 0.0)
+        self.assertEqual(profile.get_temp(200.0, 10_000.0), 300.0)
+        self.assertAlmostEqual(profile.beta, 300.0 / (10_000.0 ** 0.5))
 
     def test_an_interior_edit_is_rejected_on_the_next_public_call(self):
         profile = TemperatureProfile([0.0, 100.0, 200.0, 300.0], [300.0, 350.0, 400.0, 450.0])
@@ -2263,17 +2276,20 @@ class HelpStructureTests(unittest.TestCase):
         self.assertEqual(sources, ["https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"])
 
     def test_every_governing_equation_is_tagged_exactly_once(self):
-        if HELP_LAYOUT == "beats-grok":
-            self.skipTest("the short script does not number equations as (7.n)")
-        tags = re.findall(r"\\tag\{(7\.\d)\}", HELP_HTML)
+        html = CLAUDE_HTML
+        if not html or help_layout(html) != "beats":
+            self.skipTest("long Beats Help is not on the search path")
+        tags = re.findall(r"\\tag\{(7\.\d)\}", html)
         self.assertEqual(sorted(tags), [f"7.{n}" for n in range(1, 8)])
 
     def test_parenthesised_equation_references_name_defined_equations(self):
-        if HELP_LAYOUT == "beats-grok":
-            self.skipTest("the short script does not number equations as (7.n)")
-        cited = set(re.findall(r"\(7\.(\d+)\)", html_text(HELP_HTML)))
+        html = CLAUDE_HTML
+        if not html or help_layout(html) != "beats":
+            self.skipTest("long Beats Help is not on the search path")
+        cited = set(re.findall(r"\(7\.(\d+)\)", html_text(html)))
         self.assertTrue(cited)
         self.assertTrue(cited <= {str(n) for n in range(1, 8)}, cited)
+        self.assertNotIn("7.9", cited)
 
     def test_experiments_are_numbered_consecutively_and_titled_in_order(self):
         if HELP_LAYOUT == "beats-grok":
@@ -2390,9 +2406,10 @@ class HelpCommandTests(unittest.TestCase):
         self.assertEqual(rows[0][1:4], ["unavailable"] * 3)
 
     def test_checkpoint_excerpt_matches_the_real_default_output(self):
-        if HELP_LAYOUT == "beats-grok":
-            self.skipTest("the short script does not pre-print the checkpoint table")
-        block = re.search(r"<pre><code>(Atmospheric checkpoints.*?)</code></pre>", HELP_HTML, re.DOTALL)
+        html = CLAUDE_HTML
+        if not html or help_layout(html) != "beats":
+            self.skipTest("long Beats Help is not on the search path")
+        block = re.search(r"<pre><code>(Atmospheric checkpoints.*?)</code></pre>", html, re.DOTALL)
         self.assertIsNotNone(block)
         shown = [line.split() for line in html_module.unescape(block.group(1)).splitlines()
                  if line.strip() and line.strip() != "..."]
@@ -2401,6 +2418,9 @@ class HelpCommandTests(unittest.TestCase):
         actual = [line.split() for line in printed[start:]]
         self.assertGreaterEqual(len(shown), 4)
         self.assertEqual(shown, actual[: len(shown)])
+        excerpt = html_module.unescape(block.group(1))
+        self.assertIn("0.36184", excerpt)
+        self.assertNotIn("0.36148", excerpt)
 
     def test_table_is_the_same_for_every_output_type_and_has_five_significant_figures(self):
         tables = {mode: table_rows(run_main(["--output_type", mode]))
@@ -2631,7 +2651,9 @@ class BeatQuotedNumberTests(unittest.TestCase):
             f"of about {round(ratio, -2):.0f} from 200 km ({rows[200000.0][1]} Pa) to 500 km "
             f"({rows[500000.0][1]} Pa)",
             "cooling to 186.95 K at 86 km",
+            "cooling to 216.65 K at 11019 m",
         )
+        self.assertAbsent(4, "cooling to 261.65 K at 11019 m")
         second = self.rows(["--h_points", "0,50000,100000", "--T_points", "288,200,350"])
         pressure_ratio = float(second[50000.0][1]) / float(second[100000.0][1])
         density_ratio = float(second[50000.0][2]) / float(second[100000.0][2])
@@ -3003,6 +3025,11 @@ class ExperimentTextTests(unittest.TestCase):
         self.assertIn(f"{rows[86000.0].pressure / USSA_1976['layers'][-1][3]:.3f} of the standard atmosphere", text)
         self.assertIn("g_here = g * (R / (R + alt[j - 1])) ** 2", experiments)
         self.assertIn("receives", text)
+        constant_p11 = f"{constant_rows[11019.0].pressure:.5g}"
+        above = 100.0 * (float(p11) / float(constant_p11) - 1.0)
+        self.assertAlmostEqual(above, 0.27, delta=0.02)
+        self.assertIn(f"{above:.2f}% above the constant-gravity {constant_p11} Pa", text)
+        self.assertNotIn("0.72% above", text)
 
     def test_every_mars_example_uses_the_same_surface_gravity(self):
         sources = {
@@ -3124,10 +3151,83 @@ class GrokQuotedClaimTests(unittest.TestCase):
         self.assertTrue("50,000" in self.text or "50 000" in self.text)
         self.assertIn("Python 3.10", self.text)
         self.assertIn("Numerical top", self.text)
+        self.assertIn("last stored altitude", self.text)
+        self.assertNotIn("first stored altitude", self.text)
+        self.assertIn("unless every step in that pass was already shorter", self.text)
+        self.assertIn("raises a budget error", self.text)
 
     def test_a_wrong_scale_height_in_the_short_help_is_detected(self):
         self.assertNotIn("8.34 km", self.text)
         self.assertNotIn("H_min}/100", self.html)
+
+
+class GoverningEquationAuditTests(unittest.TestCase):
+    """Each active Help states the hydrostatic and gas-law equations with the right sign."""
+
+    def _help_pages(self):
+        pages = []
+        if GROK_HTML:
+            pages.append(("Atmosphere-grok.html", GROK_HTML))
+        if CLAUDE_HTML:
+            pages.append(("Atmosphere-claude.html", CLAUDE_HTML))
+        if not pages:
+            self.skipTest("no Beats Help file is on the search path")
+        return pages
+
+    def test_displayed_hydrostatic_equation_has_the_minus_sign(self):
+        for name, html in self._help_pages():
+            with self.subTest(help=name):
+                compact = html.replace(" ", "")
+                self.assertIn(r"\frac{dp}{dh}=-g\,\rho", compact)
+                self.assertNotIn(r"\frac{dp}{dh}=+g\,\rho", compact)
+                self.assertNotIn(r"\frac{dp}{dh}=g\,\rho", compact)
+
+    def test_first_euler_step_matches_minus_g_rho(self):
+        """Independent first-step slope on an isothermal column equals -g rho0."""
+        result = AtmosphereModel(
+            make_params(h_points=[0.0, 100_000.0], T_points=[288.15, 288.15])
+        ).run()
+        dh = result.altitudes[1] - result.altitudes[0]
+        slope = (result.pressures[1] - result.pressures[0]) / dh
+        expected = -9.81 * result.densities[0]
+        self.assertAlmostEqual(slope, expected, delta=1e-12)
+        self.assertLess(slope, 0.0)
+        self.assertLess(result.pressures[1], result.pressures[0])
+        scale = 288.15 * phys.K_BOLTZMANN / (9.81 * 28.97 * phys.ATOMIC_MASS_UNIT)
+        self.assertAlmostEqual(dh, scale / 200.0, delta=1e-9)
+
+    def test_gas_law_scale_height_and_euler_update_are_stated(self):
+        for name, html in self._help_pages():
+            with self.subTest(help=name):
+                compact = re.sub(r"\s+", "", html)
+                self.assertIn(r"\rho=\frac{p\,\mu\,m_u}{k_B\,T", compact)
+                self.assertIn(r"H=\frac{p_0}{g\,\rho_0}=\frac{k_B\,T_0}{g\,\mu\,m_u}", compact)
+                self.assertIn(r"\frac{dp}{dh}=-\frac{g\,\mu\,m_u}{k_B\,T(h)}\,p", compact)
+                self.assertRegex(compact, r"T=\\beta\\,p")
+                self.assertIn(r"\alpha=0.5", compact)
+        if CLAUDE_HTML:
+            compact = re.sub(r"\s+", "", CLAUDE_HTML)
+            self.assertIn(r"p_j=p_{j-1}-g\,\rho_{j-1}\,\Deltah", compact)
+            self.assertNotIn(r"p_j=p_{j-1}+g\,\rho_{j-1}\,\Deltah", compact)
+
+    def test_gas_law_and_scale_height_hold_at_the_surface_and_fail_when_misread(self):
+        result = AtmosphereModel(make_params()).run()
+        p0, rho0, t0 = result.pressures[0], result.densities[0], result.temperatures[0]
+        predicted = p0 * 28.97 * phys.ATOMIC_MASS_UNIT / (phys.K_BOLTZMANN * t0)
+        self.assertAlmostEqual(rho0, predicted, delta=1e-12 * rho0)
+        scale = t0 * phys.K_BOLTZMANN / (9.81 * 28.97 * phys.ATOMIC_MASS_UNIT)
+        self.assertAlmostEqual(p0 / (9.81 * rho0), scale, delta=1e-12 * scale)
+        self.assertLess(result.pressures[1], p0)
+
+    def test_upper_closure_does_not_apply_inside_the_supplied_profile(self):
+        profile = TemperatureProfile([0.0, 1000.0], [300.0, 350.0])
+        inside = profile.get_temp(500.0, 80_000.0)
+        self.assertAlmostEqual(inside, 325.0)
+        self.assertFalse(profile.reached_top)
+        above = profile.get_temp(1001.0, 80_000.0)
+        self.assertEqual(above, 350.0)
+        later = profile.get_temp(2000.0, 20_000.0)
+        self.assertAlmostEqual(later, profile.beta * (20_000.0 ** 0.5))
 
 
 class DualHelpFileTests(unittest.TestCase):
