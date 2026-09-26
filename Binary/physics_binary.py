@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from math import frexp, fsum, hypot, isfinite, ldexp, pi, sqrt
 from numbers import Real
 
-MODEL_VERSION = "1.2.3"
+MODEL_VERSION = "1.2.4"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -108,17 +108,17 @@ def orbital_elements(MA: float, MB: float, xA: float, yA: float,
     if not all(isfinite(z) for z in (vx, vy, mu)) or mu <= 0:
         raise ValueError("Orbital elements are outside the numerical range.")
     v2 = _scaled_sum_of_squares(vx, vy)
-    rv = _scaled_dot(rx, ry, vx, vy)
     h = _scaled_cross(rx, ry, vx, vy)
+    if h == 0.0:
+        # Zero angular momentum is a straight-line (radial) path. Classification
+        # does not need the radial product r·v, which can overflow a double
+        # even when every input is finite and the requested e = 1 is exact.
+        return OrbitalElements("radial", 1.0, None, None,
+                               None, None, None, None)
+    rv = _scaled_dot(rx, ry, vx, vy)
     specific_energy = _specific_orbital_energy(v2, mu, r)
     if not all(isfinite(z) for z in (v2, rv, h, specific_energy)):
         raise ValueError("Orbital elements are outside the numerical range.")
-    if h == 0.0:
-        # Zero angular momentum: a straight-line (radial) path, inward or outward,
-        # has no periapsis or apsidal speed in the usual sense.
-        # e = |v^2 r / mu - 1| remains representable when the energy form is not.
-        return OrbitalElements("radial", 1.0, None, None,
-                               None, None, None, None)
     eccentricity = _eccentricity_magnitude(v2, mu, r, rx, ry, rv, vx, vy, h, specific_energy)
     # Treat roundoff at escape energy as a parabola.
     energy_tolerance = 1e-12 * mu / r

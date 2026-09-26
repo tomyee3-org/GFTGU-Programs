@@ -79,23 +79,24 @@ def find_help_files(module_dir: Path) -> list[Path]:
     return found
 
 
-def find_help_file(module_dir: Path) -> Path:
-    """Return the canonical Beats Help (Claude or live ``Binary.html``)."""
+def find_help_file(module_dir: Path):
+    """Return the dense Beats Help, or None if only Grok (or nothing) is present.
+
+    ``Binary-grok.html`` is never the canonical file. Physics tests must still
+    import when Help is missing; Help-contract classes skip in that layout.
+    A second copy of the same filename beside the program is allowed for a
+    packaged zip and is not required in a normal Programs/Documentation split.
+    """
     found = find_help_files(module_dir)
     preferred = [path for path in found if path.name != "Binary-grok.html"]
-    chosen = preferred[0] if preferred else (found[0] if found else None)
-    if chosen is None:
-        raise FileNotFoundError(
-            "Could not find Binary-claude.html, Binary.html or Binary-grok.html "
-            "beside the program or in GFTGU-Documentation/Binary/."
-        )
-    return chosen
+    return preferred[0] if preferred else None
 
 
 MODULE_DIR = find_module_dir(Path(__file__))
 HELP_FILES = find_help_files(MODULE_DIR)
 HELP_FILE = find_help_file(MODULE_DIR)
 GROK_HELP_FILE = next((path for path in HELP_FILES if path.name == "Binary-grok.html"), None)
+DENSE_HELP_PRESENT = HELP_FILE is not None
 if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 os.environ.setdefault("MPLBACKEND", "Agg")
@@ -1331,8 +1332,8 @@ class TestCommandLineAndSummary(unittest.TestCase):
 class TestHelpFile(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        if not HELP_FILE.is_file():
-            raise AssertionError(f"Required Help file not found: {HELP_FILE}")
+        if HELP_FILE is None or not HELP_FILE.is_file():
+            raise unittest.SkipTest("dense Help (Binary-claude.html or Binary.html) is not present")
         cls.html = HELP_FILE.read_text(encoding="utf-8")
         cls.prose = re.sub(r"\s+", " ", cls.html)
         cls.contract = HelpContractParser()
@@ -1499,7 +1500,7 @@ class TestHelpFile(unittest.TestCase):
     def test_no_development_history(self):
         for pattern in (
             r"\bAI-generated\b", r"\bChatGPT\b", r"\bClaude\b",
-            r"\bCopilot\b", r"\bGemini\b", r"\bported from\b",
+            r"\bCopilot\b", r"\bGemini\b", r"\bGrok\b", r"\bported from\b",
             r"\bporting history\b", r"\bbug fix history\b",
         ):
             self.assertIsNone(re.search(pattern, self.html, re.IGNORECASE))
@@ -2144,6 +2145,17 @@ class TestElementsWithoutFalseRangeErrors(unittest.TestCase):
         self.assertIsNone(elements.relative_periapsis)
         self.assertIsNone(elements.relative_speed_periapsis)
 
+    def test_radial_elements_do_not_need_a_finite_radial_dot_product(self):
+        """h = 0 is enough; r·v may overflow a double (Codex Audit41 P2-02)."""
+        self.assertTrue(math.isinf(1e160 * 1e149))
+        elements = physics.orbital_elements(
+            1e8, 1e8, 1e160, 0.0, 1e149, 0.0, 0.0, 0.0, 0.0, 0.0
+        )
+        self.assertEqual(elements.kind, "radial")
+        self.assertEqual(elements.eccentricity, 1.0)
+        self.assertIsNone(elements.period)
+        self.assertIsNone(elements.relative_periapsis)
+
     def test_tiny_needle_ellipse_does_not_divide_by_zero(self):
         elements = physics.orbital_elements(
             7.49e307, 7.49e307, 5e-11, 0.0, 0.0, 0.5, -5e-11, 0.0, 0.0, -0.5
@@ -2209,6 +2221,18 @@ class TestPrintedSummaryLines(unittest.TestCase):
         self.assertIn("Initial Keplerian orbit: hyperbolic; eccentricity: 1.0002e+253", printed)
         self.assertNotIn("outside the numerical range", printed)
 
+    def test_overflowing_radial_dot_product_still_prints_a_radial_summary(self):
+        printed = printed_run([
+            "--MA", "1e8", "--MB", "1e8",
+            "--xInitA", "1e160", "--xInitB", "0",
+            "--vInitA", "1e149", "--vInitB", "0",
+            "--uInitA", "0", "--uInitB", "0",
+            "--dt", "1e-3", "--max_steps", "2", "--no-stop_after_one_orbit",
+        ])
+        self.assertIn("Initial Keplerian orbit: radial; eccentricity: 1", printed)
+        self.assertIn("Accepted steps: 2", printed)
+        self.assertNotIn("outside the numerical range", printed)
+
     def test_radial_start_line_is_true_for_outward_and_inward_motion(self):
         message = "Radial trajectory (zero angular momentum): apsides and period are undefined."
         outward = printed_run(["--vInitA", "60000", "--vInitB", "-60000", "--uInitA", "0",
@@ -2230,7 +2254,7 @@ class TestPrintedSummaryLines(unittest.TestCase):
 # Help layout awareness, structure, commands and printed excerpt.
 # ---------------------------------------------------------------------------
 
-HELP_HTML = HELP_FILE.read_text(encoding="utf-8")
+HELP_HTML = HELP_FILE.read_text(encoding="utf-8") if HELP_FILE is not None else ""
 
 
 def help_layout(html):
@@ -2244,9 +2268,13 @@ def help_layout(html):
     return "unrecognised"
 
 
-HELP_LAYOUT = help_layout(HELP_HTML)
+HELP_LAYOUT = help_layout(HELP_HTML) if HELP_HTML else "unrecognised"
 needs_beats = unittest.skipUnless(
     HELP_LAYOUT == "beats", "the Beats-only assertions apply to the Beats layout"
+)
+needs_dense_help = unittest.skipUnless(
+    DENSE_HELP_PRESENT,
+    "dense Help (Binary-claude.html or Binary.html) is not present",
 )
 
 
@@ -2334,15 +2362,19 @@ def documented_commands(html):
 
 
 class TestBothHelpFiles(unittest.TestCase):
-    """Claude and Grok Beats files share stamps, beats and runnable commands."""
+    """Claude and Grok Beats files share stamps; Grok is optional."""
 
     def test_canonical_help_is_the_dense_file_when_both_are_present(self):
+        if HELP_FILE is None:
+            self.skipTest("dense Help is not present")
         self.assertTrue(HELP_FILE.is_file())
         self.assertNotEqual(HELP_FILE.name, "Binary-grok.html")
 
     def test_grok_help_is_discovered_beside_the_canonical_file(self):
         if GROK_HELP_FILE is None:
             self.skipTest("Binary-grok.html is not in the documentation tree")
+        if HELP_FILE is None:
+            self.skipTest("dense Help is not present; Grok-only is not the release layout")
         self.assertTrue(GROK_HELP_FILE.is_file())
         self.assertEqual(GROK_HELP_FILE.parent, HELP_FILE.parent)
         names = {path.name for path in HELP_FILES}
@@ -2350,17 +2382,18 @@ class TestBothHelpFiles(unittest.TestCase):
         self.assertTrue({"Binary-claude.html", "Binary.html"} & names)
 
     def test_every_beats_help_carries_the_live_version_and_build(self):
-        files = [HELP_FILE]
-        if GROK_HELP_FILE is not None:
-            files.append(GROK_HELP_FILE)
+        files = [path for path in (HELP_FILE, GROK_HELP_FILE) if path is not None]
+        if not files:
+            self.skipTest("no Beats Help file is on the search path")
         pattern = re.compile(
-            r"Version\s+([0-9]+\.[0-9]+\.[0-9]+)\s+(?:&nbsp;\s*)*Build\s+([0-9a-f]{12})",
+            r"Version\s+([0-9]+\.[0-9]+\.[0-9]+)\s+Build\s+([0-9a-f]{12})",
             flags=re.IGNORECASE,
         )
         for path in files:
             with self.subTest(path=path.name):
-                html = html_module.unescape(path.read_text(encoding="utf-8"))
-                match = pattern.search(re.sub(r"\s+", " ", html))
+                html = path.read_text(encoding="utf-8")
+                collapsed = html_module.unescape(re.sub(r"\s+", " ", html))
+                match = pattern.search(collapsed)
                 self.assertIsNotNone(match)
                 self.assertEqual(match.group(1), physics.MODEL_VERSION)
                 self.assertEqual(match.group(2), physics.BUILD_ID)
@@ -2382,7 +2415,7 @@ class TestBothHelpFiles(unittest.TestCase):
                 self.assertIn(phrase, html)
         for pattern in (
             r"\bAI-generated\b", r"\bChatGPT\b", r"\bClaude\b",
-            r"\bCopilot\b", r"\bGemini\b",
+            r"\bCopilot\b", r"\bGemini\b", r"\bGrok\b",
         ):
             self.assertIsNone(re.search(pattern, html, re.IGNORECASE))
 
@@ -2397,6 +2430,71 @@ class TestBothHelpFiles(unittest.TestCase):
                 entry.parse_args(argv)
 
 
+class TestGrokQuotedFacts(unittest.TestCase):
+    """Physics quoted in the short Help, bound to Grok's own Beats.
+
+    These pins stay on Binary-grok.html. They do not copy Claude's
+    lab-manual sections. A governing-law mutant (r^2 -> r^3 in Beat 0)
+    must fail this class.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if GROK_HELP_FILE is None or not GROK_HELP_FILE.is_file():
+            raise unittest.SkipTest("Binary-grok.html is not in the documentation tree")
+        cls.html = GROK_HELP_FILE.read_text(encoding="utf-8")
+        cls.beat0 = html_text(section_html(cls.html, "beat0"))
+        cls.beat4 = html_text(section_html(cls.html, "beat4"))
+        cls.beat5 = html_text(section_html(cls.html, "beat5"))
+        cls.beat6 = html_text(section_html(cls.html, "beat6"))
+        cls.experiments = html_text(section_html(cls.html, "experiments"))
+
+    def test_beat_0_states_inverse_square_not_inverse_cube(self):
+        html = section_html(self.html, "beat0")
+        self.assertRegex(html, r"F\s*=\s*\\frac\{GM_A M_B\}\{r\^2\}")
+        self.assertNotRegex(html, r"F\s*=\s*\\frac\{GM_A M_B\}\{r\^3\}")
+        self.assertIn("cuts it to a quarter", self.beat0)
+        self.assertNotIn("one eighth", self.beat0)
+        self.assertIn("6.67430", self.beat0)
+
+    def test_beat_4_hodograph_and_apsidal_product(self):
+        html = section_html(self.html, "beat4")
+        self.assertIn(r"e=\frac{v_p-v_a}{v_p+v_a}", html.replace(" ", ""))
+        self.assertNotIn(r"e=\frac{v_a-v_p}{v_p+v_a}", html.replace(" ", ""))
+        self.assertIn("r_p v_p=r_a v_a", self.beat4)
+
+    def test_beat_5_and_6_name_the_corrector_and_the_step_growth(self):
+        self.assertIn("about the centre of mass", self.beat5)
+        self.assertIn("at or near closest approach", self.beat5)
+        self.assertNotIn("the dip there barely moves", self.beat5)
+        self.assertIn("grow 10 per cent toward the ceiling", self.beat6.replace("  ", " "))
+        self.assertIn("10^{-12}", self.html)
+
+    def test_experiment_4_uses_the_relative_escape_speed(self):
+        text = self.experiments
+        self.assertIn("38091.14", text)
+        self.assertNotIn("reduced mass", text)
+        self.assertRegex(text, r"2G\(M_A\+M_B\)")
+        # The printed 38091.14 m/s is half the relative escape speed
+        # for the equal-mass Beat 3 start, not sqrt(2GM/r) with one mass.
+        mu = physics.G * (2e30 + 2e30)
+        relative = math.sqrt(2.0 * mu / 9.2e10)
+        each = 0.5 * relative
+        self.assertAlmostEqual(each / 38091.14, 1.0, delta=2e-7)
+        one_mass = math.sqrt(2.0 * physics.G * 2e30 / 9.2e10)
+        self.assertGreater(abs(one_mass - 38091.14) / 38091.14, 0.3)
+        # Unequal masses: reduced-mass square root matches neither body.
+        reduced = (2e30 * 1e30) / 3e30
+        bogus = math.sqrt(2.0 * physics.G * reduced / 9.2e10)
+        v_rel = math.sqrt(2.0 * physics.G * 3e30 / 9.2e10)
+        self.assertGreater(abs(bogus - (1e30 / 3e30) * v_rel) / v_rel, 0.1)
+
+    def test_experiment_6_does_not_send_the_student_to_e_near_one(self):
+        self.assertIn("Orbit", self.experiments)
+        self.assertIn("17000", self.experiments)
+        self.assertNotIn("--MB 2e32 and put B at the origin at rest.", self.experiments)
+
+
 class HelpLayoutRecogniserTests(unittest.TestCase):
     def test_recogniser_classifies_synthetic_pages(self):
         beats = '<section id="overview"></section><section id="beats"></section><section id="beat0"></section>'
@@ -2409,9 +2507,12 @@ class HelpLayoutRecogniserTests(unittest.TestCase):
         self.assertEqual(help_layout(""), "unrecognised")
 
     def test_shipped_help_has_a_recognised_layout(self):
+        if not DENSE_HELP_PRESENT:
+            self.skipTest("dense Help is not present")
         self.assertIn(HELP_LAYOUT, ("beats", "classic"))
 
 
+@needs_dense_help
 class HelpStructureTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -2467,6 +2568,7 @@ class HelpStructureTests(unittest.TestCase):
         self.assertTrue(cited <= set(range(1, 11)), sorted(cited))
 
 
+@needs_dense_help
 class HelpCommandTests(unittest.TestCase):
     """Every command printed in the Help must parse and run."""
 
