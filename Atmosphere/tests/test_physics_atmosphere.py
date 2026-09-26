@@ -3188,63 +3188,89 @@ def body_html_without_scripts(html):
     return re.sub(r"<script\b[^>]*>.*?</script>", "", html, flags=re.DOTALL | re.IGNORECASE)
 
 
+def normalize_tex_layout(block):
+    """Collapse wrapping and indentation only.
+
+    Spaces that sit inside a line are kept, so a broken control word such as
+    ``\\fr ac`` is not joined back into ``\\frac``.
+    """
+    return " ".join(line.strip() for line in block.splitlines() if line.strip())
+
+
+def compact_tex(text):
+    """Remove every whitespace character.  Used only for factor/sign searches."""
+    return re.sub(r"\s+", "", text)
+
+
 def display_math_blocks(html):
-    """Whitespace-stripped text of every displayed ``\\[ ... \\]`` block.
+    """Layout-normalized text of every displayed ``\\[ ... \\]`` block.
 
     Script tags are dropped first.  HTML entities are unescaped so a range
-    written ``h &lt; h_i`` is compared as ``h<h_i``.
+    written ``h &lt; h_i`` is compared as ``h < h_i``.  Newlines and
+    indentation are folded to a single space; spaces that split a TeX
+    control sequence are kept.
     """
     body = html_module.unescape(body_html_without_scripts(html))
-    return [re.sub(r"\s+", "", block) for block in re.findall(r"\\\[(.*?)\\\]", body, re.DOTALL)]
+    return [normalize_tex_layout(block) for block in re.findall(r"\\\[(.*?)\\\]", body, re.DOTALL)]
 
 
 def inline_math_blocks(html):
-    """Whitespace-stripped text of every inline ``\\( ... \\)`` expression."""
+    """Layout-normalized text of every inline ``\\( ... \\)`` expression."""
     body = html_module.unescape(body_html_without_scripts(html))
-    return [re.sub(r"\s+", "", block) for block in re.findall(r"\\\((.*?)\\\)", body, re.DOTALL)]
+    return [normalize_tex_layout(block) for block in re.findall(r"\\\((.*?)\\\)", body, re.DOTALL)]
 
 
-# Golden displayed blocks.  Update the matching Help in the same edit.
+# Golden displayed blocks after layout normalization.  Update the Help
+# in the same edit if an equation is intentionally reworded.
 GROK_DISPLAYED_EQUATIONS = (
-    r"\frac{dp}{dh}=-g\,\rho.",
-    r"\rho=\frac{p\,\mu\,m_u}{k_B\,T},\qquad\frac{dp}{dh}=-\frac{g\,\mu\,m_u}{k_B\,T(h)}\,p.",
-    r"p=p_0\,e^{-h/H},\qquadH=\frac{p_0}{g\,\rho_0}=\frac{k_B\,T_0}{g\,\mu\,m_u}.",
-    r"H\propto\frac{T}{\mu\,g}.",
-    r"T(h)=T_{i-1}+\frac{T_i-T_{i-1}}{h_i-h_{i-1}}\,(h-h_{i-1}),\qquadh_{i-1}\leh<h_i.",
-    r"\frac{p_{\mathrm{Euler}}}{p_{\mathrm{exact}}}\approx1-\frac{h/H}{2N}.",
-    r"T=\beta\,p^{\alpha},\qquad\alpha=0.5.",
+    r"\frac{dp}{dh} = -g\,\rho.",
+    r"\rho = \frac{p\,\mu\,m_u}{k_B\,T}, \qquad \frac{dp}{dh} = -\frac{g\,\mu\,m_u}{k_B\,T(h)}\,p.",
+    r"p = p_0\,e^{-h/H}, \qquad H = \frac{p_0}{g\,\rho_0} = \frac{k_B\,T_0}{g\,\mu\,m_u}.",
+    r"H \propto \frac{T}{\mu\,g}.",
+    r"T(h) = T_{i-1} + \frac{T_i-T_{i-1}}{h_i-h_{i-1}}\,(h-h_{i-1}), \qquad h_{i-1}\le h<h_i.",
+    r"\frac{p_{\mathrm{Euler}}}{p_{\mathrm{exact}}}\approx 1-\frac{h/H}{2N}.",
+    r"T=\beta\,p^{\alpha},\qquad \alpha=0.5.",
 )
 CLAUDE_DISPLAYED_EQUATIONS = (
-    r"\frac{dp}{dh}=-g\,\rho\tag{7.1}",
-    r"\rho=\frac{p\,\mu\,m_u}{k_B\,T}\tag{7.2}",
-    r"\frac{dp}{dh}=-\frac{g\,\mu\,m_u}{k_B\,T(h)}\,p\tag{7.3}",
-    r"p=p_0\,e^{-h/H}",
-    r"H=\frac{p_0}{g\,\rho_0}=\frac{k_B\,T_0}{g\,\mu\,m_u}\tag{7.4}",
-    r"H\;\propto\;\frac{T}{\mu\,g}",
-    r"T(h)=T_{i-1}+\frac{T_i-T_{i-1}}{h_i-h_{i-1}}\,(h-h_{i-1}),\qquadh_{i-1}\leh<h_i\tag{7.5}",
-    r"\frac{p_{\text{Euler}}}{p_{\text{exact}}}\;\approx\;1-\frac{h/H}{2N},\qquadN=\frac{H}{\Deltah}=200",
-    r"T=\beta\,p^{\,\alpha},\qquad\alpha=0.5\tag{7.6}",
-    r"p_j=p_{j-1}-g\,\rho_{j-1}\,\Deltah\tag{7.7}",
+    r"\frac{dp}{dh} = -g\,\rho \tag{7.1}",
+    r"\rho = \frac{p\,\mu\,m_u}{k_B\,T} \tag{7.2}",
+    r"\frac{dp}{dh} = -\frac{g\,\mu\,m_u}{k_B\,T(h)}\,p \tag{7.3}",
+    r"p = p_0\,e^{-h/H}",
+    r"H = \frac{p_0}{g\,\rho_0} = \frac{k_B\,T_0}{g\,\mu\,m_u} \tag{7.4}",
+    r"H \;\propto\; \frac{T}{\mu\,g}",
+    r"T(h) = T_{i-1} + \frac{T_i - T_{i-1}}{h_i - h_{i-1}}\,(h - h_{i-1}), \qquad h_{i-1} \le h < h_i \tag{7.5}",
+    r"\frac{p_{\text{Euler}}}{p_{\text{exact}}} \;\approx\; 1 - \frac{h/H}{2N}, \qquad N = \frac{H}{\Delta h} = 200",
+    r"T = \beta\,p^{\,\alpha}, \qquad \alpha = 0.5 \tag{7.6}",
+    r"p_j = p_{j-1} - g\,\rho_{j-1}\,\Delta h \tag{7.7}",
 )
 
-# Student-facing inline relations that state a physical law or a numerical rule.
-GROK_INLINE_RELATIONS = (
-    r"H=p_0/(g\rho_0)",
-    r"N=H/\Deltah=200",
-    r"\rho_2/\rho_1=(p_2/p_1)\,(T_1/T_2)",
-    r"H_{\min}/200",
-)
-CLAUDE_INLINE_RELATIONS = (
-    r"\Deltah=H_{\min}/200",
-    r"\ln(p_0/p)/400",
-    r"\rho\proptop/T",
-    r"p(h)=p_0\exp(-h/H)",
-    r"H=k_BT/(g\mum_u)",
-    r"\ln(p_1/p_0)=-(g\mum_u/k_B)\,\Deltah/T",
-    r"\ln(p_1/p_0)=-(g\mum_u/k_B)\,[\Deltah/(T_1-T_0)]\,\ln(T_1/T_0)",
-    r"g(h)=g_0[R/(R+h)]^2",
-    r"dp/dr=-GM(r)\,\rho/r^2",
-)
+# Layout-normalized inline relations and how many times each must appear.
+# Spaces inside a relation are part of the pin, so "/2 00" is not "/200".
+GROK_INLINE_COUNTS = {
+    r"H=p_0/(g\rho_0)": 1,
+    r"N=H/\Delta h=200": 1,
+    r"\rho_2/\rho_1=(p_2/p_1)\,(T_1/T_2)": 1,
+    r"H_{\min}/200": 2,
+    r"e^{-\Delta h/H}": 1,
+    r"p_0=101300\,\mathrm{Pa}": 1,
+}
+CLAUDE_INLINE_COUNTS = {
+    r"\Delta h = H_{\min}/200": 3,
+    r"\ln(p_0/p)/400": 1,
+    r"\rho \propto p/T": 1,
+    r"\rho\propto p/T": 1,
+    r"p(h)=p_0\exp(-h/H)": 1,
+    r"H=k_BT/(g\mu m_u)": 1,
+    r"\ln(p_1/p_0) = -(g\mu m_u/k_B)\,[\Delta h/(T_1-T_0)]\,\ln(T_1/T_0)": 1,
+    r"\ln(p_1/p_0) = -(g\mu m_u/k_B)\,\Delta h/T": 1,
+    r"g(h)=g_0[R/(R+h)]^2": 1,
+    r"dp/dr = -G M(r)\,\rho/r^2": 1,
+    r"e^{-\Delta h/H}": 1,
+    r"H \propto T/(\mu g)": 1,
+    r"H\propto T/(\mu g)": 1,
+    r"\rho = p\,\mu\,m_u\,/\,(k_B\,T)": 1,
+    r"T = \beta\,p^{0.5}": 1,
+}
 
 
 class GoverningEquationAuditTests(unittest.TestCase):
@@ -3273,7 +3299,7 @@ class GoverningEquationAuditTests(unittest.TestCase):
     def test_displayed_hydrostatic_equation_has_the_minus_sign(self):
         for name, html in self._help_pages():
             with self.subTest(help=name):
-                blocks = "\n".join(display_math_blocks(html))
+                blocks = compact_tex("\n".join(display_math_blocks(html)))
                 self.assertIn(r"\frac{dp}{dh}=-g\,\rho", blocks)
                 self.assertNotIn(r"\frac{dp}{dh}=+g\,\rho", blocks)
                 self.assertNotRegex(blocks, r"\\frac\{dp\}\{dh\}=g\\,\\rho")
@@ -3306,7 +3332,7 @@ class GoverningEquationAuditTests(unittest.TestCase):
         self.assertAlmostEqual(printed_ratio, 0.3862, delta=0.001)
         for name, html in self._help_pages():
             with self.subTest(help=name):
-                blocks = "\n".join(display_math_blocks(html))
+                blocks = compact_tex("\n".join(display_math_blocks(html)))
                 self.assertIn(r"p=p_0\,e^{-h/H}", blocks)
                 self.assertNotIn(r"p=p_0\,e^{+h/H}", blocks)
                 self.assertNotIn(r"p=p_0\,e^{h/H}", blocks)
@@ -3332,13 +3358,12 @@ class GoverningEquationAuditTests(unittest.TestCase):
         self.assertEqual(driver.STEPS_PER_SCALE_HEIGHT, 200)
         for name, html in self._help_pages():
             with self.subTest(help=name):
-                blocks = display_math_blocks(html)
+                blocks = [compact_tex(block) for block in display_math_blocks(html)]
                 joined = "\n".join(blocks)
                 self.assertIn(r"\frac{dp}{dh}=-\frac{g\,\mu\,m_u}{k_B\,T(h)}\,p", joined)
                 self.assertNotIn(r"\frac{dp}{dh}=+\frac{g\,\mu\,m_u}{k_B\,T(h)}\,p", joined)
                 self.assertIn(r"H=\frac{p_0}{g\,\rho_0}=\frac{k_B\,T_0}{g\,\mu\,m_u}", joined)
                 self.assertNotIn(r"H=\frac{p_0}{\rho_0}", joined)
-                self.assertNotIn(r"\frac{k_B\,T_0\,\mu}{g\,\m_u}", joined)
                 self.assertNotIn(r"\frac{k_B\,T_0}{2g\,\mu\,m_u}", joined)
                 self.assertIn(r"T_i-T_{i-1}", joined)
                 self.assertNotIn(r"T_i+T_{i-1}", joined)
@@ -3361,7 +3386,7 @@ class GoverningEquationAuditTests(unittest.TestCase):
                 self.assertTrue(any(r"\alpha=0.5" in block for block in blocks), name)
                 self.assertFalse(any(r"\alpha=0.4" in block or r"\alpha=0.25" in block or r"\alpha=2" in block for block in blocks))
         if CLAUDE_HTML:
-            blocks = display_math_blocks(CLAUDE_HTML)
+            blocks = [compact_tex(block) for block in display_math_blocks(CLAUDE_HTML)]
             euler = [block for block in blocks if r"\tag{7.7}" in block]
             self.assertEqual(len(euler), 1)
             self.assertIn(r"p_j=p_{j-1}-g\,\rho_{j-1}\,\Deltah", euler[0])
@@ -3375,44 +3400,57 @@ class GoverningEquationAuditTests(unittest.TestCase):
         scale = 288.15 * phys.K_BOLTZMANN / (9.81 * 28.97 * phys.ATOMIC_MASS_UNIT)
         self.assertAlmostEqual(scale, 8430.15, delta=0.01)
         self.assertAlmostEqual(math.exp(-8000.0 / scale), 0.38714, delta=1e-5)
-        self.assertAlmostEqual(math.exp(-8000.0 / (scale / 2.0)), 0.14988, delta=1e-4)
         profile = TemperatureProfile([0.0, 100.0], [300.0, 350.0])
         self.assertAlmostEqual(profile.get_temp(50.0, 1e5), 325.0)
         self.assertAlmostEqual(profile.get_temp(100.0, 1e5), 350.0)
-        # Mutating T_i - T_{i-1} to T_i + T_{i-1} would give 625 K and 950 K.
-        self.assertNotAlmostEqual(325.0, 300.0 + (350.0 + 300.0) / 100.0 * 50.0)
-        anchor_t, ratio = 350.0, 0.25
-        self.assertAlmostEqual(anchor_t * (ratio ** 0.5), 175.0)
-        self.assertAlmostEqual(anchor_t * (ratio ** 0.4), 350.0 * (0.25 ** 0.4), delta=1e-9)
-        self.assertGreater(anchor_t * (ratio ** 0.4), anchor_t * (ratio ** 0.5))
+        closure = TemperatureProfile([0.0, 1000.0], [350.0, 350.0])
+        self.assertEqual(closure.power, 0.5)
+        closure.get_temp(1001.0, 80_000.0)
+        later = closure.get_temp(2000.0, 20_000.0)
+        self.assertAlmostEqual(later, 350.0 * (20_000.0 / 80_000.0) ** 0.5)
+        self.assertAlmostEqual(later, 175.0)
 
     def test_inline_physical_relations_are_present(self):
-        """Inline formulas students are told to use, not every inline fragment."""
+        """Each listed inline relation must occur the documented number of times."""
         expected = {
-            "Atmosphere-grok.html": GROK_INLINE_RELATIONS,
-            "Atmosphere-claude.html": CLAUDE_INLINE_RELATIONS,
+            "Atmosphere-grok.html": GROK_INLINE_COUNTS,
+            "Atmosphere-claude.html": CLAUDE_INLINE_COUNTS,
         }
         for name, html in self._help_pages():
             with self.subTest(help=name):
                 present = inline_math_blocks(html)
                 joined = "\n".join(present)
-                for expression in expected[name]:
-                    self.assertIn(expression, present, expression)
+                for expression, count in expected[name].items():
+                    self.assertEqual(present.count(expression), count, expression)
                 if name.endswith("grok.html"):
-                    self.assertNotIn(r"N=H/\Deltah=100", joined)
+                    self.assertNotIn(r"N=H/\Delta h=100", joined)
                     self.assertNotIn(r"\rho_2/\rho_1=(p_2/p_1)\,(T_2/T_1)", joined)
-                    self.assertNotIn(r"H=p_0g/\rho_0", joined)
-                    self.assertNotIn(r"H=p_0g\rho_0", joined)
+                    self.assertNotIn(r"H=p_0 g/\rho_0", joined)
+                    self.assertNotIn(r"e^{+\Delta h/H}", joined)
+                    self.assertNotIn(r"p_0=101000\,\mathrm{Pa}", joined)
                 else:
-                    self.assertNotIn(r"\Deltah=H_{\min}/100", joined)
+                    self.assertNotIn(r"\Delta h = H_{\min}/100", joined)
+                    self.assertNotIn(r"\Delta h = H_{\min}/150", joined)
+                    self.assertNotIn(r"\Delta h = H_{\min}/2 00", joined)
                     self.assertNotIn(r"\ln(p_0/p)/200", joined)
-                    self.assertNotIn(r"\rho\proptopT", joined)
                     self.assertNotIn(r"p(h)=p_0\exp(+h/H)", joined)
-                    self.assertNotIn(r"H=k_BT\mu/(g\m_u)", joined)
-                    self.assertNotIn(r"H=k_BT\mu/(gm_u)", joined)
                     self.assertNotIn(r"\ln(T_0/T_1)", joined)
                     self.assertNotIn(r"[R/(R-h)]^2", joined)
-                    self.assertNotIn(r"dp/dr=+GM", joined)
+                    self.assertNotIn(r"dp/dr = +G M(r)\,\rho/r^2", joined)
+                    self.assertNotIn(r"e^{+\Delta h/H}", joined)
+                    self.assertNotIn(r"T = \beta\,p^{0.4}", joined)
+
+    def test_long_help_step_rule_is_in_beat2_beat6_and_algorithm(self):
+        """The Schutz step is stated in the three places a student meets it."""
+        if not CLAUDE_HTML:
+            self.skipTest("Atmosphere-claude.html is not on the search path")
+        rule = r"\Delta h = H_{\min}/200"
+        for section_id in ("beat2", "beat6", "algorithm"):
+            with self.subTest(section=section_id):
+                present = inline_math_blocks(section_html(CLAUDE_HTML, section_id))
+                self.assertEqual(present.count(rule), 1, section_id)
+                self.assertNotIn(r"\Delta h = H_{\min}/150", present)
+                self.assertNotIn(r"\Delta h = H_{\min}/2 00", present)
 
     def test_gas_law_and_scale_height_hold_at_the_surface(self):
         result = AtmosphereModel(make_params()).run()
@@ -3470,6 +3508,7 @@ class GoverningEquationAuditTests(unittest.TestCase):
         self.assertIn("83.933", text)
         self.assertIn("0.14095", text)
         self.assertIn(phys.BUILD_ID, text)
+        self.assertIn("Guide prepared:</strong> 2026-09-26", html)
         provenance = re.search(
             r"Image provenance and compression\.</strong>\s*(.*?)</p>",
             html,
