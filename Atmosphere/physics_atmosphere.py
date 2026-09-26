@@ -84,10 +84,21 @@ class TemperatureProfile:
     _validated_token: Optional[Tuple] = field(default=None, repr=False, compare=False)
 
     def _token(self):
-        """Cheap identity of the current altitude and temperature lists."""
+        """Identity of the current altitude list, temperature list and power.
+
+        Endpoints plus a content mix of every value are included so a valid
+        in-place edit of any supplied altitude, any supplied temperature, or
+        ``power`` drops the cached upper-atmosphere coefficient.  List
+        identity is kept so replacing a list object is also visible.
+        """
         try:
             if not self.h or not self.T:
-                return ("empty", id(self.h), id(self.T))
+                return ("empty", id(self.h), id(self.T), self.power)
+            mix = hash(self.power)
+            for value in self.h:
+                mix = (mix * 1_000_003 + hash(value)) & 0xFFFFFFFFFFFF
+            for value in self.T:
+                mix = (mix * 1_000_003 + hash(value)) & 0xFFFFFFFFFFFF
             return (
                 id(self.h),
                 id(self.T),
@@ -97,6 +108,8 @@ class TemperatureProfile:
                 self.h[-1],
                 self.T[0],
                 self.T[-1],
+                self.power,
+                mix,
             )
         except (TypeError, IndexError):
             return None
@@ -122,7 +135,14 @@ class TemperatureProfile:
             )
         if not _is_finite_number(self.power) or self.power <= 0.0:
             raise ValueError("power must be a finite positive number.")
-        self._validated_token = self._token()
+        token = self._token()
+        # A valid edit of the last altitude, last temperature, or power
+        # must drop the upper-atmosphere coefficient computed from the
+        # previous lists.  Repeated calls on an unchanged profile keep it.
+        if token != self._validated_token:
+            self.reached_top = False
+            self.beta = 0.0
+        self._validated_token = token
 
     def _ensure_validated(self) -> None:
         """Re-validate whenever the profile object looks new or edited.
@@ -143,7 +163,12 @@ class TemperatureProfile:
 
         Every public call re-validates the profile, so an in-place edit of
         an interior altitude, an interior temperature, or ``power`` is
-        rejected instead of interpolating the corrupted lists.
+        rejected instead of interpolating the corrupted lists.  That
+        validation scans the lists (O(n) per public call).  The driver
+        validates once and then calls ``_temperature_at``.  A valid edit
+        of the last altitude, last temperature, or ``power`` also drops
+        the cached upper-atmosphere coefficient so the closure is
+        recomputed from the new profile.
         """
         self.validate()
         return self._temperature_at(altitude, pressure)

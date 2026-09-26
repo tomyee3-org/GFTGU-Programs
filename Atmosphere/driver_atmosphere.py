@@ -24,10 +24,13 @@ OutputType = Literal["Pressure", "Density", "Temperature"]
 STEPS_PER_SCALE_HEIGHT = 200
 MAX_STEPS = 50_000
 MAX_RETRIES = 25
-# Cap |ΔT|/min(T) across one Euler step inside the supplied profile so a
-# steep linear ramp cannot be crossed in a single sample.  Slowly varying
-# teaching profiles (the default Earth run) never hit this cap.
+# Cap |ΔT| / T_current across one Euler step inside the supplied profile
+# so a steep linear ramp cannot be crossed in a single sample.  Slowly
+# varying teaching profiles (the default Earth run) never hit this cap.
 MAX_RELATIVE_TEMP_JUMP = 0.05
+# Leave a proposed step alone when it is already a negligible fraction of
+# the local scale height.  Documented in both Help files and the Guide.
+MIN_STEP_TO_SCALE_HEIGHT = 1e-5
 
 
 @dataclass
@@ -156,9 +159,15 @@ class AtmosphereModel:
         local_scale = temperature / (
             self.params.g_accel * self.params.mu * phys.ATOMIC_MASS_UNIT / phys.K_BOLTZMANN
         )
-        if local_scale > 0.0 and proposed / local_scale < 1e-5:
+        if local_scale > 0.0 and proposed / local_scale < MIN_STEP_TO_SCALE_HEIGHT:
             return proposed
-        return proposed * MAX_RELATIVE_TEMP_JUMP / relative
+        limited = proposed * MAX_RELATIVE_TEMP_JUMP / relative
+        if not math.isfinite(limited) or limited <= 0.0:
+            raise ValueError(
+                "The temperature profile produces an altitude step "
+                "outside the usable numerical range."
+            )
+        return limited
 
     def run(self) -> AtmosphereResult:
         """
@@ -256,6 +265,7 @@ class AtmosphereModel:
             self.temp_profile.reached_top = False
             self.temp_profile.beta = 0.0
             node_index = 0
+            used_full_euler_step = False
 
             for j in range(1, max_steps):
                 step = dh
@@ -269,9 +279,12 @@ class AtmosphereModel:
                     if 0.0 < distance <= dh:
                         step = distance
                 if alt[j - 1] < self.temp_profile.h[-1]:
-                    step = self._temperature_limited_step(
+                    limited = self._temperature_limited_step(
                         alt[j - 1], Temp[j - 1], step, p[j - 1]
                     )
+                    step = limited
+                if step >= dh:
+                    used_full_euler_step = True
                 alt[j] = alt[j - 1] + step
                 if not math.isfinite(alt[j]):
                     raise RuntimeError("Altitude overflowed during integration.")
@@ -302,9 +315,17 @@ class AtmosphereModel:
                 rho[j] = ideal_gas_density(p[j], mu, Temp[j])
 
             # If still zero, all steps were used without crossing zero pressure.
-            # Doubling dh does not enlarge a temperature-capped step, but it
-            # still helps a tall profile whose first pass was not capped.
+            # Doubling dh cannot enlarge a pass whose every step was already
+            # shorter than dh (temperature cap or a closer breakpoint).
             if last_step == 0:
+                if not used_full_euler_step:
+                    raise RuntimeError(
+                        "The temperature profile is too steep for the "
+                        "50,000-point budget: every Euler step was shorter "
+                        "than the nominal increment, so doubling the step "
+                        "cannot help. Shorten the profile, space the nodes "
+                        "farther apart, or raise the coldest temperature."
+                    )
                 dh *= 2.0
                 if not math.isfinite(dh):
                     raise RuntimeError("Altitude step overflowed during restart doubling.")

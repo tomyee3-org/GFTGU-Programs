@@ -1062,6 +1062,63 @@ class ColdLayerStepTests(unittest.TestCase):
         uncapped_pressure = extract_checkpoints(uncapped, h_points, T_points)[-1].pressure
         self.assertGreater(abs(uncapped_pressure / exact - 1.0), 0.10)
 
+    def test_a_fully_capped_pass_raises_a_budget_error_without_restart_doubling(self):
+        """Doubling cannot enlarge a pass whose every step was already shorter than dh."""
+        self.assertEqual(driver.MAX_RETRIES, 25)
+        h_points = [10.0 * i for i in range(801)]
+        T_points = [300.0 if i % 2 == 0 else 30_000.0 for i in range(801)]
+        calls = {"n": 0}
+        real_step = driver.hydrostatic_step
+
+        def counted(pressure_prev, rho_prev, g_accel, dh):
+            calls["n"] += 1
+            return real_step(pressure_prev, rho_prev, g_accel, dh)
+
+        with patch.object(driver, "hydrostatic_step", counted), self.assertRaisesRegex(
+            RuntimeError, "every Euler step was shorter than the nominal increment"
+        ):
+            self.run_profile(h_points, T_points)
+        # One pass of at most MAX_STEPS, not 25 doubled restarts (~1.25e6 steps).
+        self.assertLess(calls["n"], driver.MAX_STEPS + 5)
+        self.assertGreater(calls["n"], 1_000)
+
+    def test_a_tall_uncapped_profile_still_restarts_and_finishes(self):
+        """False-top protection and restart doubling stay available when steps are free."""
+        result = AtmosphereModel(
+            make_params(h_points=[0.0, 1000.0], T_points=[288.15, 288.15])
+        )
+        with patch.object(driver, "MAX_STEPS", 300):
+            run = result.run()
+        self.assertGreater(run.altitudes[-1], 1000.0)
+        self.assertGreater(run.altitudes[1], 40.0)  # first stored step after a restart is coarser
+
+    def test_the_micro_step_exemption_constant_is_one_e_minus_five(self):
+        self.assertEqual(driver.MIN_STEP_TO_SCALE_HEIGHT, 1e-5)
+        if GROK_HTML:
+            self.assertIn("10^{-5}", GROK_HTML.replace(" ", ""))
+            self.assertNotIn("10^{-2}", GROK_HTML.replace(" ", ""))
+
+    def test_removing_the_micro_step_exemption_changes_a_step_function_profile(self):
+        """A micrometre-wide 20 K / 2000 K edge is left alone only because of the exemption."""
+        cell = 2.9256
+        edge = cell * 1e-6
+        h_points = [0.0, edge, cell]
+        T_points = [20.0, 2000.0, 2000.0]
+        with_exemption = self.run_profile(h_points, T_points)
+        with patch.object(driver, "MIN_STEP_TO_SCALE_HEIGHT", 0.0):
+            without = self.run_profile(h_points, T_points)
+        self.assertGreater(len(without.altitudes), len(with_exemption.altitudes))
+
+    def test_an_extreme_valid_profile_does_not_blame_the_user_supplied_dh(self):
+        with self.assertRaisesRegex(ValueError, "outside the usable numerical range"):
+            AtmosphereModel(
+                make_params(
+                    planet_name="Extreme",
+                    h_points=[0.0, 1e-90],
+                    T_points=[1e-100, 1e300],
+                )
+            ).run()
+
     def test_the_five_percent_cap_is_tighter_than_a_fifty_percent_cap(self):
         """A 50% cap still lands on nodes but is measurably coarser."""
         h_points = [1000.0 * i for i in range(9)]
@@ -1099,6 +1156,32 @@ class ProfileSpanAndParameterObjectTests(unittest.TestCase):
         profile.T = [1e308, -1e308]
         with self.assertRaisesRegex(ValueError, "greater than zero kelvin"):
             profile.get_temp(500.0, 1e5)
+
+    def test_a_valid_edit_of_the_final_temperature_recomputes_the_upper_closure(self):
+        """Public TemperatureProfile objects support valid in-place edits.
+
+        A query above the last supplied altitude must not keep a beta
+        derived from the previous final temperature, power or top height.
+        """
+        profile = TemperatureProfile([0.0, 100.0], [300.0, 300.0])
+        self.assertEqual(profile.get_temp(200.0, 10_000.0), 300.0)
+        self.assertAlmostEqual(profile.beta, 300.0 / (10_000.0 ** 0.5))
+        profile.T[-1] = 600.0
+        self.assertEqual(profile.get_temp(100.0, 10_000.0), 600.0)
+        self.assertEqual(profile.get_temp(200.0, 10_000.0), 600.0)
+        self.assertAlmostEqual(profile.beta, 600.0 / (10_000.0 ** 0.5))
+
+        profile = TemperatureProfile([0.0, 100.0], [300.0, 300.0])
+        profile.get_temp(200.0, 10_000.0)
+        profile.power = 0.25
+        self.assertEqual(profile.get_temp(200.0, 10_000.0), 300.0)
+        self.assertAlmostEqual(profile.beta, 300.0 / (10_000.0 ** 0.25))
+
+        profile = TemperatureProfile([0.0, 100.0], [300.0, 400.0])
+        profile.get_temp(200.0, 10_000.0)
+        profile.h[-1] = 150.0
+        self.assertEqual(profile.get_temp(150.0, 10_000.0), 400.0)
+        self.assertEqual(profile.get_temp(200.0, 10_000.0), 400.0)
 
     def test_an_interior_edit_is_rejected_on_the_next_public_call(self):
         profile = TemperatureProfile([0.0, 100.0, 200.0, 300.0], [300.0, 350.0, 400.0, 450.0])
@@ -1521,19 +1604,22 @@ class CommandLineHelpAndPlotTests(unittest.TestCase):
     def test_help_version_build_matches_runtime_and_html_parses(self):
         from html.parser import HTMLParser
 
-        html = HELP_FILE.read_text(encoding="utf-8")
-        parser = HTMLParser()
-        parser.feed(html)
-        version_block = re.search(
-            r'<p\s+id="version_build"[^>]*>(.*?)</p>', html, re.DOTALL
-        )
-        self.assertIsNotNone(version_block)
-        visible = re.sub(r"<[^>]+>|&nbsp;", " ", version_block.group(1))
-        visible = " ".join(visible.split())
-        self.assertEqual(
-            visible,
-            f"Version {phys.MODEL_VERSION} Build {phys.BUILD_ID}",
-        )
+        self.assertTrue(ALL_HELP_FILES)
+        for path in ALL_HELP_FILES:
+            html = path.read_text(encoding="utf-8")
+            parser = HTMLParser()
+            parser.feed(html)
+            version_block = re.search(
+                r'<p\s+id="version_build"[^>]*>(.*?)</p>', html, re.DOTALL
+            )
+            self.assertIsNotNone(version_block, path.name)
+            visible = re.sub(r"<[^>]+>|&nbsp;", " ", version_block.group(1))
+            visible = " ".join(visible.split())
+            self.assertEqual(
+                visible,
+                f"Version {phys.MODEL_VERSION} Build {phys.BUILD_ID}",
+                path.name,
+            )
 
     def test_help_documents_every_command_line_parameter(self):
         html = HELP_FILE.read_text(encoding="utf-8")
@@ -1999,6 +2085,14 @@ class EdgeProfileFamilyTests(unittest.TestCase):
 
 
 HELP_HTML = HELP_FILE.read_text(encoding="utf-8")
+CLAUDE_HELP_FILE = find_named_help(MODULE_DIR, "Atmosphere-claude.html")
+GROK_HELP_FILE = find_named_help(MODULE_DIR, "Atmosphere-grok.html")
+CLAUDE_HTML = (
+    CLAUDE_HELP_FILE.read_text(encoding="utf-8") if CLAUDE_HELP_FILE is not None else ""
+)
+GROK_HTML = (
+    GROK_HELP_FILE.read_text(encoding="utf-8") if GROK_HELP_FILE is not None else ""
+)
 
 
 def help_layout(html):
@@ -2022,10 +2116,12 @@ def help_layout(html):
 
 HELP_LAYOUT = help_layout(HELP_HTML)
 needs_beats = unittest.skipUnless(
-    HELP_LAYOUT == "beats", "the Beats-only assertions apply to the long Beats layout"
+    bool(CLAUDE_HTML) and help_layout(CLAUDE_HTML) == "beats",
+    "long Beats Help is not on the search path",
 )
 needs_grok = unittest.skipUnless(
-    HELP_LAYOUT == "beats-grok", "the short-script assertions apply to the Grok Beats layout"
+    bool(GROK_HTML) and help_layout(GROK_HTML) == "beats-grok",
+    "short Beats Help is not on the search path",
 )
 needs_any_beats = unittest.skipUnless(
     HELP_LAYOUT in ("beats", "beats-grok"),
@@ -2047,7 +2143,7 @@ def section_html(html, section_id):
 
 
 def beat_text(number):
-    return html_text(section_html(HELP_HTML, f"beat{number}"))
+    return html_text(section_html(CLAUDE_HTML or HELP_HTML, f"beat{number}"))
 
 
 class HelpStructure:
@@ -2247,11 +2343,18 @@ class HelpStructureTests(unittest.TestCase):
 
 
 class HelpCommandTests(unittest.TestCase):
-    """Every command printed in the Help must parse and run."""
+    """Every command printed in every active Help file must parse and run."""
 
     @classmethod
     def setUpClass(cls):
-        cls.commands = documented_commands(HELP_HTML)
+        cls.commands = []
+        seen = []
+        for path in ALL_HELP_FILES:
+            html = path.read_text(encoding="utf-8")
+            for argv in documented_commands(html):
+                if argv not in seen:
+                    seen.append(argv)
+                    cls.commands.append(argv)
 
     def test_help_shows_a_substantial_number_of_commands(self):
         self.assertGreaterEqual(len(self.commands), 15)
@@ -2314,16 +2417,16 @@ class HelpCommandTests(unittest.TestCase):
 @needs_beats
 class BeatStructureTests(unittest.TestCase):
     def test_beats_are_numbered_from_zero_in_document_order(self):
-        ids = re.findall(r'<section id="(beat\d+)"', HELP_HTML)
+        ids = re.findall(r'<section id="(beat\d+)"', CLAUDE_HTML)
         self.assertEqual(ids, [f"beat{n}" for n in range(len(ids))])
         self.assertEqual(len(ids), 8)
-        self.assertLess(HELP_HTML.index('id="beats"'), HELP_HTML.index('id="beat0"'))
-        self.assertLess(HELP_HTML.index('id="beat7"'), HELP_HTML.index('id="equations"'))
+        self.assertLess(CLAUDE_HTML.index('id="beats"'), CLAUDE_HTML.index('id="beat0"'))
+        self.assertLess(CLAUDE_HTML.index('id="beat7"'), CLAUDE_HTML.index('id="equations"'))
 
     def test_every_beat_has_the_same_parts_in_the_same_order(self):
         for number in range(8):
             with self.subTest(beat=number):
-                body = section_html(HELP_HTML, f"beat{number}")
+                body = section_html(CLAUDE_HTML, f"beat{number}")
                 self.assertRegex(body, rf"<h2>Beat {number} · ")
                 self.assertEqual(body.count("<pre>"), 1)
                 self.assertEqual(body.count("Three tasks, in order."), 1)
@@ -2339,17 +2442,17 @@ class BeatStructureTests(unittest.TestCase):
     def test_sidebar_labels_carry_the_beat_numbers(self):
         for number in range(8):
             with self.subTest(beat=number):
-                self.assertRegex(HELP_HTML, rf'<a href="#beat{number}">{number} · ')
+                self.assertRegex(CLAUDE_HTML, rf'<a href="#beat{number}">{number} · ')
 
     def test_every_experiment_is_pointed_to_by_at_least_one_beat(self):
         cited = set()
         for number in range(8):
-            cited |= set(re.findall(r'href="#(exp\d+)"', section_html(HELP_HTML, f"beat{number}")))
-        every = set(re.findall(r'id="(exp\d+)"', HELP_HTML))
+            cited |= set(re.findall(r'href="#(exp\d+)"', section_html(CLAUDE_HTML, f"beat{number}")))
+        every = set(re.findall(r'id="(exp\d+)"', CLAUDE_HTML))
         self.assertEqual(cited, every)
 
     def test_equation_index_lists_every_equation(self):
-        index = section_html(HELP_HTML, "equations")
+        index = section_html(CLAUDE_HTML, "equations")
         for number in range(1, 8):
             with self.subTest(equation=number):
                 self.assertRegex(index, rf"<td>\(7\.{number}\)</td>")
@@ -2357,7 +2460,7 @@ class BeatStructureTests(unittest.TestCase):
     def test_each_beat_command_block_holds_only_commands(self):
         for number in range(8):
             with self.subTest(beat=number):
-                body = section_html(HELP_HTML, f"beat{number}")
+                body = section_html(CLAUDE_HTML, f"beat{number}")
                 block = html_module.unescape(re.search(r"<pre>(.*?)</pre>", body, re.DOTALL).group(1))
                 block = re.sub(r"\\\n\s*", " ", block)
                 lines = [line for line in block.splitlines() if line.strip()]
@@ -2624,7 +2727,7 @@ class BeatQuotedNumberTests(unittest.TestCase):
         )
 
         # The comparison table: program column from the real run, standard column from the fixture.
-        table = section_html(HELP_HTML, "beat6")
+        table = section_html(CLAUDE_HTML, "beat6")
         rows = self.rows([])
         compared = re.findall(
             r'<tr><td class="num">(\d+)</td><td class="num">([^<]+)</td>'
@@ -2728,7 +2831,7 @@ class BeatQuotedNumberTests(unittest.TestCase):
     def test_equation_kind_tags_match_the_role_of_each_equation(self):
         kinds = {}
         for number in range(8):
-            body = section_html(HELP_HTML, f"beat{number}")
+            body = section_html(CLAUDE_HTML, f"beat{number}")
             for label_html, formula in re.findall(
                 r'<div class="eq-block">(<div class="eq-label">.*?</div>)(.*?)</div>', body, re.DOTALL
             ):
@@ -2747,14 +2850,14 @@ class BeatQuotedNumberTests(unittest.TestCase):
         untagged = sorted(kind for kind, eq in kinds.values() if eq is None)
         self.assertEqual(untagged, ["DERIVED", "DERIVED", "DERIVED"])   # barometric, proportionality, Euler error
         self.assertNotIn("7.7", by_equation)                            # a numerical method carries no tag
-        index = section_html(HELP_HTML, "equations")
+        index = section_html(CLAUDE_HTML, "equations")
         for equation, kind in by_equation.items():
             with self.subTest(equation=equation):
                 self.assertRegex(index, rf"<td>\({re.escape(equation)}\)</td>.*?>{kind}</span>")
         self.assertRegex(index, r"<td>\(7\.7\)</td>.*?numerical method")
         for css_class in ("tag-ode", "tag-der", "tag-rule", "tag-cal"):
-            self.assertIn(f".{css_class}", HELP_HTML)
-        legend = html_text(section_html(HELP_HTML, "beats"))
+            self.assertIn(f".{css_class}", CLAUDE_HTML)
+        legend = html_text(section_html(CLAUDE_HTML, "beats"))
         for phrase in ("What is integrated and what is prescribed", "is an algorithm rather than physics"):
             self.assertIn(phrase, legend)
 
@@ -2765,7 +2868,7 @@ class ExperimentTextTests(unittest.TestCase):
 
     @staticmethod
     def experiment_text(number):
-        section = section_html(HELP_HTML, "experiments")
+        section = section_html(CLAUDE_HTML, "experiments")
         start = section.index(f'id="exp{number}"')
         end = section.find('<div class="scenario-card"', start + 10)
         return html_text(section[start:end if end != -1 else len(section)])
@@ -2797,7 +2900,7 @@ class ExperimentTextTests(unittest.TestCase):
         self.assertIn(f"gives {fractions['9.81'][0]} Pa, which is {fractions['9.81'][1]:.4f} of the surface", text)
         self.assertAlmostEqual(fractions["4.905"][1], math.sqrt(fractions["9.81"][1]), delta=1e-3)
         self.assertAlmostEqual(fractions["19.62"][1], fractions["9.81"][1] ** 2, delta=1e-3 * fractions["19.62"][1])
-        commands = documented_commands(section_html(HELP_HTML, "experiments"))
+        commands = documented_commands(section_html(CLAUDE_HTML, "experiments"))
         self.assertIn(["--g_accel", "4.905"], commands)
         self.assertIn(["--g_accel", "19.62"], commands)
 
@@ -2808,7 +2911,7 @@ class ExperimentTextTests(unittest.TestCase):
 
     def test_experiment_8_command_prints_every_comparison_altitude(self):
         text = self.experiment_text(8)
-        commands = documented_commands(section_html(HELP_HTML, "experiments"))
+        commands = documented_commands(section_html(CLAUDE_HTML, "experiments"))
         isothermal = [argv for argv in commands if "--h_points" in argv and "90000" in argv[argv.index("--h_points") + 1]]
         self.assertEqual(len(isothermal), 1)
         argv = isothermal[0]
@@ -2847,12 +2950,12 @@ class ExperimentTextTests(unittest.TestCase):
             f"it should print {cold[8800.0][1]} Pa at 8800 m, against an exact value of {exact_cold:.4g} Pa "
             f"({100 * (1 - float(cold[8800.0][1]) / exact_cold):.1f}% low)", text)
         self.assertIn(["--h_points", "0,4400,8800", "--T_points", "300,20,20", "--output_type", "pressure"],
-                      documented_commands(section_html(HELP_HTML, "experiments")))
+                      documented_commands(section_html(CLAUDE_HTML, "experiments")))
 
     def test_experiment_9_sketch_reproduces_the_expected_checkpoints(self):
         """Apply the printed patch to the shipped loop and check the quoted numbers."""
         text = self.experiment_text(9)
-        experiments = html_module.unescape(section_html(HELP_HTML, "experiments"))
+        experiments = html_module.unescape(section_html(CLAUDE_HTML, "experiments"))
         self.assertIn("p[j] = hydrostatic_step(p[j - 1], rho[j - 1], g_here, step)", experiments)
         self.assertIn("0.36195", text)
         self.assertEqual(text.count("0.36195"), experiments.count("0.36195"))
@@ -2903,7 +3006,7 @@ class ExperimentTextTests(unittest.TestCase):
 
     def test_every_mars_example_uses_the_same_surface_gravity(self):
         sources = {
-            "Help": html_module.unescape(HELP_HTML),
+            "Help": html_module.unescape(CLAUDE_HTML),
             "main.py": (MODULE_DIR / "main.py").read_text(encoding="utf-8"),
         }
         found = set()
@@ -2915,7 +3018,7 @@ class ExperimentTextTests(unittest.TestCase):
             found |= set(values)
         self.assertEqual(found, {"3.72"})
         # The Mars examples that do not name the planet first are still Mars examples.
-        for match in re.finditer(r"--g_accel (3\.7\d)", html_module.unescape(HELP_HTML)):
+        for match in re.finditer(r"--g_accel (3\.7\d)", html_module.unescape(CLAUDE_HTML)):
             self.assertEqual(match.group(1), "3.72")
 
 
@@ -2924,22 +3027,22 @@ class GrokHelpSmokeTests(unittest.TestCase):
     """Claims the short script must make, without printing an answer key."""
 
     def test_does_not_preprint_a_checkpoint_table(self):
-        self.assertNotIn("Atmospheric checkpoints", HELP_HTML)
+        self.assertNotIn("Atmospheric checkpoints", GROK_HTML)
 
     def test_states_the_spine_and_the_three_governing_ideas(self):
-        text = html_text(HELP_HTML)
+        text = html_text(GROK_HTML)
         self.assertIn("scale height", text)
-        self.assertIn("ideal gas", text.lower() + HELP_HTML.lower())
-        self.assertIn("dp", HELP_HTML)
-        self.assertIn("H_{\\min}/200", HELP_HTML.replace(" ", ""))
+        self.assertIn("ideal gas", text.lower() + GROK_HTML.lower())
+        self.assertIn("dp", GROK_HTML)
+        self.assertIn("H_{\\min}/200", GROK_HTML.replace(" ", ""))
         self.assertIn("stopping rule", text)
 
     def test_names_the_upper_closure_as_a_closure(self):
-        self.assertIn("beta", HELP_HTML.lower())
-        self.assertRegex(HELP_HTML, r"T\s*=\s*\\beta")
+        self.assertIn("beta", GROK_HTML.lower())
+        self.assertRegex(GROK_HTML, r"T\s*=\s*\\beta")
 
     def test_experiments_ask_questions_without_printing_the_answers(self):
-        experiments = section_html(HELP_HTML, "experiments")
+        experiments = section_html(GROK_HTML, "experiments")
         self.assertGreaterEqual(experiments.count("exp-card"), 8)
         self.assertNotIn("should print", experiments.lower())
         self.assertNotIn("should be about", experiments.lower())
@@ -3001,8 +3104,17 @@ class GrokQuotedClaimTests(unittest.TestCase):
         self.assertNotIn("H_{\\min}/100", self.html.replace(" ", ""))
         self.assertEqual(driver.STEPS_PER_SCALE_HEIGHT, 200)
         self.assertIn("more than about 5%", self.text)
+        self.assertIn("of the temperature at the start of that step", self.text)
+        self.assertNotIn("more than about 20%", self.text)
         self.assertNotIn("more than about 50%", self.text)
         self.assertEqual(driver.MAX_RELATIVE_TEMP_JUMP, 0.05)
+        self.assertIn("few tenths of a per cent", self.text)
+        self.assertNotIn("a few per cent; Beat 6 says why they differ", self.text)
+        self.assertIn("already a fraction of a per cent low at 11", self.text)
+        self.assertNotIn("already about 5 per cent low at 11", self.text)
+        self.assertIn("10^{-5}", self.html.replace(" ", ""))
+        self.assertNotIn("10^{-2}", self.html.replace(" ", ""))
+        self.assertEqual(driver.MIN_STEP_TO_SCALE_HEIGHT, 1e-5)
         self.assertIn("\\alpha=0.5", self.html.replace(" ", ""))
         self.assertNotIn("\\alpha=0.4", self.html.replace(" ", ""))
         self.assertIn("does not contain the surface pressure", self.text)
@@ -3046,10 +3158,13 @@ class DualHelpFileTests(unittest.TestCase):
                 continue
             compared += 1
             self.assertTrue(all(payload == payloads[0] for payload in payloads), name)
-        if find_named_help(MODULE_DIR, "Atmosphere-grok.html") and find_named_help(
-            MODULE_DIR, "Atmosphere-claude.html"
+        if any(
+            candidate.is_file()
+            and candidate.name in HELP_FILENAMES
+            and ("Documentation" in str(candidate) or "docs" in str(candidate))
+            for candidate in _help_candidates(MODULE_DIR)
         ):
-            self.assertGreaterEqual(compared, 0)
+            self.assertGreaterEqual(compared, 1)
 
     def test_claude_help_is_checked_even_when_grok_is_primary(self):
         path = find_named_help(MODULE_DIR, "Atmosphere-claude.html")
@@ -3071,23 +3186,30 @@ class DualHelpFileTests(unittest.TestCase):
         self.assertIn("0.7144 Pa", text)
         self.assertNotIn("0.7414 Pa", text)
         self.assertIn("Numerical top", text)
+        self.assertIn("The program should print 30843", text)
+        self.assertNotIn("The program should print 38043", text)
+        self.assertIn("a taller scale height than the Earth", text)
         isothermal = 1.013e5 * math.exp(-100_000.0 / (
             288.15 * phys.K_BOLTZMANN / (9.81 * 28.97 * phys.ATOMIC_MASS_UNIT)
         ))
         self.assertEqual(f"{isothermal:.4f}", "0.7144")
 
-    def test_corrupting_claude_while_grok_is_present_is_detected(self):
+    def test_a_wrong_claude_experiment_8_check_value_is_rejected(self):
         path = find_named_help(MODULE_DIR, "Atmosphere-claude.html")
         if path is None:
             self.skipTest("Atmosphere-claude.html is not on the search path")
         html = path.read_text(encoding="utf-8")
         text = html_text(html)
-        self.assertIn("0.7144 Pa", text)
-        mutated = text.replace("0.7144 Pa", "0.7414 Pa")
-        self.assertIn("0.7414 Pa", mutated)
-        self.assertNotIn("0.7414 Pa", text)
+        printed = table_rows(run_main([
+            "--h_points", "0,10000,50000,90000,100000",
+            "--T_points", "288.15,288.15,288.15,288.15,288.15",
+            "--output_type", "pressure",
+        ]))
+        self.assertEqual(printed[1][1], "30843")
+        self.assertIn("30843", text)
+        self.assertNotIn("38043", html)
 
-    def test_corrupting_grok_while_claude_is_present_is_detected(self):
+    def test_a_wrong_grok_scientific_value_is_rejected_in_the_dual_layout(self):
         path = find_named_help(MODULE_DIR, "Atmosphere-grok.html")
         if path is None:
             self.skipTest("Atmosphere-grok.html is not on the search path")
@@ -3097,6 +3219,7 @@ class DualHelpFileTests(unittest.TestCase):
         self.assertNotIn("H ≈ 8.34", html)
         self.assertIn("a taller scale height than Earth", text)
         self.assertNotIn("a shorter scale height than Earth", text)
+        self.assertIn("few tenths of a per cent", text)
 
 
 class UnitConventionDocumentationTests(unittest.TestCase):
