@@ -2510,16 +2510,15 @@ class TestGrokQuotedFacts(unittest.TestCase):
     """
 
     GROK_DISPLAY_EQUATIONS = (
-        r"F=\frac{GM_A M_B}{r^2}",
-        r"\ddot x_A=-\frac{G M_B\,\Delta x}{r^3}",
-        r"\ddot y_A=-\frac{G M_B\,\Delta y}{r^3}",
-        r"\ddot x_B=+\frac{G M_A\,\Delta x}{r^3}",
-        r"\ddot y_B=+\frac{G M_A\,\Delta y}{r^3}",
-        r"K=\tfrac12 M_A(v_A^2+u_A^2)+\tfrac12 M_B(v_B^2+u_B^2)",
-        r"U=-\frac{G M_A M_B}{r}",
-        r"E=K+U",
-        r"T=2\pi\sqrt{\frac{a^3}{G(M_A+M_B)}}",
-        r"e=\frac{v_p-v_a}{v_p+v_a}",
+        r"F=\frac{GM_AM_B}{r^2},\qquad r=\sqrt{(x_A-x_B)^2+(y_A-y_B)^2}.",
+        r"\ddot x_A=-\frac{GM_B\,\Delta x}{r^3},\quad\ddot y_A=-\frac{GM_B\,\Delta y}{r^3},",
+        r"\ddot x_B=+\frac{GM_A\,\Delta x}{r^3},\quad\ddot y_B=+\frac{GM_A\,\Delta y}{r^3}.",
+        r"K=\tfrac12 M_A(v_A^2+u_A^2)+\tfrac12 M_B(v_B^2+u_B^2),\qquad U=-\frac{GM_AM_B}{r},\qquad E=K+U.",
+        r"T=2\pi\sqrt{\frac{a^3}{G(M_A+M_B)}},\qquad a=a_A+a_B,",
+        r"e=\frac{v_p-v_a}{v_p+v_a}.",
+        r"\tilde{\mathbf r}=\mathbf r^n+\mathbf v^n\Delta t,\qquad\tilde{\mathbf v}=\mathbf v^n+\mathbf a^n\Delta t,",
+        r"\mathbf v^{n+1}=\mathbf v^n+\tfrac12(\mathbf a^n+\mathbf a^{n+1})\Delta t,\qquad\mathbf r^{n+1}=\mathbf r^n+\tfrac12(\mathbf v^n+\mathbf v^{n+1})\Delta t.",
+        r"\Delta_a=\frac{\lVert\tilde{\mathbf a}_A-\mathbf a_A^n\rVert}{\max(\lVert\tilde{\mathbf a}_A\rVert,\lVert\mathbf a_A^n\rVert)}.",
     )
 
     @classmethod
@@ -2551,10 +2550,12 @@ class TestGrokQuotedFacts(unittest.TestCase):
         self.assertIn("6.67430", self.beat0)
 
     def test_display_equations_are_frozen(self):
-        compact = self._compact_display_math()
-        for equation in self.GROK_DISPLAY_EQUATIONS:
-            with self.subTest(equation=equation):
-                self.assertIn(re.sub(r"\s+", "", equation), compact)
+        body = re.sub(r"<script.*?</script>", "", self.html, flags=re.DOTALL)
+        blocks = re.findall(r"\\\[(.*?)\\\]", body, re.DOTALL)
+        compact_blocks = [re.sub(r"\s+", "", block) for block in blocks]
+        expected = [re.sub(r"\s+", "", equation) for equation in self.GROK_DISPLAY_EQUATIONS]
+        self.assertEqual(compact_blocks, expected)
+        self.assertNotIn("E=K+U+K", "".join(compact_blocks))
 
     def test_beat_1_acceleration_signs_match_the_code(self):
         html = re.sub(r"\s+", "", section_html(self.html, "beat1"))
@@ -2611,6 +2612,47 @@ class TestGrokQuotedFacts(unittest.TestCase):
         self.assertIn(r"(\Delta t)^2", section_html(self.html, "beat7"))
         self.assertNotIn(r"(\Delta t)^1", section_html(self.html, "beat7"))
         self.assertIn("0.999", self.beat7)
+        self.assertIn("hits the timestep floor", self.beat7)
+
+    def test_beat_0_start_matches_program_defaults_and_the_default_run(self):
+        defaults = entry.parse_args([])
+        self.assertAlmostEqual(defaults.MA, 2.0e30)
+        self.assertAlmostEqual(defaults.MB, 2.0e30)
+        separation = abs(defaults.xInitA - defaults.xInitB)
+        self.assertAlmostEqual(separation, 9.2e10)
+        self.assertIn("9.2", self.beat0)
+        self.assertAlmostEqual(abs(defaults.uInitA), 13000.0)
+        self.assertIn("13", self.beat0)
+        printed = cached_printed(())
+        fields = printed_fields(printed)
+        self.assertTrue(fields["Initial Keplerian orbit"].startswith("elliptic"))
+        eccentricity = float(fields["Initial Keplerian orbit"].split()[-1])
+        self.assertAlmostEqual(eccentricity, 0.767, places=3)
+        self.assertIn("0.767", self.beat7)
+
+    def test_parameters_table_matches_program_defaults(self):
+        table = section_html(self.html, "parameters")
+        defaults = entry.parse_args([])
+        self.assertIn("0.05", table)
+        self.assertIn("10000", table)
+        self.assertIn("2000", table)
+        self.assertIn("1e-4", table)
+        self.assertIn("2e30", table)
+        self.assertIn("13000", table)
+        self.assertIn("orbits", table)
+        self.assertAlmostEqual(defaults.eps1, 0.05)
+        self.assertEqual(defaults.max_steps, 10000)
+        self.assertAlmostEqual(defaults.dt, 2000.0)
+        self.assertAlmostEqual(defaults.eps2, 1.0e-4)
+        self.assertEqual(defaults.output_type, "orbits")
+
+    def test_head_on_start_hits_the_timestep_floor(self):
+        self.assertIn("--uInitA 0 --uInitB 0", section_html(self.html, "beat7"))
+        with self.assertRaises(SystemExit) as raised:
+            printed_run(["--uInitA", "0", "--uInitB", "0"])
+        message = str(raised.exception)
+        self.assertIn("timestep", message.lower())
+        self.assertIn("safety limit", message.lower())
 
     def test_experiment_4_uses_the_relative_escape_speed(self):
         text = self.experiments
@@ -2629,9 +2671,22 @@ class TestGrokQuotedFacts(unittest.TestCase):
         self.assertGreater(abs(bogus - (1e30 / 3e30) * v_rel) / v_rel, 0.1)
 
     def test_experiment_6_is_a_mild_ellipse_that_runs(self):
-        self.assertIn("Orbit", self.experiments)
-        self.assertIn("500000", self.experiments)
-        self.assertNotIn("17000", section_html(self.html, "experiments"))
+        card = re.search(r"EXP-6.*?(?=EXP-7|$)", section_html(self.html, "experiments"), re.DOTALL)
+        self.assertIsNotNone(card)
+        card = card.group(0)
+        self.assertIn("Orbit", card)
+        self.assertIn("500000", card)
+        self.assertRegex(card, r"with 500000")
+        self.assertNotRegex(card, r"with 700000")
+        self.assertIn("--vyInit 500000", card)
+        self.assertIn("--k 1.33486e22", card)
+        self.assertNotIn("--vyInit 541000", card)
+        self.assertNotIn("17000", card)
+        self.assertIn("539000", card)
+        self.assertIn("541000", card)
+        self.assertIn("5.11", card)
+        self.assertIn("5.03", card)
+        self.assertIsNone(re.search(r"5\.11 days for a fixed-star start at 541000", card))
         exp6 = [argv for argv in self.commands if "--MB" in argv and "2e32" in argv]
         self.assertEqual(len(exp6), 1)
         argv = exp6[0]
@@ -2646,8 +2701,39 @@ class TestGrokQuotedFacts(unittest.TestCase):
         eccentricity = float(fields["Initial Keplerian orbit"].split()[-1])
         self.assertLess(eccentricity, 0.2)
         self.assertGreater(eccentricity, 0.10)
-        self.assertGreater(int(fields["Accepted steps"]), 100)
+        quoted_e = float(re.search(r"e\\approx\s*([0-9.]+)", card).group(1))
+        self.assertAlmostEqual(quoted_e, eccentricity, delta=0.005)
+        steps = int(fields["Accepted steps"])
+        quoted_steps = int(re.search(r"about\s+(\d+)\s+accepted steps", card).group(1))
+        self.assertEqual(quoted_steps, steps)
+        days = float(fields["Total time"].split()[0])
+        quoted_days = float(re.search(r"and\s+([0-9.]+)\s+days here", card).group(1))
+        self.assertAlmostEqual(quoted_days, days, delta=0.02)
+        G = physics.G
+        mass_b = 2.0e32
+        radius = 4.6e10
+        speed = 500000.0
+        circular_fixed = math.sqrt(G * mass_b / radius)
+        self.assertAlmostEqual(circular_fixed, 539000.0, delta=1500.0)
+        self.assertAlmostEqual(circular_fixed, 538690.0, delta=20.0)
+        relative_circular = math.sqrt(G * (2.0e30 + mass_b) / radius)
+        self.assertAlmostEqual(relative_circular, 541000.0, delta=500.0)
+        semi = 1.0 / (2.0 / radius - speed * speed / (G * mass_b))
+        period_days = 2.0 * math.pi * math.sqrt(semi ** 3 / (G * mass_b)) / 86400.0
+        self.assertAlmostEqual(period_days, 5.11, delta=0.01)
         self.assertNotIn("outside the numerical range", printed)
+
+    def test_every_distinct_grok_command_runs(self):
+        seen = []
+        for argv in self.commands:
+            if argv in seen:
+                continue
+            seen.append(argv)
+            with self.subTest(argv=argv):
+                printed = cached_printed(tuple(argv))
+                self.assertIn("Energy at fractions of total run days", printed)
+                self.assertEqual(len(printed_rows(printed)), 11)
+        self.assertGreaterEqual(len(seen), 8)
 
 
 class HelpLayoutRecogniserTests(unittest.TestCase):
