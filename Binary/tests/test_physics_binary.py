@@ -2345,33 +2345,37 @@ class HelpStructure:
 
 
 def documented_commands(html):
-    """Every ``python main.py ...`` command in ``<pre>`` or inline ``<code>``.
+    """Every Binary ``python main.py ...`` command in ``<pre>`` or inline ``<code>``.
 
-    Audit42 P2-02: an exercise command that lives only inside ``<code>``
-    is still a student-facing command and must parse and run. Commands
-    already inside ``<pre>`` are not counted again from inner ``<code>``.
+    A ``<pre data-program="Orbit">`` block is a foreign program command and
+    is not collected. Every other extracted command must parse as Binary.
     """
     commands = []
-    blocks = re.findall(r"<pre[^>]*>(.*?)</pre>", html, re.DOTALL)
+    for match in re.finditer(r"<pre([^>]*)>(.*?)</pre>", html, re.DOTALL):
+        attrs, block = match.group(1), match.group(2)
+        if re.search(r'data-program\s*=\s*["\']Orbit["\']', attrs):
+            continue
+        commands.extend(_commands_from_block(block))
     outside_pre = re.sub(r"<pre[^>]*>.*?</pre>", " ", html, flags=re.DOTALL)
-    blocks.extend(re.findall(r"<code[^>]*>(.*?)</code>", outside_pre, re.DOTALL))
-    for block in blocks:
-        text = html_module.unescape(re.sub(r"<[^>]+>", "", block))
-        text = re.sub(r"\\\n\s*", " ", text)
-        for raw_line in text.splitlines():
-            line = raw_line.strip()
-            if not line.startswith("python main.py"):
-                continue
-            argv = shlex.split(line)
-            assert argv[:2] == ["python", "main.py"], line
-            flags = argv[2:]
-            if flags and flags[0] in ("--help", "-h", "--version"):
-                continue
-            option_names = {token for token in flags if token.startswith("--")}
-            # Orbit (and other foreign programs) use flags Binary does not have.
-            if option_names & {"--k", "--vyInit", "--vxInit", "--dt0", "--maxOrbits", "--xInit", "--yInit"}:
-                continue
-            commands.append(flags)
+    for block in re.findall(r"<code[^>]*>(.*?)</code>", outside_pre, re.DOTALL):
+        commands.extend(_commands_from_block(block))
+    return commands
+
+
+def _commands_from_block(block):
+    commands = []
+    text = html_module.unescape(re.sub(r"<[^>]+>", "", block))
+    text = re.sub(r"\\\n\s*", " ", text)
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("python main.py"):
+            continue
+        argv = shlex.split(line)
+        assert argv[:2] == ["python", "main.py"], line
+        flags = argv[2:]
+        if flags and flags[0] in ("--help", "-h", "--version"):
+            continue
+        commands.append(flags)
     return commands
 
 
@@ -2480,7 +2484,10 @@ class TestBothHelpFiles(unittest.TestCase):
         html = GROK_HELP_FILE.read_text(encoding="utf-8")
         commands = documented_commands(html)
         self.assertGreaterEqual(len(commands), 8)
+        foreign = {"--k", "--vyInit", "--vxInit", "--dt0", "--maxOrbits", "--xInit", "--yInit"}
         for argv in commands:
+            names = {token for token in argv if token.startswith("--")}
+            self.assertFalse(names & foreign, argv)
             with self.subTest(argv=argv):
                 entry.parse_args(argv)
         masses = [argv[argv.index("--MB") + 1] for argv in commands if "--MB" in argv]
@@ -2676,10 +2683,34 @@ class TestGrokQuotedFacts(unittest.TestCase):
         self.assertEqual(len(masses), 2)
         self.assertAlmostEqual(float(masses[0]), defaults.MA)
         self.assertAlmostEqual(float(masses[1]), defaults.MB)
-        speeds = by_flag["--vInitA"]
-        self.assertIn("13000", speeds)
-        self.assertNotIn("130000", speeds)
-        self.assertAlmostEqual(abs(defaults.uInitA), 13000.0)
+        self.assertIn("--xInitA", by_flag)
+        self.assertIn("--yInitA", by_flag)
+        self.assertIn("--vInitA", by_flag)
+        self.assertIn("--uInitA", by_flag)
+        self.assertIn("--stop_after_one_orbit", by_flag)
+        coord_cell = by_flag["--xInitA"]
+        self.assertRegex(coord_cell, r"[±+/-]*4\.6e10")
+        self.assertNotRegex(coord_cell, r"9\.2e10")
+        coord_parts = [part.strip().lstrip("±").lstrip("+-") for part in coord_cell.replace("+/-", "").split(",")]
+        self.assertEqual(len(coord_parts), 2)
+        half_sep = float(coord_parts[0].replace("±", ""))
+        y_default = float(coord_parts[1])
+        self.assertAlmostEqual(half_sep, abs(defaults.xInitA))
+        self.assertAlmostEqual(half_sep, abs(defaults.xInitB))
+        self.assertAlmostEqual(defaults.xInitA, -defaults.xInitB)
+        self.assertAlmostEqual(y_default, defaults.yInitA)
+        self.assertAlmostEqual(y_default, defaults.yInitB)
+        vel_cell = by_flag["--vInitA"]
+        self.assertIn("13000", vel_cell)
+        self.assertNotIn("130000", vel_cell)
+        vel_parts = [part.strip() for part in vel_cell.replace("±", "").replace("+/-", "").split(",")]
+        self.assertAlmostEqual(float(vel_parts[0]), defaults.vInitA)
+        self.assertAlmostEqual(float(vel_parts[0]), defaults.vInitB)
+        self.assertAlmostEqual(float(vel_parts[1]), abs(defaults.uInitA))
+        self.assertAlmostEqual(float(vel_parts[1]), abs(defaults.uInitB))
+        self.assertAlmostEqual(defaults.uInitA, -defaults.uInitB)
+        self.assertEqual(by_flag["--stop_after_one_orbit"].lower(), "on")
+        self.assertTrue(defaults.stop_after_one_orbit)
 
     def test_head_on_start_hits_the_timestep_floor(self):
         self.assertIn("--uInitA 0 --uInitB 0", section_html(self.html, "beat7"))
@@ -2711,11 +2742,18 @@ class TestGrokQuotedFacts(unittest.TestCase):
         card = card.group(0)
         self.assertIn("Orbit", card)
         self.assertIn("500000", card)
-        self.assertRegex(card, r"with 500000")
+        self.assertRegex(card, r"relative speed of 500000")
         self.assertNotRegex(card, r"with 700000")
         self.assertNotIn("Orbit:", card)
+        self.assertIn('data-program="Orbit"', card)
+        self.assertIn("495049.50495", card)
+        self.assertIn("-4950.49505", card)
+        binary_pre = card.find("<pre>python main.py --MB 2e32")
+        orbit_pre = card.find('data-program="Orbit"')
+        self.assertGreater(binary_pre, 0)
+        self.assertGreater(orbit_pre, binary_pre)
         orbit_line = re.search(
-            r"<pre>\s*(python main.py --xInit 4\.6e10 --yInit 0 --vxInit 0 --vyInit 500000 --k 1\.33486e22 --dt0 2000 --eps1 0\.05 --eps2 0\.0001 --maxOrbits 1)\s*</pre>",
+            r'<pre[^>]*data-program="Orbit"[^>]*>\s*(python main.py --xInit 4\.6e10 --yInit 0 --vxInit 0 --vyInit 500000 --k 1\.33486e22 --dt0 2000 --eps1 0\.05 --eps2 0\.0001 --maxOrbits 1)\s*</pre>',
             card,
         )
         self.assertIsNotNone(orbit_line)
@@ -2737,15 +2775,20 @@ class TestGrokQuotedFacts(unittest.TestCase):
         self.assertIn("539000", card)
         self.assertIn("541000", card)
         self.assertIn("5.03", card)
-        self.assertIn("2.15", card)
         exp6 = [argv for argv in self.commands if "--MB" in argv and "2e32" in argv]
         self.assertEqual(len(exp6), 1)
         argv = exp6[0]
-        self.assertIn("500000", argv)
+        self.assertNotIn("--k", argv)
         self.assertNotEqual(argv[argv.index("--MB") + 1], "0")
         parsed = entry.parse_args(argv)
         self.assertGreater(parsed.MB, 0.0)
-        self.assertAlmostEqual(parsed.uInitA, 500000.0)
+        self.assertAlmostEqual(parsed.uInitA, 495049.50495)
+        self.assertAlmostEqual(parsed.uInitB, -4950.49505)
+        self.assertAlmostEqual(parsed.uInitA - parsed.uInitB, 500000.0)
+        self.assertAlmostEqual(
+            (parsed.MA * parsed.uInitA + parsed.MB * parsed.uInitB) / (parsed.MA + parsed.MB),
+            0.0, delta=1e-6,
+        )
         printed = printed_run(argv)
         fields = printed_fields(printed)
         self.assertTrue(fields["Initial Keplerian orbit"].startswith("elliptic"))
