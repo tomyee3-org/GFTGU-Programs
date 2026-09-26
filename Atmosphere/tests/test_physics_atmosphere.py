@@ -2526,7 +2526,9 @@ class BeatQuotedNumberTests(unittest.TestCase):
             f"the top of the lowest layer: {rows[11019.0][1]} Pa, which is 22% of the surface value, "
             "so about 78% of the atmosphere's mass lies below that height",
             "taken as constant with height in this program",
+            "roughly ten tonnes",
         )
+        self.assertAbsent(0, "roughly one hundred tonnes")
 
     def test_beat_1_density_is_proportional_to_p_over_t(self):
         rows = self.rows(["--output_type", "density"])
@@ -2652,8 +2654,9 @@ class BeatQuotedNumberTests(unittest.TestCase):
             f"({rows[500000.0][1]} Pa)",
             "cooling to 186.95 K at 86 km",
             "cooling to 216.65 K at 11019 m",
+            "warming to 270.65 K at 47",
         )
-        self.assertAbsent(4, "cooling to 261.65 K at 11019 m")
+        self.assertAbsent(4, "cooling to 261.65 K at 11019 m", "warming to 207.65 K")
         second = self.rows(["--h_points", "0,50000,100000", "--T_points", "288,200,350"])
         pressure_ratio = float(second[50000.0][1]) / float(second[100000.0][1])
         density_ratio = float(second[50000.0][2]) / float(second[100000.0][2])
@@ -3146,8 +3149,24 @@ class GrokQuotedClaimTests(unittest.TestCase):
         self.assertNotIn("\\alpha=0.4", self.html.replace(" ", ""))
         self.assertIn("does not contain the surface pressure", self.text)
         self.assertNotIn("does contain the surface pressure", self.text)
-        self.assertIn("200/350", self.text)
+        self.assertIn("350/200", self.text)
+        self.assertIn("1.75", self.text)
+        self.assertNotIn("200/350", self.text)
         self.assertNotIn("divided by the temperature ratio", self.text)
+        self.assertIn("colder air is denser", self.text)
+        self.assertNotIn("warmer air is denser", self.text)
+        self.assertIn("stratosphere warming", self.text)
+        self.assertNotIn("stratosphere cooling", self.text)
+        self.assertIn("Light gas or weak gravity stretches", self.text)
+        self.assertNotIn("Heavy gas or weak gravity stretches", self.text)
+        self.assertIn("by ten multiplies every pressure by ten", self.text)
+        self.assertNotIn("multiplies every pressure by a hundred", self.text)
+        self.assertIn("most of the column is below that height", self.text)
+        self.assertNotIn("above that height", self.text)
+        self.assertIn("1-bar level", self.text)
+        self.assertNotIn("10-bar level", self.text)
+        self.assertIn("the local scale height collapses", self.text)
+        self.assertNotIn("the local scale height grows", self.text)
         self.assertTrue("50,000" in self.text or "50 000" in self.text)
         self.assertIn("Python 3.10", self.text)
         self.assertIn("Numerical top", self.text)
@@ -3161,8 +3180,13 @@ class GrokQuotedClaimTests(unittest.TestCase):
         self.assertNotIn("H_min}/100", self.html)
 
 
+def display_math_blocks(html):
+    """Compact text of every displayed math block ``\\[ ... \\]``."""
+    return [re.sub(r"\s+", "", block) for block in re.findall(r"\\\[(.*?)\\\]", html, re.DOTALL)]
+
+
 class GoverningEquationAuditTests(unittest.TestCase):
-    """Each active Help states the hydrostatic and gas-law equations with the right sign."""
+    """Displayed equations in each named Help are checked in their math blocks."""
 
     def _help_pages(self):
         pages = []
@@ -3177,10 +3201,10 @@ class GoverningEquationAuditTests(unittest.TestCase):
     def test_displayed_hydrostatic_equation_has_the_minus_sign(self):
         for name, html in self._help_pages():
             with self.subTest(help=name):
-                compact = html.replace(" ", "")
-                self.assertIn(r"\frac{dp}{dh}=-g\,\rho", compact)
-                self.assertNotIn(r"\frac{dp}{dh}=+g\,\rho", compact)
-                self.assertNotIn(r"\frac{dp}{dh}=g\,\rho", compact)
+                blocks = "\n".join(display_math_blocks(html))
+                self.assertIn(r"\frac{dp}{dh}=-g\,\rho", blocks)
+                self.assertNotIn(r"\frac{dp}{dh}=+g\,\rho", blocks)
+                self.assertNotRegex(blocks, r"\\frac\{dp\}\{dh\}=g\\,\\rho")
 
     def test_first_euler_step_matches_minus_g_rho(self):
         """Independent first-step slope on an isothermal column equals -g rho0."""
@@ -3196,21 +3220,75 @@ class GoverningEquationAuditTests(unittest.TestCase):
         scale = 288.15 * phys.K_BOLTZMANN / (9.81 * 28.97 * phys.ATOMIC_MASS_UNIT)
         self.assertAlmostEqual(dh, scale / 200.0, delta=1e-9)
 
-    def test_gas_law_scale_height_and_euler_update_are_stated(self):
+    def test_displayed_barometric_formula_has_a_negative_exponent(self):
+        """p = p0 exp(-h/H) is the isothermal solution of Eq. (7.3) at constant T."""
+        scale = 288.15 * phys.K_BOLTZMANN / (9.81 * 28.97 * phys.ATOMIC_MASS_UNIT)
+        exact_8km = math.exp(-8000.0 / scale)
+        rows = {float(row[0]): row for row in table_rows(run_main([
+            "--h_points", "0,8000,16000,24000,32000",
+            "--T_points", "288.15,288.15,288.15,288.15,288.15",
+        ]))}
+        printed_ratio = float(rows[8000.0][1]) / float(rows[0.0][1])
+        self.assertAlmostEqual(printed_ratio, exact_8km, delta=0.002)
+        self.assertLess(printed_ratio, 1.0)
+        self.assertAlmostEqual(printed_ratio, 0.3862, delta=0.001)
         for name, html in self._help_pages():
             with self.subTest(help=name):
-                compact = re.sub(r"\s+", "", html)
-                self.assertIn(r"\rho=\frac{p\,\mu\,m_u}{k_B\,T", compact)
-                self.assertIn(r"H=\frac{p_0}{g\,\rho_0}=\frac{k_B\,T_0}{g\,\mu\,m_u}", compact)
-                self.assertIn(r"\frac{dp}{dh}=-\frac{g\,\mu\,m_u}{k_B\,T(h)}\,p", compact)
-                self.assertRegex(compact, r"T=\\beta\\,p")
-                self.assertIn(r"\alpha=0.5", compact)
-        if CLAUDE_HTML:
-            compact = re.sub(r"\s+", "", CLAUDE_HTML)
-            self.assertIn(r"p_j=p_{j-1}-g\,\rho_{j-1}\,\Deltah", compact)
-            self.assertNotIn(r"p_j=p_{j-1}+g\,\rho_{j-1}\,\Deltah", compact)
+                blocks = "\n".join(display_math_blocks(html))
+                self.assertIn(r"p=p_0\,e^{-h/H}", blocks)
+                self.assertNotIn(r"p=p_0\,e^{+h/H}", blocks)
+                self.assertNotIn(r"p=p_0\,e^{h/H}", blocks)
 
-    def test_gas_law_and_scale_height_hold_at_the_surface_and_fail_when_misread(self):
+    def test_displayed_interpolation_and_euler_error_and_scale_rules(self):
+        profile = TemperatureProfile([0.0, 100.0], [300.0, 350.0])
+        self.assertAlmostEqual(profile.get_temp(50.0, 1e5), 325.0)
+        exact = 1.013e5 * math.exp(-100_000.0 / (
+            288.15 * phys.K_BOLTZMANN / (9.81 * 28.97 * phys.ATOMIC_MASS_UNIT)
+        ))
+        printed = float(table_rows(run_main([
+            "--h_points", "0,100000", "--T_points", "288.15,288.15",
+        ]))[-1][1])
+        low = 100.0 * (1.0 - printed / exact)
+        self.assertAlmostEqual(low, 2.93, delta=0.05)
+        mu44 = table_rows(run_main(["--mu", "44"]))
+        g19 = table_rows(run_main(["--g_accel", "19.62"]))
+        default = table_rows(run_main([]))
+        frac = lambda rows: float(rows[1][1]) / float(rows[0][1])
+        self.assertLess(frac(mu44), frac(default))
+        self.assertLess(frac(g19), frac(default))
+        self.assertEqual(driver.STEPS_PER_SCALE_HEIGHT, 200)
+        for name, html in self._help_pages():
+            with self.subTest(help=name):
+                blocks = display_math_blocks(html)
+                joined = "\n".join(blocks)
+                self.assertTrue(
+                    any(r"T_{i-1}+" in block and r"h_i-h_{i-1}" in block for block in blocks),
+                    name,
+                )
+                self.assertFalse(any(r"T_{i-1}-" in block and "T(h)" in block or
+                                     r"T_{i-1}-\frac" in block for block in blocks))
+                self.assertNotIn(r"h_i+h_{i-1}", joined)
+                self.assertTrue(
+                    any(r"1-\frac{h/H}{2N}" in block for block in blocks),
+                    joined,
+                )
+                self.assertFalse(any(r"1+\frac{h/H}{2N}" in block for block in blocks))
+                self.assertTrue(any(r"\frac{T}{\mu\,g}" in block for block in blocks))
+                self.assertFalse(any(r"\frac{\mu\,g}{T}" in block for block in blocks))
+                gas = [block for block in blocks if r"\rho=\frac{p\,\mu\,m_u}{k_B\,T}" in block
+                       or r"\rho=\frac{p\,\mu\,m_u}{k_B\,T}," in block]
+                self.assertTrue(gas, name)
+                self.assertFalse(any(r"k_B\,T^2" in block for block in blocks))
+        if CLAUDE_HTML:
+            blocks = display_math_blocks(CLAUDE_HTML)
+            euler = [block for block in blocks if r"\tag{7.7}" in block]
+            self.assertEqual(len(euler), 1)
+            self.assertIn(r"p_j=p_{j-1}-g\,\rho_{j-1}\,\Deltah", euler[0])
+            self.assertNotIn(r"\rho_j", euler[0].replace(r"\rho_{j-1}", ""))
+            self.assertTrue(any("N=" in block and "200" in block for block in blocks))
+            self.assertFalse(any(re.search(r"N=\\frac\{H\}\{\\Deltah\}=100(?!\d)", block) for block in blocks))
+
+    def test_gas_law_and_scale_height_hold_at_the_surface(self):
         result = AtmosphereModel(make_params()).run()
         p0, rho0, t0 = result.pressures[0], result.densities[0], result.temperatures[0]
         predicted = p0 * 28.97 * phys.ATOMIC_MASS_UNIT / (phys.K_BOLTZMANN * t0)
@@ -3228,6 +3306,44 @@ class GoverningEquationAuditTests(unittest.TestCase):
         self.assertEqual(above, 350.0)
         later = profile.get_temp(2000.0, 20_000.0)
         self.assertAlmostEqual(later, profile.beta * (20_000.0 ** 0.5))
+
+    def test_beat_4_fall_factors_use_350_over_200(self):
+        printed = table_rows(run_main([
+            "--h_points", "0,50000,100000", "--T_points", "288,200,350",
+        ]))
+        rows = {float(row[0]): row for row in printed}
+        p_fall = float(rows[50000.0][1]) / float(rows[100000.0][1])
+        rho_fall = float(rows[50000.0][2]) / float(rows[100000.0][2])
+        self.assertAlmostEqual(rho_fall, p_fall * 350.0 / 200.0, delta=1e-3 * rho_fall)
+        if GROK_HTML:
+            self.assertIn("350/200", html_text(GROK_HTML))
+            self.assertNotIn("200/350", html_text(GROK_HTML))
+        if CLAUDE_HTML:
+            self.assertIn("350 / 200 = 1.75", html_text(CLAUDE_HTML))
+
+    def test_sample_outputs_guide_uses_the_same_fall_factor(self):
+        """Guide Beat 4 must use T(100 km)/T(50 km) against the printed rows."""
+        candidates = []
+        for ancestor in (MODULE_DIR, *MODULE_DIR.parents):
+            candidates.append(
+                ancestor / "Atmosphere-Documentation" / "SampleOutputs"
+                / "Atmosphere-SampleOutputs_Guide.html"
+            )
+            candidates.append(
+                ancestor / "Atmosphere-docs" / "SampleOutputs"
+                / "Atmosphere-SampleOutputs_Guide.html"
+            )
+        path = next((p for p in candidates if p.is_file()), None)
+        if path is None:
+            self.skipTest("Atmosphere-SampleOutputs_Guide.html is not on the search path")
+        text = html_text(path.read_text(encoding="utf-8"))
+        self.assertIn("350/200", text)
+        self.assertIn("1.75", text)
+        self.assertNotIn("200/350", text)
+        self.assertIn("83.933", text)
+        self.assertIn("0.14095", text)
+        self.assertIn(phys.BUILD_ID, text)
+        self.assertIn("2026-09-26", text)
 
 
 class DualHelpFileTests(unittest.TestCase):
@@ -3289,6 +3405,9 @@ class DualHelpFileTests(unittest.TestCase):
         self.assertIn("The program should print 30843", text)
         self.assertNotIn("The program should print 38043", text)
         self.assertIn("a taller scale height than the Earth", text)
+        self.assertIn("raises a budget error instead", text)
+        self.assertIn("tagged there as a numerical method", text)
+        self.assertNotIn("carries no tag", text)
         isothermal = 1.013e5 * math.exp(-100_000.0 / (
             288.15 * phys.K_BOLTZMANN / (9.81 * 28.97 * phys.ATOMIC_MASS_UNIT)
         ))
