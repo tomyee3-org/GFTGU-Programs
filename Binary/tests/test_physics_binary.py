@@ -2484,12 +2484,20 @@ class TestBothHelpFiles(unittest.TestCase):
         html = GROK_HELP_FILE.read_text(encoding="utf-8")
         commands = documented_commands(html)
         self.assertGreaterEqual(len(commands), 8)
+        orbit_markers = re.findall(r"<pre([^>]*)>", html)
+        orbit_marked = [attrs for attrs in orbit_markers if re.search(r'data-program\s*=\s*["\']Orbit["\']', attrs)]
+        self.assertEqual(len(orbit_marked), 1)
         foreign = {"--k", "--vyInit", "--vxInit", "--dt0", "--maxOrbits", "--xInit", "--yInit"}
+        eps2_values = []
         for argv in commands:
             names = {token for token in argv if token.startswith("--")}
             self.assertFalse(names & foreign, argv)
+            if "--eps2" in argv:
+                eps2_values.append(argv[argv.index("--eps2") + 1])
             with self.subTest(argv=argv):
                 entry.parse_args(argv)
+        self.assertIn("0.5", eps2_values)
+        self.assertIn("1e-8", eps2_values)
         masses = [argv[argv.index("--MB") + 1] for argv in commands if "--MB" in argv]
         self.assertTrue(any(float(value) > 0.0 for value in masses))
         self.assertFalse(any(float(value) <= 0.0 for value in masses))
@@ -2748,6 +2756,11 @@ class TestGrokQuotedFacts(unittest.TestCase):
         self.assertIn('data-program="Orbit"', card)
         self.assertIn("495049.50495", card)
         self.assertIn("-4950.49505", card)
+        self.assertIn("4.55", card)
+        self.assertIn("need not close", card)
+        self.assertIn("centre of mass", card)
+        self.assertNotIn("about the origin", card)
+        self.assertEqual(card.count('data-program="Orbit"'), 1)
         binary_pre = card.find("<pre>python main.py --MB 2e32")
         orbit_pre = card.find('data-program="Orbit"')
         self.assertGreater(binary_pre, 0)
@@ -2789,6 +2802,11 @@ class TestGrokQuotedFacts(unittest.TestCase):
             (parsed.MA * parsed.uInitA + parsed.MB * parsed.uInitB) / (parsed.MA + parsed.MB),
             0.0, delta=1e-6,
         )
+        x_cm = (parsed.MA * parsed.xInitA + parsed.MB * parsed.xInitB) / (parsed.MA + parsed.MB)
+        self.assertAlmostEqual(x_cm, 4.55e8, delta=5e6)
+        self.assertGreater(abs(x_cm), 1e8)
+        quoted_cm = re.search(r"4\.55\s*\\times\s*10\^\{8\}", card)
+        self.assertIsNotNone(quoted_cm)
         printed = printed_run(argv)
         fields = printed_fields(printed)
         self.assertTrue(fields["Initial Keplerian orbit"].startswith("elliptic"))
