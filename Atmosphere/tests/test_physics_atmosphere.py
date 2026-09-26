@@ -3153,6 +3153,16 @@ class GrokQuotedClaimTests(unittest.TestCase):
         self.assertIn("1.75", self.text)
         self.assertNotIn("200/350", self.text)
         self.assertNotIn("divided by the temperature ratio", self.text)
+        self.assertTrue("50,000" in self.text or "50 000" in self.text)
+        self.assertIn("Python 3.10", self.text)
+        self.assertIn("Numerical top", self.text)
+        self.assertIn("last stored altitude", self.text)
+        self.assertNotIn("first stored altitude", self.text)
+        self.assertIn("unless every step in that pass was already shorter", self.text)
+        self.assertIn("raises a budget error", self.text)
+
+    def test_short_help_qualitative_gas_law_directions(self):
+        """Directions that follow from the gas law and from H, not the Euler formula."""
         self.assertIn("colder air is denser", self.text)
         self.assertNotIn("warmer air is denser", self.text)
         self.assertIn("stratosphere warming", self.text)
@@ -3167,22 +3177,74 @@ class GrokQuotedClaimTests(unittest.TestCase):
         self.assertNotIn("10-bar level", self.text)
         self.assertIn("the local scale height collapses", self.text)
         self.assertNotIn("the local scale height grows", self.text)
-        self.assertTrue("50,000" in self.text or "50 000" in self.text)
-        self.assertIn("Python 3.10", self.text)
-        self.assertIn("Numerical top", self.text)
-        self.assertIn("last stored altitude", self.text)
-        self.assertNotIn("first stored altitude", self.text)
-        self.assertIn("unless every step in that pass was already shorter", self.text)
-        self.assertIn("raises a budget error", self.text)
 
     def test_a_wrong_scale_height_in_the_short_help_is_detected(self):
         self.assertNotIn("8.34 km", self.text)
         self.assertNotIn("H_min}/100", self.html)
 
 
+def body_html_without_scripts(html):
+    """Help body with ``<script>`` blocks removed so MathJax config is not math."""
+    return re.sub(r"<script\b[^>]*>.*?</script>", "", html, flags=re.DOTALL | re.IGNORECASE)
+
+
 def display_math_blocks(html):
-    """Compact text of every displayed math block ``\\[ ... \\]``."""
-    return [re.sub(r"\s+", "", block) for block in re.findall(r"\\\[(.*?)\\\]", html, re.DOTALL)]
+    """Whitespace-stripped text of every displayed ``\\[ ... \\]`` block.
+
+    Script tags are dropped first.  HTML entities are unescaped so a range
+    written ``h &lt; h_i`` is compared as ``h<h_i``.
+    """
+    body = html_module.unescape(body_html_without_scripts(html))
+    return [re.sub(r"\s+", "", block) for block in re.findall(r"\\\[(.*?)\\\]", body, re.DOTALL)]
+
+
+def inline_math_blocks(html):
+    """Whitespace-stripped text of every inline ``\\( ... \\)`` expression."""
+    body = html_module.unescape(body_html_without_scripts(html))
+    return [re.sub(r"\s+", "", block) for block in re.findall(r"\\\((.*?)\\\)", body, re.DOTALL)]
+
+
+# Golden displayed blocks.  Update the matching Help in the same edit.
+GROK_DISPLAYED_EQUATIONS = (
+    r"\frac{dp}{dh}=-g\,\rho.",
+    r"\rho=\frac{p\,\mu\,m_u}{k_B\,T},\qquad\frac{dp}{dh}=-\frac{g\,\mu\,m_u}{k_B\,T(h)}\,p.",
+    r"p=p_0\,e^{-h/H},\qquadH=\frac{p_0}{g\,\rho_0}=\frac{k_B\,T_0}{g\,\mu\,m_u}.",
+    r"H\propto\frac{T}{\mu\,g}.",
+    r"T(h)=T_{i-1}+\frac{T_i-T_{i-1}}{h_i-h_{i-1}}\,(h-h_{i-1}),\qquadh_{i-1}\leh<h_i.",
+    r"\frac{p_{\mathrm{Euler}}}{p_{\mathrm{exact}}}\approx1-\frac{h/H}{2N}.",
+    r"T=\beta\,p^{\alpha},\qquad\alpha=0.5.",
+)
+CLAUDE_DISPLAYED_EQUATIONS = (
+    r"\frac{dp}{dh}=-g\,\rho\tag{7.1}",
+    r"\rho=\frac{p\,\mu\,m_u}{k_B\,T}\tag{7.2}",
+    r"\frac{dp}{dh}=-\frac{g\,\mu\,m_u}{k_B\,T(h)}\,p\tag{7.3}",
+    r"p=p_0\,e^{-h/H}",
+    r"H=\frac{p_0}{g\,\rho_0}=\frac{k_B\,T_0}{g\,\mu\,m_u}\tag{7.4}",
+    r"H\;\propto\;\frac{T}{\mu\,g}",
+    r"T(h)=T_{i-1}+\frac{T_i-T_{i-1}}{h_i-h_{i-1}}\,(h-h_{i-1}),\qquadh_{i-1}\leh<h_i\tag{7.5}",
+    r"\frac{p_{\text{Euler}}}{p_{\text{exact}}}\;\approx\;1-\frac{h/H}{2N},\qquadN=\frac{H}{\Deltah}=200",
+    r"T=\beta\,p^{\,\alpha},\qquad\alpha=0.5\tag{7.6}",
+    r"p_j=p_{j-1}-g\,\rho_{j-1}\,\Deltah\tag{7.7}",
+)
+
+# Student-facing inline relations that state a physical law or a numerical rule.
+GROK_INLINE_RELATIONS = (
+    r"H=p_0/(g\rho_0)",
+    r"N=H/\Deltah=200",
+    r"\rho_2/\rho_1=(p_2/p_1)\,(T_1/T_2)",
+    r"H_{\min}/200",
+)
+CLAUDE_INLINE_RELATIONS = (
+    r"\Deltah=H_{\min}/200",
+    r"\ln(p_0/p)/400",
+    r"\rho\proptop/T",
+    r"p(h)=p_0\exp(-h/H)",
+    r"H=k_BT/(g\mum_u)",
+    r"\ln(p_1/p_0)=-(g\mum_u/k_B)\,\Deltah/T",
+    r"\ln(p_1/p_0)=-(g\mum_u/k_B)\,[\Deltah/(T_1-T_0)]\,\ln(T_1/T_0)",
+    r"g(h)=g_0[R/(R+h)]^2",
+    r"dp/dr=-GM(r)\,\rho/r^2",
+)
 
 
 class GoverningEquationAuditTests(unittest.TestCase):
@@ -3197,6 +3259,16 @@ class GoverningEquationAuditTests(unittest.TestCase):
         if not pages:
             self.skipTest("no Beats Help file is on the search path")
         return pages
+
+    def test_displayed_equation_blocks_match_the_golden_text(self):
+        """Every displayed equation in each named Help is pinned as a whole block."""
+        expected = {
+            "Atmosphere-grok.html": GROK_DISPLAYED_EQUATIONS,
+            "Atmosphere-claude.html": CLAUDE_DISPLAYED_EQUATIONS,
+        }
+        for name, html in self._help_pages():
+            with self.subTest(help=name):
+                self.assertEqual(tuple(display_math_blocks(html)), expected[name])
 
     def test_displayed_hydrostatic_equation_has_the_minus_sign(self):
         for name, html in self._help_pages():
@@ -3242,6 +3314,7 @@ class GoverningEquationAuditTests(unittest.TestCase):
     def test_displayed_interpolation_and_euler_error_and_scale_rules(self):
         profile = TemperatureProfile([0.0, 100.0], [300.0, 350.0])
         self.assertAlmostEqual(profile.get_temp(50.0, 1e5), 325.0)
+        self.assertAlmostEqual(profile.get_temp(100.0, 1e5), 350.0)
         exact = 1.013e5 * math.exp(-100_000.0 / (
             288.15 * phys.K_BOLTZMANN / (9.81 * 28.97 * phys.ATOMIC_MASS_UNIT)
         ))
@@ -3261,32 +3334,85 @@ class GoverningEquationAuditTests(unittest.TestCase):
             with self.subTest(help=name):
                 blocks = display_math_blocks(html)
                 joined = "\n".join(blocks)
-                self.assertTrue(
-                    any(r"T_{i-1}+" in block and r"h_i-h_{i-1}" in block for block in blocks),
-                    name,
-                )
-                self.assertFalse(any(r"T_{i-1}-" in block and "T(h)" in block or
-                                     r"T_{i-1}-\frac" in block for block in blocks))
+                self.assertIn(r"\frac{dp}{dh}=-\frac{g\,\mu\,m_u}{k_B\,T(h)}\,p", joined)
+                self.assertNotIn(r"\frac{dp}{dh}=+\frac{g\,\mu\,m_u}{k_B\,T(h)}\,p", joined)
+                self.assertIn(r"H=\frac{p_0}{g\,\rho_0}=\frac{k_B\,T_0}{g\,\mu\,m_u}", joined)
+                self.assertNotIn(r"H=\frac{p_0}{\rho_0}", joined)
+                self.assertNotIn(r"\frac{k_B\,T_0\,\mu}{g\,\m_u}", joined)
+                self.assertNotIn(r"\frac{k_B\,T_0}{2g\,\mu\,m_u}", joined)
+                self.assertIn(r"T_i-T_{i-1}", joined)
+                self.assertNotIn(r"T_i+T_{i-1}", joined)
+                self.assertIn(r"h_i-h_{i-1}", joined)
                 self.assertNotIn(r"h_i+h_{i-1}", joined)
-                self.assertTrue(
-                    any(r"1-\frac{h/H}{2N}" in block for block in blocks),
-                    joined,
-                )
+                self.assertIn(r"(h-h_{i-1})", joined)
+                self.assertNotIn(r"(h+h_{i-1})", joined)
+                self.assertIn(r"h_{i-1}\leh<h_i", joined)
+                self.assertNotIn(r"h<h_{i+1}", joined)
+                self.assertTrue(any(r"T_{i-1}+" in block and r"h_i-h_{i-1}" in block for block in blocks), name)
+                self.assertTrue(any(r"1-\frac{h/H}{2N}" in block for block in blocks), joined)
                 self.assertFalse(any(r"1+\frac{h/H}{2N}" in block for block in blocks))
                 self.assertTrue(any(r"\frac{T}{\mu\,g}" in block for block in blocks))
                 self.assertFalse(any(r"\frac{\mu\,g}{T}" in block for block in blocks))
-                gas = [block for block in blocks if r"\rho=\frac{p\,\mu\,m_u}{k_B\,T}" in block
-                       or r"\rho=\frac{p\,\mu\,m_u}{k_B\,T}," in block]
-                self.assertTrue(gas, name)
+                self.assertTrue(
+                    any(r"\rho=\frac{p\,\mu\,m_u}{k_B\,T}" in block for block in blocks),
+                    name,
+                )
                 self.assertFalse(any(r"k_B\,T^2" in block for block in blocks))
+                self.assertTrue(any(r"\alpha=0.5" in block for block in blocks), name)
+                self.assertFalse(any(r"\alpha=0.4" in block or r"\alpha=0.25" in block or r"\alpha=2" in block for block in blocks))
         if CLAUDE_HTML:
             blocks = display_math_blocks(CLAUDE_HTML)
             euler = [block for block in blocks if r"\tag{7.7}" in block]
             self.assertEqual(len(euler), 1)
             self.assertIn(r"p_j=p_{j-1}-g\,\rho_{j-1}\,\Deltah", euler[0])
+            self.assertNotIn(r"\Deltah^2", euler[0])
             self.assertNotIn(r"\rho_j", euler[0].replace(r"\rho_{j-1}", ""))
             self.assertTrue(any("N=" in block and "200" in block for block in blocks))
             self.assertFalse(any(re.search(r"N=\\frac\{H\}\{\\Deltah\}=100(?!\d)", block) for block in blocks))
+
+    def test_scale_height_interpolation_and_closure_numeric_consequences(self):
+        """Independent numbers that the displayed Eq. (7.3)–(7.6) statements imply."""
+        scale = 288.15 * phys.K_BOLTZMANN / (9.81 * 28.97 * phys.ATOMIC_MASS_UNIT)
+        self.assertAlmostEqual(scale, 8430.15, delta=0.01)
+        self.assertAlmostEqual(math.exp(-8000.0 / scale), 0.38714, delta=1e-5)
+        self.assertAlmostEqual(math.exp(-8000.0 / (scale / 2.0)), 0.14988, delta=1e-4)
+        profile = TemperatureProfile([0.0, 100.0], [300.0, 350.0])
+        self.assertAlmostEqual(profile.get_temp(50.0, 1e5), 325.0)
+        self.assertAlmostEqual(profile.get_temp(100.0, 1e5), 350.0)
+        # Mutating T_i - T_{i-1} to T_i + T_{i-1} would give 625 K and 950 K.
+        self.assertNotAlmostEqual(325.0, 300.0 + (350.0 + 300.0) / 100.0 * 50.0)
+        anchor_t, ratio = 350.0, 0.25
+        self.assertAlmostEqual(anchor_t * (ratio ** 0.5), 175.0)
+        self.assertAlmostEqual(anchor_t * (ratio ** 0.4), 350.0 * (0.25 ** 0.4), delta=1e-9)
+        self.assertGreater(anchor_t * (ratio ** 0.4), anchor_t * (ratio ** 0.5))
+
+    def test_inline_physical_relations_are_present(self):
+        """Inline formulas students are told to use, not every inline fragment."""
+        expected = {
+            "Atmosphere-grok.html": GROK_INLINE_RELATIONS,
+            "Atmosphere-claude.html": CLAUDE_INLINE_RELATIONS,
+        }
+        for name, html in self._help_pages():
+            with self.subTest(help=name):
+                present = inline_math_blocks(html)
+                joined = "\n".join(present)
+                for expression in expected[name]:
+                    self.assertIn(expression, present, expression)
+                if name.endswith("grok.html"):
+                    self.assertNotIn(r"N=H/\Deltah=100", joined)
+                    self.assertNotIn(r"\rho_2/\rho_1=(p_2/p_1)\,(T_2/T_1)", joined)
+                    self.assertNotIn(r"H=p_0g/\rho_0", joined)
+                    self.assertNotIn(r"H=p_0g\rho_0", joined)
+                else:
+                    self.assertNotIn(r"\Deltah=H_{\min}/100", joined)
+                    self.assertNotIn(r"\ln(p_0/p)/200", joined)
+                    self.assertNotIn(r"\rho\proptopT", joined)
+                    self.assertNotIn(r"p(h)=p_0\exp(+h/H)", joined)
+                    self.assertNotIn(r"H=k_BT\mu/(g\m_u)", joined)
+                    self.assertNotIn(r"H=k_BT\mu/(gm_u)", joined)
+                    self.assertNotIn(r"\ln(T_0/T_1)", joined)
+                    self.assertNotIn(r"[R/(R-h)]^2", joined)
+                    self.assertNotIn(r"dp/dr=+GM", joined)
 
     def test_gas_law_and_scale_height_hold_at_the_surface(self):
         result = AtmosphereModel(make_params()).run()
@@ -3336,14 +3462,23 @@ class GoverningEquationAuditTests(unittest.TestCase):
         path = next((p for p in candidates if p.is_file()), None)
         if path is None:
             self.skipTest("Atmosphere-SampleOutputs_Guide.html is not on the search path")
-        text = html_text(path.read_text(encoding="utf-8"))
+        html = path.read_text(encoding="utf-8")
+        text = html_text(html)
         self.assertIn("350/200", text)
         self.assertIn("1.75", text)
         self.assertNotIn("200/350", text)
         self.assertIn("83.933", text)
         self.assertIn("0.14095", text)
         self.assertIn(phys.BUILD_ID, text)
-        self.assertIn("2026-09-26", text)
+        provenance = re.search(
+            r"Image provenance and compression\.</strong>\s*(.*?)</p>",
+            html,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(provenance)
+        self.assertIn("2026-09-26", provenance.group(1))
+        self.assertIn(phys.BUILD_ID, provenance.group(1))
+        self.assertIn("Atmosphere 1.6.0", provenance.group(1))
 
 
 class DualHelpFileTests(unittest.TestCase):
@@ -3405,7 +3540,11 @@ class DualHelpFileTests(unittest.TestCase):
         self.assertIn("The program should print 30843", text)
         self.assertNotIn("The program should print 38043", text)
         self.assertIn("a taller scale height than the Earth", text)
-        self.assertIn("raises a budget error instead", text)
+        self.assertIn(
+            "unless every step in that pass was already shorter than the "
+            "nominal increment, in which case it raises a budget error instead",
+            text,
+        )
         self.assertIn("tagged there as a numerical method", text)
         self.assertNotIn("carries no tag", text)
         isothermal = 1.013e5 * math.exp(-100_000.0 / (
