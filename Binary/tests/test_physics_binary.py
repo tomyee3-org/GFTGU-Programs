@@ -2367,6 +2367,10 @@ def documented_commands(html):
             flags = argv[2:]
             if flags and flags[0] in ("--help", "-h", "--version"):
                 continue
+            option_names = {token for token in flags if token.startswith("--")}
+            # Orbit (and other foreign programs) use flags Binary does not have.
+            if option_names & {"--k", "--vyInit", "--vxInit", "--dt0", "--maxOrbits", "--xInit", "--yInit"}:
+                continue
             commands.append(flags)
     return commands
 
@@ -2620,9 +2624,18 @@ class TestGrokQuotedFacts(unittest.TestCase):
         self.assertAlmostEqual(defaults.MB, 2.0e30)
         separation = abs(defaults.xInitA - defaults.xInitB)
         self.assertAlmostEqual(separation, 9.2e10)
-        self.assertIn("9.2", self.beat0)
-        self.assertAlmostEqual(abs(defaults.uInitA), 13000.0)
-        self.assertIn("13", self.beat0)
+        beat0_html = section_html(self.html, "beat0")
+        sep_match = re.search(
+            r"([0-9.]+)\s*\\times\s*10\^\{([0-9]+)\}\s*\\\,\\mathrm\{m\}",
+            beat0_html,
+        )
+        self.assertIsNotNone(sep_match)
+        quoted_sep = float(sep_match.group(1)) * 10 ** int(sep_match.group(2))
+        self.assertAlmostEqual(quoted_sep, separation)
+        speed_match = re.search(r"\b([0-9]+)\s*&nbsp;km", beat0_html)
+        self.assertIsNotNone(speed_match)
+        quoted_km = int(speed_match.group(1))
+        self.assertEqual(quoted_km * 1000, int(abs(defaults.uInitA)))
         printed = cached_printed(())
         fields = printed_fields(printed)
         self.assertTrue(fields["Initial Keplerian orbit"].startswith("elliptic"))
@@ -2633,18 +2646,40 @@ class TestGrokQuotedFacts(unittest.TestCase):
     def test_parameters_table_matches_program_defaults(self):
         table = section_html(self.html, "parameters")
         defaults = entry.parse_args([])
-        self.assertIn("0.05", table)
-        self.assertIn("10000", table)
-        self.assertIn("2000", table)
-        self.assertIn("1e-4", table)
-        self.assertIn("2e30", table)
-        self.assertIn("13000", table)
-        self.assertIn("orbits", table)
-        self.assertAlmostEqual(defaults.eps1, 0.05)
-        self.assertEqual(defaults.max_steps, 10000)
-        self.assertAlmostEqual(defaults.dt, 2000.0)
-        self.assertAlmostEqual(defaults.eps2, 1.0e-4)
-        self.assertEqual(defaults.output_type, "orbits")
+        rows = re.findall(
+            r'<td class="pname">(.*?)</td>\s*<td class="pdefault">(.*?)</td>',
+            table, re.DOTALL,
+        )
+        by_flag = {}
+        for flags_cell, default_cell in rows:
+            flags_text = html_module.unescape(re.sub(r"<[^>]+>", " ", flags_cell))
+            default_text = html_module.unescape(re.sub(r"<[^>]+>", " ", default_cell)).strip()
+            for flag in re.findall(r"--[A-Za-z0-9_]+", flags_text):
+                by_flag[flag] = default_text
+        self.assertIn("--eps1", by_flag)
+        self.assertIn("--eps2", by_flag)
+        self.assertIn("--dt", by_flag)
+        self.assertIn("--max_steps", by_flag)
+        self.assertIn("--output_type", by_flag)
+        self.assertNotIn("--eps3", by_flag)
+        self.assertEqual(by_flag["--eps1"], "0.05")
+        self.assertEqual(by_flag["--eps2"], "1e-4")
+        self.assertEqual(by_flag["--dt"], "2000")
+        self.assertEqual(by_flag["--max_steps"], "10000")
+        self.assertEqual(by_flag["--output_type"], "orbits")
+        self.assertAlmostEqual(float(by_flag["--eps1"]), defaults.eps1)
+        self.assertAlmostEqual(float(by_flag["--eps2"]), defaults.eps2)
+        self.assertAlmostEqual(float(by_flag["--dt"]), defaults.dt)
+        self.assertEqual(int(by_flag["--max_steps"]), defaults.max_steps)
+        self.assertEqual(by_flag["--output_type"], defaults.output_type)
+        masses = [part.strip() for part in by_flag["--MA"].split(",")]
+        self.assertEqual(len(masses), 2)
+        self.assertAlmostEqual(float(masses[0]), defaults.MA)
+        self.assertAlmostEqual(float(masses[1]), defaults.MB)
+        speeds = by_flag["--vInitA"]
+        self.assertIn("13000", speeds)
+        self.assertNotIn("130000", speeds)
+        self.assertAlmostEqual(abs(defaults.uInitA), 13000.0)
 
     def test_head_on_start_hits_the_timestep_floor(self):
         self.assertIn("--uInitA 0 --uInitB 0", section_html(self.html, "beat7"))
@@ -2678,15 +2713,31 @@ class TestGrokQuotedFacts(unittest.TestCase):
         self.assertIn("500000", card)
         self.assertRegex(card, r"with 500000")
         self.assertNotRegex(card, r"with 700000")
-        self.assertIn("--vyInit 500000", card)
+        self.assertNotIn("Orbit:", card)
+        orbit_line = re.search(
+            r"<pre>\s*(python main.py --xInit 4\.6e10 --yInit 0 --vxInit 0 --vyInit 500000 --k 1\.33486e22 --dt0 2000 --eps1 0\.05 --eps2 0\.0001 --maxOrbits 1)\s*</pre>",
+            card,
+        )
+        self.assertIsNotNone(orbit_line)
+        self.assertTrue(orbit_line.group(1).startswith("python main.py"))
+        self.assertNotIn("Orbit:", orbit_line.group(1))
+        vy = float(re.search(r"--vyInit\s+([0-9.]+)", orbit_line.group(1)).group(1))
+        last = re.search(
+            r"same radius and\s+([0-9.]+)(?:&nbsp;|\s)*m.*?period of about\s+([0-9.]+)\s+days",
+            card, re.DOTALL | re.IGNORECASE,
+        )
+        self.assertIsNotNone(last)
+        comparison_speed = float(last.group(1))
+        comparison_period = float(last.group(2))
+        self.assertAlmostEqual(comparison_speed, vy)
+        self.assertAlmostEqual(comparison_speed, 500000.0)
+        self.assertNotAlmostEqual(comparison_speed, 541000.0)
         self.assertIn("--k 1.33486e22", card)
-        self.assertNotIn("--vyInit 541000", card)
         self.assertNotIn("17000", card)
         self.assertIn("539000", card)
         self.assertIn("541000", card)
-        self.assertIn("5.11", card)
         self.assertIn("5.03", card)
-        self.assertIsNone(re.search(r"5\.11 days for a fixed-star start at 541000", card))
+        self.assertIn("2.15", card)
         exp6 = [argv for argv in self.commands if "--MB" in argv and "2e32" in argv]
         self.assertEqual(len(exp6), 1)
         argv = exp6[0]
@@ -2712,7 +2763,7 @@ class TestGrokQuotedFacts(unittest.TestCase):
         G = physics.G
         mass_b = 2.0e32
         radius = 4.6e10
-        speed = 500000.0
+        speed = comparison_speed
         circular_fixed = math.sqrt(G * mass_b / radius)
         self.assertAlmostEqual(circular_fixed, 539000.0, delta=1500.0)
         self.assertAlmostEqual(circular_fixed, 538690.0, delta=20.0)
@@ -2720,6 +2771,7 @@ class TestGrokQuotedFacts(unittest.TestCase):
         self.assertAlmostEqual(relative_circular, 541000.0, delta=500.0)
         semi = 1.0 / (2.0 / radius - speed * speed / (G * mass_b))
         period_days = 2.0 * math.pi * math.sqrt(semi ** 3 / (G * mass_b)) / 86400.0
+        self.assertAlmostEqual(period_days, comparison_period, delta=0.02)
         self.assertAlmostEqual(period_days, 5.11, delta=0.01)
         self.assertNotIn("outside the numerical range", printed)
 
