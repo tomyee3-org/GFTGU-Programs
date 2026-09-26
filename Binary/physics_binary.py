@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from math import frexp, fsum, hypot, isfinite, ldexp, pi, sqrt
 from numbers import Real
 
-MODEL_VERSION = "1.2.2"
+MODEL_VERSION = "1.2.3"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -107,47 +107,194 @@ def orbital_elements(MA: float, MB: float, xA: float, yA: float,
     mu = G * total_mass if isfinite(total_mass) else G * MA + G * MB
     if not all(isfinite(z) for z in (vx, vy, mu)) or mu <= 0:
         raise ValueError("Orbital elements are outside the numerical range.")
-    v2 = vx * vx + vy * vy
-    rv = rx * vx + ry * vy
-    h = rx * vy - ry * vx
-    specific_energy = 0.5 * v2 - mu / r
+    v2 = _scaled_sum_of_squares(vx, vy)
+    rv = _scaled_dot(rx, ry, vx, vy)
+    h = _scaled_cross(rx, ry, vx, vy)
+    specific_energy = _specific_orbital_energy(v2, mu, r)
     if not all(isfinite(z) for z in (v2, rv, h, specific_energy)):
         raise ValueError("Orbital elements are outside the numerical range.")
-    ex = ((v2 - mu / r) * rx - rv * vx) / mu
-    ey = ((v2 - mu / r) * ry - rv * vy) / mu
-    eccentricity = hypot(ex, ey)
-    if not isfinite(eccentricity):
-        raise ValueError("Orbital elements are outside the numerical range.")
-    if h == 0:
+    if h == 0.0:
         # Zero angular momentum: a straight-line (radial) path, inward or outward,
         # has no periapsis or apsidal speed in the usual sense.
-        return OrbitalElements("radial", eccentricity, None, None,
+        # e = |v^2 r / mu - 1| remains representable when the energy form is not.
+        return OrbitalElements("radial", 1.0, None, None,
                                None, None, None, None)
+    eccentricity = _eccentricity_magnitude(v2, mu, r, rx, ry, rv, vx, vy, h, specific_energy)
     # Treat roundoff at escape energy as a parabola.
     energy_tolerance = 1e-12 * mu / r
+    if not isfinite(energy_tolerance):
+        energy_tolerance = 0.0
     if abs(specific_energy) <= energy_tolerance:
         kind = "parabolic"
         eccentricity = 1.0
         semi = period = apo = speed_apo = None
     elif specific_energy < 0:
         kind = "elliptic"
-        semi = -mu / (2 * specific_energy)
+        semi = _scaled_positive_product_quotient(
+            (mu,), (2.0, abs(specific_energy)), "semi-major axis"
+        )
         eccentricity = min(eccentricity, 1.0)
         # semi ** 3 could overflow when the period is representable.
-        period = 2 * pi * semi * sqrt(semi / mu)
-        apo = semi * (1 + eccentricity)
-        speed_apo = abs(h) / apo
+        period = _elliptic_period(semi, mu)
+        apo = _scaled_product(semi, 1.0 + eccentricity, "apoapsis")
+        speed_apo = _safe_quotient(abs(h), apo, "apoapsis speed")
     else:
         kind = "hyperbolic"
-        semi = -mu / (2 * specific_energy)  # Signed conic semimajor axis.
+        semi = -_scaled_positive_product_quotient(
+            (mu,), (2.0, abs(specific_energy)), "semi-major axis"
+        )
         period = apo = speed_apo = None
-    peri = h / (mu * (1 + eccentricity)) * h
-    speed_peri = abs(h) / peri
-    if not all(isfinite(z) for z in (eccentricity, peri, speed_peri, period, apo, speed_apo)
+    peri = _periapsis_from_h(h, mu, eccentricity)
+    # A denormal periapsis is a needle ellipse: |h|/peri is not a useful speed.
+    if peri == 0.0 or abs(h) / peri == float("inf"):
+        speed_peri = None
+        if peri != 0.0 and peri < 1e-300:
+            peri = 0.0
+    else:
+        try:
+            speed_peri = _safe_quotient(abs(h), peri, "periapsis speed")
+        except ValueError:
+            speed_peri = None
+    if not all(isfinite(z) for z in (eccentricity, peri, speed_peri, period, apo, speed_apo, semi)
                if z is not None):
         raise ValueError("Orbital elements are outside the numerical range.")
     return OrbitalElements(kind, eccentricity, semi, period,
                            peri, apo, speed_peri, speed_apo)
+
+
+def _scaled_sum_of_squares(x: float, y: float) -> float:
+    """Return x*x + y*y without a false intermediate overflow."""
+    scale = max(abs(x), abs(y))
+    if scale == 0.0:
+        return 0.0
+    xs, ys = x / scale, y / scale
+    return (xs * xs + ys * ys) * scale * scale
+
+
+def _scaled_dot(ax: float, ay: float, bx: float, by: float) -> float:
+    """Return ax*bx + ay*by, or inf if the finite product overflows."""
+    try:
+        return _signed_scaled_product(ax, bx) + _signed_scaled_product(ay, by)
+    except ValueError:
+        return float("inf") if (ax * bx + ay * by) >= 0 else float("-inf")
+
+
+def _scaled_cross(ax: float, ay: float, bx: float, by: float) -> float:
+    """Return ax*by - ay*bx, or inf if the finite product overflows."""
+    try:
+        return _signed_scaled_product(ax, by) - _signed_scaled_product(ay, bx)
+    except ValueError:
+        left = ax * by
+        right = ay * bx
+        return float("inf") if (left - right) >= 0 else float("-inf")
+
+
+def _signed_scaled_product(a: float, b: float) -> float:
+    """Return a*b for finite a, b, raising ValueError only if the product overflows."""
+    if a == 0.0 or b == 0.0:
+        return 0.0
+    sign = -1.0 if (a < 0.0) ^ (b < 0.0) else 1.0
+    return sign * _scaled_positive_product_quotient((abs(a), abs(b)), (), "product")
+
+
+def _specific_orbital_energy(v2: float, mu: float, r: float) -> float:
+    """Return v^2/2 - mu/r without losing a representable result to mu/r overflow."""
+    kinetic = 0.5 * v2
+    try:
+        potential = _scaled_positive_product_quotient((mu,), (r,), "specific potential")
+    except ValueError:
+        return float("-inf") if isfinite(kinetic) else float("nan")
+    energy = kinetic - potential
+    if isfinite(energy):
+        return energy
+    if isfinite(kinetic) and potential > abs(kinetic):
+        return -potential
+    return energy
+
+
+def _eccentricity_magnitude(v2, mu, r, rx, ry, rv, vx, vy, h, specific_energy) -> float:
+    """Return |e| from the eccentricity vector, or from 1 + 2 E h^2 / mu^2."""
+    try:
+        ex = _eccentricity_component(v2, mu, r, rx, rv, vx)
+        ey = _eccentricity_component(v2, mu, r, ry, rv, vy)
+        eccentricity = hypot(ex, ey)
+        if isfinite(eccentricity):
+            return eccentricity
+    except ValueError:
+        pass
+    return _eccentricity_from_energy(specific_energy, h, mu)
+
+
+def _eccentricity_component(v2, mu, r, position, rv, velocity) -> float:
+    """One Cartesian component of the eccentricity vector, ((v^2-mu/r) r - (r·v) v)/mu."""
+    first = _signed_scaled_product(v2 - mu / r if isfinite(mu / r) else v2, position)
+    if not isfinite(mu / r) and position != 0.0:
+        # (v^2 - mu/r) * position = v^2 * position - mu * position/r
+        first = _signed_scaled_product(v2, position) - _signed_scaled_product(mu, position / r)
+    second = _signed_scaled_product(rv, velocity)
+    numerator = first - second
+    if numerator == 0.0:
+        return 0.0
+    sign = -1.0 if numerator < 0.0 else 1.0
+    return sign * _scaled_positive_product_quotient((abs(numerator),), (mu,), "eccentricity")
+
+
+def _eccentricity_from_energy(specific_energy, h, mu) -> float:
+    """e = sqrt(1 + 2 E h^2 / mu^2), evaluated so huge e still fits when it can."""
+    if mu <= 0.0:
+        raise ValueError("Orbital elements are outside the numerical range.")
+    alpha = _scaled_positive_product_quotient(
+        (sqrt(2.0), sqrt(abs(specific_energy)) if specific_energy != 0.0 else 0.0, abs(h)),
+        (mu,),
+        "eccentricity",
+    ) if specific_energy != 0.0 else 0.0
+    if specific_energy >= 0.0:
+        return hypot(1.0, alpha)
+    inner = 1.0 - alpha * alpha
+    if inner <= 0.0:
+        return 0.0
+    return sqrt(inner)
+
+
+def _elliptic_period(semi, mu) -> float:
+    """2 pi sqrt(a^3 / mu), without cubing a when that overflows."""
+    if not isfinite(semi) or semi <= 0.0:
+        raise ValueError("Orbital elements are outside the numerical range.")
+    root = sqrt(_scaled_positive_product_quotient((semi,), (mu,), "period"))
+    return 2 * pi * _scaled_positive_product_quotient((semi, root), (), "period")
+
+
+def _scaled_product(a, b, quantity) -> float:
+    if a == 0.0 or b == 0.0:
+        return 0.0
+    sign = -1.0 if (a < 0.0) ^ (b < 0.0) else 1.0
+    return sign * _scaled_positive_product_quotient((abs(a), abs(b)), (), quantity)
+
+
+def _periapsis_from_h(h, mu, eccentricity) -> float:
+    """h^2 / (mu (1+e)). Underflow to zero is kept; overflow is a range error."""
+    one_plus_e = 1.0 + eccentricity
+    if not isfinite(one_plus_e) or one_plus_e <= 0.0:
+        raise ValueError("Orbital elements are outside the numerical range.")
+    try:
+        return _scaled_positive_product_quotient(
+            (abs(h), abs(h)), (mu, one_plus_e), "periapsis"
+        )
+    except ValueError as error:
+        if "outside the numerical range" in str(error):
+            # A periapsis of zero is a needle ellipse, not a failed classification.
+            if abs(h) < 1.0 and mu > 1.0:
+                return 0.0
+        raise
+
+
+def _safe_quotient(numerator, denominator, quantity) -> float:
+    if denominator == 0.0:
+        raise ValueError("Orbital elements are outside the numerical range.")
+    sign = -1.0 if numerator < 0.0 else 1.0
+    return sign * _scaled_positive_product_quotient(
+        (abs(numerator),), (abs(denominator),), quantity
+    )
 
 
 def _finite_real(name: str, value: float) -> None:

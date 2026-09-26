@@ -47,36 +47,55 @@ def find_module_dir(start: Path) -> Path:
     )
 
 
-def find_help_file(module_dir: Path) -> Path:
-    """Find Help in a flattened upload or the GFTGU-Documentation tree.
+HELP_FILENAMES = ("Binary-claude.html", "Binary.html", "Binary-grok.html")
+
+
+def find_help_files(module_dir: Path) -> list[Path]:
+    """Find every Beats Help in a flattened upload or the documentation tree.
 
     Documentation folders no longer use chapter-number prefixes, and the
     Help files live under the sibling ``GFTGU-Documentation`` repository
     rather than beside the program modules inside ``GFTGU-Programs``.
+    ``Binary-claude.html`` (or ``Binary.html`` once adopted as the live Help)
+    is listed first so dense contract tests keep pinning the lab-manual file.
+    ``Binary-grok.html`` is the shorter terminal-script Beats file.  The
+    Reference Guide version, ``Binary-original.html``, is never used here.
     """
-    # The Beats Help is named Binary-claude.html until it is adopted as the
-    # live Help, when it is renamed Binary.html; either name is accepted, and
-    # the first one found is used.  The Reference Guide version,
-    # Binary-original.html, is never used here.
-    help_filenames = ("Binary-claude.html", "Binary.html")
     program_name = "Binary"
-    candidates = [module_dir / name for name in help_filenames]
+    candidates = [module_dir / name for name in HELP_FILENAMES]
     for ancestor in (module_dir, *module_dir.parents):
-        for name in help_filenames:
+        for name in HELP_FILENAMES:
             candidates.append(ancestor / "GFTGU-Documentation" / program_name / name)
             if ancestor.name != program_name:
                 candidates.append(ancestor / program_name / name)
+    found: list[Path] = []
+    seen = set()
     for candidate in candidates:
-        if candidate.is_file():
-            return candidate
-    raise FileNotFoundError(
-        "Could not find Binary-claude.html (or Binary.html) beside the program or in "
-        "GFTGU-Documentation/Binary/."
-    )
+        resolved = candidate.resolve() if candidate.is_file() else None
+        if resolved is None or resolved in seen:
+            continue
+        seen.add(resolved)
+        found.append(candidate)
+    return found
+
+
+def find_help_file(module_dir: Path) -> Path:
+    """Return the canonical Beats Help (Claude or live ``Binary.html``)."""
+    found = find_help_files(module_dir)
+    preferred = [path for path in found if path.name != "Binary-grok.html"]
+    chosen = preferred[0] if preferred else (found[0] if found else None)
+    if chosen is None:
+        raise FileNotFoundError(
+            "Could not find Binary-claude.html, Binary.html or Binary-grok.html "
+            "beside the program or in GFTGU-Documentation/Binary/."
+        )
+    return chosen
 
 
 MODULE_DIR = find_module_dir(Path(__file__))
+HELP_FILES = find_help_files(MODULE_DIR)
 HELP_FILE = find_help_file(MODULE_DIR)
+GROK_HELP_FILE = next((path for path in HELP_FILES if path.name == "Binary-grok.html"), None)
 if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 os.environ.setdefault("MPLBACKEND", "Agg")
@@ -2104,6 +2123,36 @@ class TestElementsWithoutFalseRangeErrors(unittest.TestCase):
                 self.assertAlmostEqual(fraction_b, float(Fraction(mass_a) / total), delta=1e-15)
                 self.assertAlmostEqual(fraction_a + fraction_b, 1.0, delta=2e-16)
 
+    def test_huge_hyperbolic_elements_are_representable(self):
+        elements = physics.orbital_elements(
+            7.49e106, 7.49e106, 5e149, 0.0, 0.0, 5e99, -5e149, 0.0, 0.0, -5e99
+        )
+        self.assertEqual(elements.kind, "hyperbolic")
+        self.assertAlmostEqual(elements.eccentricity / 1.0002e253, 1.0, delta=2e-4)
+        self.assertLess(elements.relative_semimajor, 0.0)
+        self.assertAlmostEqual(elements.relative_periapsis / 1e150, 1.0, delta=1e-12)
+        self.assertIsNone(elements.period)
+        self.assertIsNone(elements.relative_apoapsis)
+
+    def test_huge_radial_elements_are_representable(self):
+        elements = physics.orbital_elements(
+            7.49e106, 7.49e106, 5e149, 0.0, 5e99, 0.0, -5e149, 0.0, -5e99, 0.0
+        )
+        self.assertEqual(elements.kind, "radial")
+        self.assertEqual(elements.eccentricity, 1.0)
+        self.assertIsNone(elements.relative_semimajor)
+        self.assertIsNone(elements.relative_periapsis)
+        self.assertIsNone(elements.relative_speed_periapsis)
+
+    def test_tiny_needle_ellipse_does_not_divide_by_zero(self):
+        elements = physics.orbital_elements(
+            7.49e307, 7.49e307, 5e-11, 0.0, 0.0, 0.5, -5e-11, 0.0, 0.0, -0.5
+        )
+        self.assertEqual(elements.kind, "elliptic")
+        self.assertAlmostEqual(elements.relative_semimajor / 5e-11, 1.0, delta=1e-12)
+        self.assertGreaterEqual(elements.eccentricity, 0.0)
+        self.assertLessEqual(elements.eccentricity, 1.0)
+
 class TestPrintedSummaryLines(unittest.TestCase):
     def test_default_summary_lines(self):
         printed = printed_run([])
@@ -2149,6 +2198,16 @@ class TestPrintedSummaryLines(unittest.TestCase):
         self.assertIn("period: undefined", block[0])
         self.assertIn("Periapsis: 4.6e+10 m; apoapsis: undefined", block[1])
         self.assertIn("speed at apoapsis: undefined", block[2])
+
+    def test_huge_hyperbolic_command_prints_a_summary_instead_of_a_range_error(self):
+        printed = printed_run([
+            "--MA", "7.49e106", "--MB", "7.49e106",
+            "--xInitA", "5e149", "--xInitB", "-5e149",
+            "--uInitA", "5e99", "--uInitB", "-5e99",
+            "--dt", "1", "--max_steps", "1", "--no-stop_after_one_orbit",
+        ])
+        self.assertIn("Initial Keplerian orbit: hyperbolic; eccentricity: 1.0002e+253", printed)
+        self.assertNotIn("outside the numerical range", printed)
 
     def test_radial_start_line_is_true_for_outward_and_inward_motion(self):
         message = "Radial trajectory (zero angular momentum): apsides and period are undefined."
@@ -2272,6 +2331,70 @@ def documented_commands(html):
                     continue
                 commands.append(argv[2:])
     return commands
+
+
+class TestBothHelpFiles(unittest.TestCase):
+    """Claude and Grok Beats files share stamps, beats and runnable commands."""
+
+    def test_canonical_help_is_the_dense_file_when_both_are_present(self):
+        self.assertTrue(HELP_FILE.is_file())
+        self.assertNotEqual(HELP_FILE.name, "Binary-grok.html")
+
+    def test_grok_help_is_discovered_beside_the_canonical_file(self):
+        if GROK_HELP_FILE is None:
+            self.skipTest("Binary-grok.html is not in the documentation tree")
+        self.assertTrue(GROK_HELP_FILE.is_file())
+        self.assertEqual(GROK_HELP_FILE.parent, HELP_FILE.parent)
+        names = {path.name for path in HELP_FILES}
+        self.assertIn("Binary-grok.html", names)
+        self.assertTrue({"Binary-claude.html", "Binary.html"} & names)
+
+    def test_every_beats_help_carries_the_live_version_and_build(self):
+        files = [HELP_FILE]
+        if GROK_HELP_FILE is not None:
+            files.append(GROK_HELP_FILE)
+        pattern = re.compile(
+            r"Version\s+([0-9]+\.[0-9]+\.[0-9]+)\s+(?:&nbsp;\s*)*Build\s+([0-9a-f]{12})",
+            flags=re.IGNORECASE,
+        )
+        for path in files:
+            with self.subTest(path=path.name):
+                html = html_module.unescape(path.read_text(encoding="utf-8"))
+                match = pattern.search(re.sub(r"\s+", " ", html))
+                self.assertIsNotNone(match)
+                self.assertEqual(match.group(1), physics.MODEL_VERSION)
+                self.assertEqual(match.group(2), physics.BUILD_ID)
+
+    def test_grok_help_has_beats_zero_to_seven_and_the_licence(self):
+        if GROK_HELP_FILE is None:
+            self.skipTest("Binary-grok.html is not in the documentation tree")
+        html = GROK_HELP_FILE.read_text(encoding="utf-8")
+        ids = re.findall(r'<section id="(beat\d+)"', html)
+        self.assertEqual(ids, [f"beat{n}" for n in range(8)])
+        for phrase in (
+            "Bernard Schutz",
+            "Gravity from the Ground Up",
+            "Cambridge University Press",
+            "CC BY-NC-SA 4.0",
+            "about the centre of mass",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, html)
+        for pattern in (
+            r"\bAI-generated\b", r"\bChatGPT\b", r"\bClaude\b",
+            r"\bCopilot\b", r"\bGemini\b",
+        ):
+            self.assertIsNone(re.search(pattern, html, re.IGNORECASE))
+
+    def test_every_command_in_the_grok_help_parses(self):
+        if GROK_HELP_FILE is None:
+            self.skipTest("Binary-grok.html is not in the documentation tree")
+        html = GROK_HELP_FILE.read_text(encoding="utf-8")
+        commands = documented_commands(html)
+        self.assertGreaterEqual(len(commands), 8)
+        for argv in commands:
+            with self.subTest(argv=argv):
+                entry.parse_args(argv)
 
 
 class HelpLayoutRecogniserTests(unittest.TestCase):
