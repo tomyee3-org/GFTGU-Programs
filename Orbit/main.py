@@ -18,7 +18,7 @@ student-facing input parameters are:
 ``eps2``
     Positive convergence tolerance for the iterated velocity correction.
 ``maxOrbits``
-    Positive requested azimuthal travel, measured in revolutions.
+    Requested azimuthal travel of at least 1e-9 revolutions.
 ``output``
     Plot selector. ``orbit`` shows x versus y; ``velocity`` shows the Hamilton
     hodograph; ``position_time`` and ``velocity_time`` show Cartesian
@@ -118,7 +118,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     controls.add_argument(
         "--maxOrbits", type=float, default=1.0, metavar="REV",
-        help="positive requested accumulated azimuthal revolutions",
+        help="requested accumulated azimuthal revolutions, at least 1e-9",
     )
 
     display = parser.add_argument_group("Display")

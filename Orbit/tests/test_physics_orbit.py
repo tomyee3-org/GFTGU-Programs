@@ -63,34 +63,31 @@ import physics_orbit as physics  # noqa: E402
 import plot_orbit as plotting  # noqa: E402
 
 
-def find_help_file(module_dir: Path) -> Path:
-    """Find Help in a flattened upload or the GFTGU-Documentation tree.
+def find_help_files(module_dir: Path) -> tuple[Path, Path]:
+    """Require both active Helps together in a flattened or sibling layout.
 
     Documentation folders no longer use chapter-number prefixes, and the
     Help files live under the sibling ``GFTGU-Documentation`` repository
     rather than beside the program modules inside ``GFTGU-Programs``.
     """
-    # The Beats Help is named Orbit-claude.html until it is adopted as the
-    # live Help, when it is renamed Orbit.html; either name is accepted.  The
-    # Reference Guide version, Orbit-original.html, is never used here.
-    help_filenames = ("Orbit-claude.html", "Orbit.html")
+    help_filenames = ("Orbit-claude.html", "Orbit-grok.html")
     program_name = "Orbit"
-    candidates = [module_dir / name for name in help_filenames]
+    candidates = [module_dir]
     for ancestor in (module_dir, *module_dir.parents):
-        for name in help_filenames:
-            candidates.append(ancestor / "GFTGU-Documentation" / program_name / name)
-            if ancestor.name != program_name:
-                candidates.append(ancestor / program_name / name)
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
+        candidates.append(ancestor / "GFTGU-Documentation" / program_name)
+        if ancestor.name != program_name:
+            candidates.append(ancestor / program_name)
+    for directory in candidates:
+        files = (directory / help_filenames[0], directory / help_filenames[1])
+        if all(file.is_file() for file in files):
+            return files
     raise FileNotFoundError(
-        "Could not find Orbit-claude.html (or Orbit.html) beside the program or in "
+        "Could not find both Orbit-claude.html and Orbit-grok.html together beside the program or in "
         "GFTGU-Documentation/Orbit/."
     )
 
 
-HELP_PATH = find_help_file(MODULE_DIR)
+HELP_PATH, GROK_HELP_PATH = find_help_files(MODULE_DIR)
 DOCUMENTATION_DIR = HELP_PATH.parent
 ORIGINAL_HELP_PATH = DOCUMENTATION_DIR / "Orbit-original.html"
 RELEASE_NOTES_PATH = DOCUMENTATION_DIR / "Orbit-ReleaseNotes.html"
@@ -982,6 +979,7 @@ class ReportedDefectRegressionTests(unittest.TestCase):
 # --------------------------------------------------------------------------
 
 HELP_HTML = HELP_PATH.read_text(encoding="utf-8")
+GROK_HTML = GROK_HELP_PATH.read_text(encoding="utf-8")
 BEAT_NUMBERS = tuple(range(9))
 EXPERIMENT_NUMBERS = tuple(range(1, 16))
 EQUATION_COUNT = 17
@@ -1208,6 +1206,64 @@ class HelpStructureTests(unittest.TestCase):
         for reference in ("Table 4.3", "Table 4.2", "Investigation 4.1", "Investigation 4.2", "Chapter 6"):
             with self.subTest(reference=reference):
                 self.assertIn(reference, text)
+
+
+class PairedTutorialTests(unittest.TestCase):
+    def test_both_tutorials_are_required_in_the_same_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            (folder / "Orbit-claude.html").write_text("example", encoding="utf-8")
+            with self.assertRaisesRegex(FileNotFoundError, "both"):
+                find_help_files(folder)
+            (folder / "Orbit-grok.html").write_text("example", encoding="utf-8")
+            self.assertEqual(
+                tuple(path.name for path in find_help_files(folder)),
+                ("Orbit-claude.html", "Orbit-grok.html"),
+            )
+
+    def test_grok_guide_structure_version_and_commands(self) -> None:
+        structure = HelpStructure(GROK_HTML)
+        self.assertEqual(structure.errors, [])
+        self.assertEqual(len(structure.ids), len(set(structure.ids)))
+        self.assertEqual(set(structure.hrefs) - set(structure.ids), set())
+        self.assertEqual(
+            [name for name in structure.section_ids if name.startswith("beat")],
+            [f"beat{number}" for number in BEAT_NUMBERS],
+        )
+        self.assertEqual(GROK_HTML.count('class="activity"'), 15)
+        stamp = IdTextParser()
+        stamp.feed(GROK_HTML)
+        self.assertEqual(
+            " ".join(" ".join(stamp.text_by_id["version_build"]).split()),
+            f"Version {physics.MODEL_VERSION} Build {physics.BUILD_ID}",
+        )
+        for action in orbit_main.build_parser()._actions:
+            for option in action.option_strings:
+                if option.startswith("--"):
+                    self.assertIn(option, GROK_HTML)
+        for command in set(documented_commands(GROK_HTML)):
+            with self.subTest(command=command):
+                self.assertTrue(run_cli(command_arguments(command)).stdout.startswith("Orbit "))
+
+    def test_grok_equations_are_renderable_mathematical_expressions(self) -> None:
+        self.assertEqual(GROK_HTML.count(r"\("), GROK_HTML.count(r"\)"))
+        for formula in (r"\(\mathbf a=-\mu", r"\(\mathcal E=v^2/2-\mu/r\)",
+                        r"\(T=2\pi\sqrt{a^3/\mu}\)"):
+            with self.subTest(formula=formula):
+                self.assertIn(formula, GROK_HTML)
+        self.assertNotIn("(mathbf a=-mu,mathbf r/r^3)", GROK_HTML)
+
+    def test_both_current_helps_state_the_minimum_revolution_target(self) -> None:
+        self.assertIn("at least 1e-9", " ".join(run_cli(("--help",)).stdout.split()))
+        for document in (HELP_HTML, GROK_HTML):
+            self.assertIn("at least 1e-9", html_text(document).replace("10−9", "1e-9"))
+
+    def test_sample_figure_commands_are_in_the_corresponding_grok_beats(self) -> None:
+        samples = SAMPLE_OUTPUTS_PATH.read_text(encoding="utf-8")
+        for number, body in re.findall(r'<section id="beat(\d)">(.*?)</section>', samples, re.S):
+            command = html_module.unescape(re.search(r'<pre><code>(.*?)</code></pre>', body, re.S).group(1))
+            with self.subTest(beat=number):
+                self.assertIn(command, documented_commands(section_html(GROK_HTML, f"beat{number}")))
 
 
 class HelpBeatTests(unittest.TestCase):
@@ -2060,29 +2116,17 @@ def run_cli_uncached(arguments: tuple[str, ...]) -> driver.OrbitResult:
     "Orbit-original.html (the Reference Guide Help) is not present; nothing else depends on it",
 )
 class ReferenceGuideHelpTests(unittest.TestCase):
-    """While the Reference Guide Help is kept, it must still describe this program."""
+    """The archived Reference Guide retains its historical release identity."""
 
     @classmethod
     def setUpClass(cls) -> None:
         cls.html = ORIGINAL_HELP_PATH.read_text(encoding="utf-8")
 
-    def test_version_build_stamp_matches_the_program(self) -> None:
+    def test_version_build_stamp_identifies_the_archived_release(self) -> None:
         parser = IdTextParser()
         parser.feed(self.html)
         stamp = " ".join(" ".join(parser.text_by_id["version_build"]).split())
-        self.assertEqual(stamp, f"Version {physics.MODEL_VERSION} Build {physics.BUILD_ID}")
-
-    def test_every_option_and_output_choice_is_documented(self) -> None:
-        text = html_text(self.html)
-        parser = orbit_main.build_parser()
-        for action in parser._actions:
-            for option in action.option_strings:
-                if option.startswith("--") and option not in ("--help", "--version"):
-                    with self.subTest(option=option):
-                        self.assertIn(option, text)
-        for choice in orbit_main.OUTPUT_CHOICES:
-            self.assertIn(f'"{choice}"', text)
-
+        self.assertEqual(stamp, "Version 1.7.0 Build a1a3dbb90d3b")
 
 # ``ReleaseNotes`` and ``SampleOutputs_Guide`` are revised only after the audit
 # rounds are complete.  Until then each legitimately still describes the release
@@ -2217,7 +2261,8 @@ class DocumentationSetTests(unittest.TestCase):
 
     def test_release_notes_have_the_required_sections_in_order_and_only_plain_html(self) -> None:
         headings = re.findall(r"<h2>(.*?)</h2>", self.release_notes)
-        self.assertEqual(headings, self.RELEASE_NOTES_HEADINGS)
+        self.assertEqual(headings[:7], self.RELEASE_NOTES_HEADINGS)
+        self.assertEqual(headings[7], "Historical Release Notes")
         for forbidden in ("<table", "<script", "<style", "style=", "<img"):
             self.assertNotIn(forbidden, self.release_notes)
         tags = set(re.findall(r"</?([a-zA-Z0-9]+)", self.release_notes))
@@ -2239,11 +2284,13 @@ class DocumentationSetTests(unittest.TestCase):
     def test_open_bug_about_the_maxorbits_minimum_is_removed_once_the_program_states_it(self) -> None:
         help_text = run_cli(("--help",)).stdout
         stated_in_help = "1e-9" in help_text or "1e-09" in help_text
-        listed_open = "<b>OB-1</b>" in self.release_notes and "lower limit of <code>--maxOrbits</code>" in self.release_notes
+        current_bugs = self.release_notes.split("<h2>Open Bugs</h2>", 1)[1].split("<h2>", 1)[0]
+        listed_open = "<b>OB-1</b>" in current_bugs
         self.assertNotEqual(stated_in_help, listed_open, "OB-1 and the program's --help disagree")
 
     def test_release_notes_test_growth_ends_at_the_current_suite_size(self) -> None:
-        counts = [int(n) for n in re.findall(r"(?:\d\.\d\.\d: |, )(\d+)(?: tests)?", re.search(r"<li>1\.4\.0:.*?</li>", self.release_notes, re.S).group(0))]
+        growth = re.search(r"<li>1\.4\.0:.*?</li>", self.release_notes, re.S).group(0)
+        counts = [int(n) for n in re.findall(r"\d+\.\d+\.\d+: (\d+)", growth)]
         ran = unittest.defaultTestLoader.discover(str(Path(__file__).resolve().parent)).countTestCases()
         self.assertEqual(counts[-1], ran)
 
