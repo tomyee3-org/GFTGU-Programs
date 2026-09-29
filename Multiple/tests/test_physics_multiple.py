@@ -7,6 +7,7 @@ The locator intentionally supports both repository layouts used for review:
 """
 
 import ast
+import base64
 import contextlib
 import hashlib
 from html import unescape
@@ -32,12 +33,9 @@ CORE_MODULE_FILES = (
     "main.py",
     "plot_multiple.py",
 )
-# The Beats Help is named Multiple-claude.html until it is adopted as the live
-# Help, when it is renamed Multiple.html; either name is accepted, and the first
-# one found is used.  The Reference Guide version, Multiple-original.html, is
-# optional: the tests written for its text read it when it is present and skip
-# otherwise.
-HELP_FILENAMES = ("Multiple-claude.html", "Multiple.html")
+# Both active tutorials are one documentation set. The archived Reference
+# Guide remains optional for its historical text checks.
+HELP_FILENAMES = ("Multiple-claude.html", "Multiple-grok.html")
 PROGRAM_NAME = "Multiple"
 
 
@@ -54,25 +52,20 @@ def find_module_dir(start) -> Path:
     )
 
 
-def find_help_file(module_dir):
-    """Find Help in a flattened upload or the GFTGU-Documentation tree.
-
-    Documentation folders no longer use chapter-number prefixes, and the
-    Help files live under the sibling ``GFTGU-Documentation`` repository
-    rather than beside the program modules inside ``GFTGU-Programs``.
-    """
-    candidates = [module_dir / name for name in HELP_FILENAMES]
+def find_help_files(module_dir):
+    """Find both active tutorials together in a flattened or sibling tree."""
+    candidates = [module_dir]
     for ancestor in (module_dir, *module_dir.parents):
-        for name in HELP_FILENAMES:
-            candidates.append(ancestor / "GFTGU-Documentation" / PROGRAM_NAME / name)
-            if ancestor.name != PROGRAM_NAME:
-                candidates.append(ancestor / PROGRAM_NAME / name)
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
+        candidates.append(ancestor / "GFTGU-Documentation" / PROGRAM_NAME)
+        if ancestor.name != PROGRAM_NAME:
+            candidates.append(ancestor / PROGRAM_NAME)
+    for directory in candidates:
+        paths = tuple(directory / name for name in HELP_FILENAMES)
+        if all(path.is_file() for path in paths):
+            return paths
     raise FileNotFoundError(
-        f"Could not find {' or '.join(HELP_FILENAMES)} beside the program or in "
-        f"GFTGU-Documentation/{PROGRAM_NAME}/."
+        f"Both Multiple tutorial files ({', '.join(HELP_FILENAMES)}) must be "
+        f"present together beside the program or in GFTGU-Documentation/{PROGRAM_NAME}/."
     )
 
 
@@ -84,8 +77,7 @@ def original_help_text(test) -> str:
 
 
 MODULE_DIR = find_module_dir(Path(__file__))
-HELP_PATH = find_help_file(MODULE_DIR)
-# The Help file found above is the Beats tutorial, under either of its names.
+HELP_PATH, GROK_HELP_PATH = find_help_files(MODULE_DIR)
 BEATS_HELP_FILE: Optional[Path] = HELP_PATH
 ORIGINAL_HELP_FILE = HELP_PATH.parent / "Multiple-original.html"
 if str(MODULE_DIR) not in sys.path:
@@ -1049,6 +1041,18 @@ class TestPlotting(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     plotting.plot_trajectories(result)
 
+    def test_zero_body_plot_results_raise_clear_shape_errors(self):
+        with self.assertRaisesRegex(ValueError, "positions must have shape.*one body"):
+            plotting.plot_trajectories({
+                "type": "trajectories", "display_frame": "user",
+                "positions": np.empty((1, 0, 3)),
+            })
+        with self.assertRaisesRegex(ValueError, "frame_positions must have shape.*one body"):
+            plotting.animate_multiple({
+                "type": "animation", "frame_times": [0.0],
+                "frame_positions": np.empty((1, 0, 3)),
+            })
+
     def test_plot_energy_rejects_wrong_result_type(self):
         with self.assertRaisesRegex(ValueError, "trajectories mode"):
             plotting.plot_energy_drift({"type": "animation"})
@@ -1537,6 +1541,62 @@ class _HelpInspector(HTMLParser):
         href = attributes.get("href", "")
         if tag == "a" and href.startswith("#"):
             self.fragment_links.append(href[1:])
+
+
+class PairedTutorialTests(unittest.TestCase):
+    def test_both_tutorials_are_required_together(self):
+        self.assertEqual((HELP_PATH.name, GROK_HELP_PATH.name), HELP_FILENAMES)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / HELP_FILENAMES[0]).touch()
+            with self.assertRaisesRegex(FileNotFoundError, "Both Multiple tutorial"):
+                find_help_files(root)
+
+    def test_both_tutorials_share_build_options_and_navigation(self):
+        for path in (HELP_PATH, GROK_HELP_PATH):
+            with self.subTest(path=path):
+                source = path.read_text(encoding="utf-8")
+                inspector = _HelpInspector()
+                inspector.feed(source)
+                self.assertEqual(len(inspector.ids), len(set(inspector.ids)))
+                self.assertTrue(set(inspector.fragment_links).issubset(inspector.ids))
+                for beat in range(9):
+                    self.assertIn(f"beat{beat}", inspector.ids)
+                self.assertRegex(
+                    source,
+                    rf"Version\s+{re.escape(phys.MODEL_VERSION)}(?:&nbsp;|\s)+"
+                    rf"Build\s+{re.escape(phys.BUILD_ID)}",
+                )
+                for name in entry.DEFAULTS:
+                    self.assertIn("--" + name, source)
+                self.assertIn("(x, y)", source)
+                self.assertNotIn("far fewer position and velocity states", source)
+                self.assertNotIn("Claude tutorial", source)
+                self.assertNotIn("Grok tutorial", source)
+
+    def test_grok_commands_parse_and_activities_are_complete(self):
+        source = GROK_HELP_PATH.read_text(encoding="utf-8")
+        commands = []
+        for block in re.findall(r'<pre class="code-block"><code>(.*?)</code></pre>',
+                                source, flags=re.DOTALL):
+            commands.extend(line.strip() for line in unescape(block).splitlines()
+                            if line.strip().startswith("python main.py"))
+        self.assertGreaterEqual(len(commands), 14)
+        for command in commands:
+            with self.subTest(command=command), contextlib.redirect_stderr(io.StringIO()):
+                entry.parse_args(shlex.split(command)[2:])
+        self.assertEqual([int(i) for i in re.findall(r'<b>Try (\d+):</b>', source)],
+                         list(range(1, 11)))
+
+    def test_instructor_guide_matches_build_and_has_nine_images(self):
+        guide = (HELP_PATH.parent / "SampleOutputs" /
+                 "Multiple-SampleOutputs_Guide.html").read_text(encoding="utf-8")
+        self.assertIn(f"Version {phys.MODEL_VERSION}", guide)
+        self.assertIn(f"Build {phys.BUILD_ID}", guide)
+        images = re.findall(r'data:image/png;base64,([A-Za-z0-9+/=]+)', guide)
+        self.assertEqual(len(images), 9)
+        for encoded in images:
+            self.assertTrue(base64.b64decode(encoded).startswith(b"\x89PNG\r\n\x1a\n"))
 
 
 @unittest.skipIf(BEATS_HELP_FILE is None, "Beats-format Help not present")

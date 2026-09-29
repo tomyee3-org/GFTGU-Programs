@@ -114,10 +114,11 @@ def _validated_result_positions(result: Dict[str, Any]) -> np.ndarray:
         positions = np.asarray(raw_positions, dtype=float)
     except (TypeError, ValueError) as exc:
         raise ValueError("positions must be a numeric array.") from exc
-    if positions.ndim != 3 or positions.shape[0] == 0 or positions.shape[2] != 3:
+    if (positions.ndim != 3 or positions.shape[0] == 0
+            or positions.shape[1] == 0 or positions.shape[2] != 3):
         raise ValueError(
             "positions must have shape (number of states, number of "
-            "bodies, 3), with at least one state."
+            "bodies, 3), with at least one state and one body."
         )
     if not np.all(np.isfinite(positions)):
         raise ValueError("positions must contain only finite values.")
@@ -298,11 +299,12 @@ def animate_multiple(result: Dict[str, Any]):
         frame_times.ndim != 1
         or source_positions.ndim != 3
         or source_positions.shape[0] != frame_times.shape[0]
+        or source_positions.shape[1] == 0
         or source_positions.shape[2] != 3
     ):
         raise ValueError(
             "frame_positions must have shape (number of frame_times, "
-            "number of bodies, 3)."
+            "number of bodies, 3), with at least one body."
         )
     if not (
         np.all(np.isfinite(frame_times))
