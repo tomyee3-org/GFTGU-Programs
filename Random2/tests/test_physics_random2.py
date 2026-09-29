@@ -972,7 +972,7 @@ class PairedTutorialTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertEqual(rows[name], "omitted" if default is None else str(default))
 
-    def test_grok_commands_and_figure_commands_run(self):
+    def test_grok_commands_run(self):
         commands = documented_commands(GROK_HTML)
         self.assertGreaterEqual(len(set(commands)), 15)
         for command in dict.fromkeys(commands):
@@ -986,12 +986,6 @@ class PairedTutorialTests(unittest.TestCase):
         self.assertEqual(rejected.exit_code, 2)
         self.assertIn("max_steps must be at least 2", rejected.stderr)
         self.assertIn("expected to fail", section_html(GROK_HTML, "beat8"))
-        samples = SAMPLE_OUTPUTS_PATH.read_text(encoding="utf-8")
-        for number in BEAT_NUMBERS:
-            sample = section_html(samples, f"beat{number}")
-            command = html_module.unescape(
-                re.search(r"<pre><code>(.*?)</code></pre>", sample, re.S).group(1))
-            self.assertIn(command, documented_commands(section_html(GROK_HTML, f"beat{number}")))
 
     def test_grok_quantities_and_student_content(self):
         for number in BEAT_NUMBERS:
@@ -1919,6 +1913,10 @@ class DocumentationSetTests(unittest.TestCase):
         self.assertIn("Random2-claude.html", self.samples)
         self.assertIn("Random2-grok.html", self.samples)
         self.assertNotIn("Random2.html", self.samples)
+        student = re.sub(r"base64,[A-Za-z0-9+/=]+", "", self.samples)
+        student = student.replace("Random2-grok.html", "").replace("Random2-claude.html", "").lower()
+        for term in ("codex", "grok", "claude", "xedoc", "kickoff", "audit"):
+            self.assertNotIn(term, student)
 
     def test_sample_outputs_have_one_figure_section_per_beat_in_order(self):
         self.assertEqual([int(n) for n in re.findall(r'<section id="beat(\d)">', self.samples)], list(BEAT_NUMBERS))
@@ -1943,6 +1941,7 @@ class DocumentationSetTests(unittest.TestCase):
             command = html_module.unescape(re.search(r"<pre><code>(.*?)</code></pre>", body, re.S).group(1))
             with self.subTest(beat=number):
                 self.assertIn(command, documented_commands(section_html(HELP_HTML, f"beat{number}")))
+                self.assertIn(command, documented_commands(section_html(GROK_HTML, f"beat{number}")))
                 self.assertTrue(is_seeded(command_arguments(command)))
                 self.assertIn(run_cli(command_arguments(command)).exit_code, (None, 0))
             commands.append(command_arguments(command))
