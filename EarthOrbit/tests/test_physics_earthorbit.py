@@ -1088,8 +1088,12 @@ class PairedTutorialTests(unittest.TestCase):
         for path in HELP_FILES:
             with self.subTest(style=path.name):
                 page = path.read_text(encoding="utf-8")
-                self.assertRegex(page, r"Version 1\.5\.0&nbsp;(?:&nbsp;){3}Build "
-                                       + physics.BUILD_ID)
+                self.assertRegex(
+                    page,
+                    re.escape(f"Version {physics.MODEL_VERSION}")
+                    + r"&nbsp;(?:&nbsp;){3}Build "
+                    + re.escape(physics.BUILD_ID),
+                )
                 ids = _IdCollector()
                 ids.feed(page)
                 self.assertEqual(len(ids.ids), len(set(ids.ids)))
@@ -1329,6 +1333,15 @@ class DocumentationSetTests(unittest.TestCase):
     def test_documentation_files_exist(self):
         self.assertTrue(RELEASE_NOTES_FILE.is_file())
         self.assertTrue(SAMPLE_OUTPUTS_FILE.is_file())
+
+    def test_student_documents_do_not_leak_development_vocabulary(self):
+        pattern = re.compile(
+            r"\b(?:Codex|Copilot|Gemini|ChatGPT|Xedoc|Kickoff\d*|Audit\d+)\b",
+            re.IGNORECASE,
+        )
+        for path in (*HELP_FILES, SAMPLE_OUTPUTS_FILE):
+            with self.subTest(document=path.name):
+                self.assertNotRegex(path.read_text(encoding="utf-8"), pattern)
 
     def test_release_notes_match_current_version_and_build(self):
         self.assertIn(f"<b>Version:</b> {physics.MODEL_VERSION}", self.release_notes)
