@@ -33,12 +33,9 @@ CORE_MODULE_FILENAMES = (
     "main.py",
     "plot_mercpert.py",
 )
-# The Beats Help is named MercPert-claude.html until it is adopted as the live
-# Help, when it is renamed MercPert.html; either name is accepted, and the first
-# one found is used.  The Reference Guide version, MercPert-original.html, is
-# optional: the tests written for its text read it when it is present and skip
-# otherwise.
-HELP_FILENAMES = ("MercPert-claude.html", "MercPert.html")
+# Both active tutorial formats are required in one documentation folder. The
+# original Reference Guide is retained for historical checks only.
+HELP_FILENAMES = ("MercPert-claude.html", "MercPert-grok.html")
 PROGRAM_NAME = "MercPert"
 
 
@@ -57,8 +54,8 @@ def find_module_dir(start: Path) -> Path:
     )
 
 
-def find_help_file(module_dir: Path) -> Path:
-    """Find Help in a flattened upload or the GFTGU-Documentation tree.
+def find_help_files(module_dir: Path) -> tuple[Path, Path]:
+    """Find both tutorials together in a flattened upload or documentation tree.
 
     Documentation folders no longer use chapter-number prefixes, and the
     Help files live under the sibling ``GFTGU-Documentation`` repository
@@ -70,18 +67,19 @@ def find_help_file(module_dir: Path) -> Path:
             candidates.append(ancestor / "GFTGU-Documentation" / PROGRAM_NAME / name)
             if ancestor.name != PROGRAM_NAME:
                 candidates.append(ancestor / PROGRAM_NAME / name)
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
+    for directory in dict.fromkeys(candidate.parent for candidate in candidates):
+        pair = tuple(directory / name for name in HELP_FILENAMES)
+        if all(path.is_file() for path in pair):
+            return pair
     raise FileNotFoundError(
-        f"Could not find {' or '.join(HELP_FILENAMES)} beside the program or in "
-        f"GFTGU-Documentation/{PROGRAM_NAME}/."
+        "Both MercPert-claude.html and MercPert-grok.html must be in one folder "
+        f"beside the program or in GFTGU-Documentation/{PROGRAM_NAME}/."
     )
 
 
 MODULE_DIR = find_module_dir(Path(__file__))
-HELP_FILE = find_help_file(MODULE_DIR)
-# The Help file found above is the Beats tutorial, under either of its names.
+HELP_FILES = find_help_files(MODULE_DIR)
+HELP_FILE, GROK_HELP_FILE = HELP_FILES
 BEATS_HELP_FILE: Optional[Path] = HELP_FILE
 ORIGINAL_HELP_FILE = HELP_FILE.parent / "MercPert-original.html"
 
@@ -321,6 +319,69 @@ class MetadataAndCompatibilityTests(unittest.TestCase):
         ).lower()
         self.assertNotIn("listing of the java code", help_text)
         self.assertNotIn("private double", help_text)
+
+
+class PairedTutorialTests(unittest.TestCase):
+    """The short and long tutorials must describe the same executable build."""
+
+    def test_both_tutorials_are_required_together(self) -> None:
+        self.assertEqual(tuple(path.name for path in HELP_FILES), HELP_FILENAMES)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / HELP_FILENAMES[0]).write_text("only Claude", encoding="utf-8")
+            with self.assertRaisesRegex(FileNotFoundError, "Both MercPert"):
+                find_help_files(root)
+
+    def test_both_tutorials_share_version_cli_and_navigation(self) -> None:
+        stamp = (re.escape(f"Version {physics.MODEL_VERSION}")
+                 + r"(?:&nbsp;|\s)+Build " + re.escape(physics.BUILD_ID))
+        for path in HELP_FILES:
+            with self.subTest(tutorial=path.name):
+                page = path.read_text(encoding="utf-8")
+                self.assertRegex(page, stamp)
+                inspector = _HelpInspector()
+                inspector.feed(page)
+                self.assertEqual(len(inspector.ids), len(set(inspector.ids)))
+                self.assertTrue(set(inspector.fragment_links).issubset(inspector.ids))
+                self.assertEqual(inspector.ids.count("version_build"), 1)
+                for beat in range(10):
+                    self.assertIn(f'<section id="beat{beat}">', page)
+                for option in entry.DEFAULTS:
+                    self.assertIn("--" + option, page)
+                self.assertIn("(x, y)", page)
+                self.assertNotRegex(page.lower(), r"\b(?:codex|grok|audit\d+|kickoff\d*)\b")
+
+    def test_grok_beat_commands_use_the_shared_cli(self) -> None:
+        page = GROK_HELP_FILE.read_text(encoding="utf-8")
+        for beat in range(10):
+            section = re.search(rf'<section id="beat{beat}">(.*?)</section>',
+                                page, flags=re.DOTALL)
+            self.assertIsNotNone(section)
+            assert section is not None
+            blocks = re.findall(r'<pre class="code-block"><code>(.*?)</code></pre>',
+                                section.group(1), flags=re.DOTALL)
+            commands = [line.strip() for block in blocks
+                        for line in unescape(block).splitlines()
+                        if line.strip().startswith("python main.py")]
+            self.assertTrue(commands, f"Beat {beat} lacks a runnable CLI command")
+            for command in commands:
+                with self.subTest(beat=beat, command=command), \
+                        redirect_stderr(io.StringIO()):
+                    args = shlex.split(command)[2:]
+                    if beat == 9 and "--x_init 0" not in command:
+                        with self.assertRaises(SystemExit):
+                            entry.parse_args(args)
+                    else:
+                        entry.parse_args(args)
+
+    def test_unequal_duration_drift_comparison_is_qualified_everywhere(self) -> None:
+        guide = HELP_FILE.parent / "SampleOutputs" / "MercPert-SampleOutputs_Guide.html"
+        for path in (*HELP_FILES, guide):
+            with self.subTest(document=path.name):
+                page = path.read_text(encoding="utf-8")
+                self.assertIn("919.20", page)
+                self.assertIn("852.41", page)
+                self.assertRegex(page.lower(), r"(?:unequal durations|not a matched-duration|rather than 919\.20)")
 
 
 class ValidationTests(unittest.TestCase):
