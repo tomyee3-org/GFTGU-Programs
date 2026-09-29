@@ -5,14 +5,14 @@ The discovery logic deliberately supports both repository layout
     RelativisticOrbit/tests/test_physics_relativistic_orbit.py
 
 and a flattened review/upload layout in which this test file is placed beside
-the four program modules and RelativisticOrbit-claude.html.  The Beats Help,
-RelativisticOrbit-claude.html, is required; the Reference Guide Help,
-RelativisticOrbit-original.html, is optional and its tests skip without it.
+the four program modules and both active tutorials.  The Claude and Grok
+guides are required together; the archived Reference Guide is optional.
 """
 
 from __future__ import annotations
 
 import contextlib
+import base64
 from dataclasses import fields
 import ast
 import hashlib
@@ -41,8 +41,9 @@ CORE_MODULE_FILENAMES = (
     "main.py",
     "plot_relativistic_orbit.py",
 )
-# The Beats Help file; the Reference Guide version (-original) is never used here.
-HELP_FILENAMES = ("RelativisticOrbit-claude.html", "RelativisticOrbit.html")
+# Both active tutorials are required in the same directory. The archived
+# Reference Guide is optional and does not track subsequent core changes.
+HELP_FILENAMES = ("RelativisticOrbit-claude.html", "RelativisticOrbit-grok.html")
 PROGRAM_NAME = "RelativisticOrbit"
 MINIMUM_PYTHON_VERSION = (3, 10)
 
@@ -63,30 +64,31 @@ def find_module_dir(start: str | os.PathLike[str]) -> Path:
     )
 
 
-def find_help_file(module_dir: Path) -> Path:
-    """Find the Beats Help in a flattened upload or the GFTGU-Documentation tree.
+def find_help_files(module_dir: Path) -> tuple[Path, Path]:
+    """Find both active tutorials in a flattened or sibling repository layout.
 
     Documentation folders no longer use chapter-number prefixes, and the
     Help files live under the sibling ``GFTGU-Documentation`` repository
     rather than beside the program modules inside ``GFTGU-Programs``.
     """
-    for filename in HELP_FILENAMES:
-        candidates = [module_dir / filename]
-        for ancestor in (module_dir, *module_dir.parents):
-            candidates.append(ancestor / "GFTGU-Documentation" / PROGRAM_NAME / filename)
-            if ancestor.name != PROGRAM_NAME:
-                candidates.append(ancestor / PROGRAM_NAME / filename)
-        for candidate in candidates:
-            if candidate.is_file():
-                return candidate
+    directories = [module_dir]
+    for ancestor in (module_dir, *module_dir.parents):
+        directories.append(ancestor / "GFTGU-Documentation" / PROGRAM_NAME)
+        if ancestor.name != PROGRAM_NAME:
+            directories.append(ancestor / PROGRAM_NAME)
+    for directory in directories:
+        pair = tuple(directory / name for name in HELP_FILENAMES)
+        if all(path.is_file() for path in pair):
+            return pair
     raise FileNotFoundError(
-        f"Could not find {' or '.join(HELP_FILENAMES)} beside the program or in "
-        f"GFTGU-Documentation/{PROGRAM_NAME}/."
+        "Both RelativisticOrbit-claude.html and RelativisticOrbit-grok.html "
+        "are required together beside the program or in "
+        "GFTGU-Documentation/RelativisticOrbit/."
     )
 
 
 MODULE_DIR = find_module_dir(Path(__file__).resolve().parent)
-HELP_FILE = find_help_file(MODULE_DIR)
+HELP_FILE, GROK_HELP_FILE = find_help_files(MODULE_DIR)
 if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 
@@ -333,8 +335,14 @@ class TestPhysicsConstantsAndEquations(unittest.TestCase):
         # The two terms are about 1e12 m/s^2 and cancel to floating precision.
         self.assertAlmostEqual(speed * speed / radius + ax, 0.0, delta=2.0e-3)
 
-    def test_circular_speed_requires_radius_above_photon_orbit(self):
-        for radius in (physics.PHOTON_ORBIT_RADIUS, 0.99 * physics.PHOTON_ORBIT_RADIUS):
+    def test_circular_speed_uses_exact_domain_at_the_rounded_photon_radius(self):
+        radius = physics.PHOTON_ORBIT_RADIUS
+        exact_gap = Fraction(radius) - 3 * Fraction(physics.GM_SUN) / Fraction(physics.C2)
+        self.assertGreater(exact_gap, 0)
+        speed = physics.circular_proper_time_speed(radius)
+        self.assertTrue(math.isfinite(speed))
+        self.assertAlmostEqual(speed, math.sqrt(physics.GM_SUN / float(exact_gap)), delta=speed * 2e-15)
+        for radius in (math.nextafter(radius, -math.inf), 0.99 * radius):
             with self.subTest(radius=radius), self.assertRaises(ValueError):
                 physics.circular_proper_time_speed(radius)
 
@@ -1310,6 +1318,9 @@ VOID_TAGS = {
 # Commands that the Help documents as being rejected by the program.
 REJECTED_COMMANDS = {"python main.py --x_init 2000": "--x_init must lie outside the Schwarzschild horizon"}
 HELP_HTML = HELP_FILE.read_text(encoding="utf-8")
+GROK_HTML = GROK_HELP_FILE.read_text(encoding="utf-8")
+RELEASE_NOTES_PATH = HELP_FILE.with_name("RelativisticOrbit-ReleaseNotes.html")
+SAMPLE_OUTPUTS_PATH = HELP_FILE.parent / "SampleOutputs" / "RelativisticOrbit-SampleOutputs_Guide.html"
 
 
 def html_text(fragment: str) -> str:
@@ -1459,6 +1470,129 @@ class HelpStructure(HTMLParser):
 
 
 STRUCTURE = HelpStructure(HELP_HTML)
+GROK_STRUCTURE = HelpStructure(GROK_HTML)
+
+
+class TestPairedTutorials(unittest.TestCase):
+    """Both active tutorials use one core and describe its executable interface."""
+
+    def test_pair_is_required_in_one_folder(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            folder = Path(temp_dir)
+            (folder / HELP_FILENAMES[0]).write_text("Claude", encoding="utf-8")
+            with self.assertRaisesRegex(FileNotFoundError, "Both RelativisticOrbit-claude.html and RelativisticOrbit-grok.html"):
+                find_help_files(folder)
+            (folder / HELP_FILENAMES[1]).write_text("Grok", encoding="utf-8")
+            self.assertEqual(find_help_files(folder), tuple(folder / name for name in HELP_FILENAMES))
+
+    def test_shared_build_beats_and_cursor_note(self):
+        for page in (HELP_HTML, GROK_HTML):
+            with self.subTest(page=page[:85]):
+                version = html_text(re.search(r'<p id="version_build".*?</p>', page, re.S).group())
+                self.assertIn(f"Version {physics.MODEL_VERSION}", version)
+                self.assertIn(f"Build {physics.BUILD_ID}", version)
+                self.assertEqual([int(n) for n in re.findall(r'<section id="beat(\d)">', page)], list(BEAT_NUMBERS))
+                overview = section_html(page, "overview")
+                self.assertIn("cursor", overview.lower())
+                self.assertIn("(x, y)", overview)
+
+    def test_grok_structure_defaults_and_student_content(self):
+        self.assertEqual(GROK_STRUCTURE.errors, [])
+        self.assertEqual(len(GROK_STRUCTURE.ids), len(set(GROK_STRUCTURE.ids)))
+        self.assertEqual(GROK_STRUCTURE.sidebar_hrefs, GROK_STRUCTURE.section_ids)
+        self.assertLessEqual({h[1:] for h in GROK_STRUCTURE.hrefs if h.startswith("#")}, set(GROK_STRUCTURE.ids))
+        self.assertEqual(GROK_HTML.count(r"\("), GROK_HTML.count(r"\)"))
+        self.assertEqual(GROK_HTML.count(r"\["), GROK_HTML.count(r"\]"))
+        self.assertEqual([c for c in GROK_HTML if ord(c) < 32 and c not in "\t\n\r"], [])
+        rows = {row[0]: row[1] for row in GROK_STRUCTURE.table_rows if len(row) == 3 and row[0].startswith("--")}
+        options = {a.option_strings[0]: a.default for a in importlib.import_module("main").build_parser()._actions
+                   if a.option_strings and a.option_strings[0] not in ("-h", "--version")}
+        self.assertEqual(set(rows), set(options))
+        for name, default in options.items():
+            with self.subTest(option=name):
+                if isinstance(default, (bool, str)):
+                    expected = ("on" if default else "off") if isinstance(default, bool) else default
+                    self.assertEqual(rows[name], expected)
+                else:
+                    self.assertEqual(float(rows[name]), float(default))
+        for page in (HELP_HTML, GROK_HTML):
+            student = page.split('<section id="license">', 1)[0].lower()
+            for term in ("codex", "grok", "claude", "xedoc", "kickoff", "audit"):
+                self.assertNotIn(term, student)
+
+    def test_grok_commands_and_numerical_claims(self):
+        commands = documented_commands(GROK_HTML)
+        self.assertGreaterEqual(len(set(commands)), 18)
+        for command in dict.fromkeys(commands):
+            with self.subTest(command=command):
+                run = beat_run(command)
+                if command in REJECTED_COMMANDS:
+                    self.assertEqual(run.exit_code, 2)
+                    self.assertIn(REJECTED_COMMANDS[command], run.stderr)
+                else:
+                    self.assertIn(run.exit_code, (None, 0), run.stderr)
+                    if "--version" not in command and "--help" not in command:
+                        self.assertIn(f"RelativisticOrbit {physics.MODEL_VERSION} (build {physics.BUILD_ID})", run.stdout)
+        checker = TestHelpQuotedNumbers()
+        for number in BEAT_NUMBERS:
+            body = section_html(GROK_HTML, f"beat{number}")
+            tokens = set(checker.NUMBER.findall(checker.visible(body))) | set(checker.WHOLE.findall(checker.visible(body)))
+            printed = checker.printed_for(body)
+            allowed = {0: {"2953.3", "8859.8"}, 1: {"0.481"}, 4: {"11813", "8", "5"}, 5: {"8859.8"}}.get(number, set())
+            missing = sorted(t for t in tokens - allowed if not re.search(rf"(?<![\d.]){re.escape(t)}(?![\d])", printed))
+            with self.subTest(beat=number):
+                self.assertTrue(tokens)
+                self.assertEqual(missing, [])
+
+
+@unittest.skipUnless(RELEASE_NOTES_PATH.is_file() and SAMPLE_OUTPUTS_PATH.is_file(),
+                     "the companion documents live in the documentation repository")
+class TestCompanionDocuments(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.notes = RELEASE_NOTES_PATH.read_text(encoding="utf-8")
+        cls.samples = SAMPLE_OUTPUTS_PATH.read_text(encoding="utf-8")
+
+    def test_release_notes_current_sections_and_build(self):
+        required = ["Release Status", "Open Bugs", "Major Improvements in This Release",
+                    "Test Suite Growth", "Known Limitations", "Known Minor Maintenance Items",
+                    "Version Identification"]
+        headings = re.findall(r"<h2>(.*?)</h2>", self.notes)
+        self.assertEqual(headings[:7], required)
+        self.assertEqual(headings[7], "Historical Release Notes")
+        self.assertEqual(headings[8:], required)
+        self.assertIn(f"<b>Version:</b> {physics.MODEL_VERSION}", self.notes.split("<h2>Release Status</h2>")[0])
+        self.assertIn(f"<b>Build:</b> {physics.BUILD_ID}", self.notes.split("<h2>Release Status</h2>")[0])
+        current_bugs = self.notes.split("<h2>Open Bugs</h2>", 1)[1].split("<h2>Major Improvements in This Release</h2>", 1)[0]
+        self.assertIn("None", current_bugs)
+        self.assertIn("OB-1 is closed", current_bugs)
+        self.assertIn("OB-2 is also closed", current_bugs)
+
+    def test_shared_figure_commands_and_nine_decodable_images(self):
+        self.assertIn(f"Version {physics.MODEL_VERSION}", self.samples)
+        self.assertIn(f"Build {physics.BUILD_ID}", self.samples)
+        for name in HELP_FILENAMES:
+            self.assertIn(name, self.samples)
+        sections = re.findall(r'<section id="beat(\d)">(.*?)</section>', self.samples, re.S)
+        self.assertEqual([int(n) for n, _ in sections], list(BEAT_NUMBERS))
+        for number, body in sections:
+            with self.subTest(beat=number):
+                command = html.unescape(re.search(r'<pre><code>(.*?)</code></pre>', body, re.S).group(1))
+                self.assertIn(command, documented_commands(section_html(HELP_HTML, f"beat{number}")))
+                self.assertIn(command, documented_commands(section_html(GROK_HTML, f"beat{number}")))
+                self.assertIn(beat_run(command).exit_code, (None, 0))
+                image = re.findall(r'<img src="data:image/png;base64,([A-Za-z0-9+/=]+)"', body)
+                self.assertEqual(len(image), 1)
+                raw = base64.b64decode(image[0], validate=True)
+                self.assertTrue(raw.startswith(b"\x89PNG\r\n\x1a\n"))
+                self.assertEqual(tuple(int.from_bytes(raw[i:i+4], "big") for i in (16, 20)), (700, 700))
+
+    def test_guide_student_text_has_no_review_jargon(self):
+        student = re.sub(r"base64,[A-Za-z0-9+/=]+", "", self.samples)
+        student = student.replace(HELP_FILENAMES[0], "").replace(HELP_FILENAMES[1], "").lower()
+        for term in ("codex", "grok", "claude", "xedoc", "kickoff", "audit"):
+            self.assertNotIn(term, student)
+
 
 
 class TestHelpStructure(unittest.TestCase):
@@ -2175,7 +2309,7 @@ class TestEndToEndSubprocess(unittest.TestCase):
 
 
 class TestOriginalHelpCompatibility(unittest.TestCase):
-    """The Reference Guide version is optional; these tests never require it."""
+    """The archived Reference Guide is optional and keeps its historical stamp."""
 
     @classmethod
     def setUpClass(cls):
@@ -2184,52 +2318,15 @@ class TestOriginalHelpCompatibility(unittest.TestCase):
             raise unittest.SkipTest("RelativisticOrbit-original.html is not present in this layout")
         cls.text = cls.original.read_text(encoding="utf-8")
 
-    def test_original_stamp_matches_the_program(self):
+    def test_original_retains_its_historical_stamp(self):
         match = re.search(
             r'<p\s+id=["\']version_build["\'][^>]*>(.*?)</p>', self.text, re.DOTALL
         )
         self.assertIsNotNone(match)
         visible = " ".join(html.unescape(re.sub(r"<[^>]+>", " ", match.group(1))).split())
-        self.assertIn(f"Version {physics.MODEL_VERSION}", visible)
-        self.assertIn(f"Build {physics.BUILD_ID}", visible)
-
-    def test_original_parameter_defaults_still_match_main(self):
-        parser = _HelpStructureParser()
-        parser.feed(self.text)
-        rows = {row[0]: row[1] for row in parser.rows if len(row) >= 2}
-        cli = importlib.import_module("main")
-        documented = {
-            "x_init": float(rows["x_init"].split()[0]),
-            "u_init": float(rows["u_init"].split()[0]),
-            "dt": float(rows["dt"].split()[0]),
-            "max_steps": int(rows["max_steps"]),
-            "max_orbits": int(rows["max_orbits"]),
-            "eps1": float(rows["eps1"]),
-            "eps2": float(rows["eps2"]),
-        }
-        for name, value in documented.items():
-            with self.subTest(name=name):
-                self.assertEqual(value, getattr(cli.params, name))
-        self.assertEqual(rows["model"].strip('"'), cli.params.model)
-
-    def test_original_commands_still_run(self):
-        commands = documented_commands(self.text)
-        self.assertGreaterEqual(len(commands), 10)
-        for command in dict.fromkeys(commands):
-            with self.subTest(command=command):
-                run = run_cli(command_arguments(command))
-                self.assertIn(run.exit_code, (None, 0), run.stderr)
-
-    def test_original_describes_the_new_summary_and_the_corrected_exercise(self):
-        text = html_text(self.text)
-        self.assertIn("predicted from the constants of motion", text)
-        self.assertNotIn("approximately 7476 m", text)
-        self.assertIn("7565 m", text)
-        weak = [c for c in documented_commands(self.text) if "--x_init 1e6" in c]
-        self.assertEqual(len(weak), 2)
-        for command in weak:
-            with self.subTest(command=command):
-                self.assertIsNotNone(run_cli(command_arguments(command)).result.mean_periapsis_advance)
+        self.assertIn("Version 1.4.0", visible)
+        self.assertIn("Build 991fa89ab9b7", visible)
+        self.assertNotIn(self.original.name, HELP_FILENAMES)
 
 
 if __name__ == "__main__":

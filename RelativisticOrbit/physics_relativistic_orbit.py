@@ -17,7 +17,7 @@ from typing import NamedTuple, Optional
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.4.0"
+MODEL_VERSION = "1.5.0"
 BUILD_ID_COVERS = (
     "physics_relativistic_orbit.py",
     "driver_relativistic_orbit.py",
@@ -257,15 +257,16 @@ def circular_proper_time_speed(radius: float, model: str = "schwarzschild") -> f
             raise ValueError("radius is too small for a finite circular speed.")
         return math.sqrt(speed2)
 
-    denominator = radius - 3.0 * GM_SUN / C2
-    if denominator <= 0.0:
-        raise ValueError("No timelike circular Schwarzschild geodesic exists at or below 3GM/c^2.")
     # Form r - 3GM/c^2 exactly from the floating-point radius and constants,
-    # so that the result stays accurate to rounding close to 3GM/c^2, where
-    # the subtraction would otherwise lose most of its digits.
+    # then use that same difference for the domain check.  A subtraction
+    # rounded to float first can equal zero even when the exact difference
+    # is positive (including at the named PHOTON_ORBIT_RADIUS constant).
     exact = Fraction(radius) - 3 * Fraction(GM_SUN) / Fraction(C2)
-    if exact > 0:
-        denominator = float(exact)
+    if exact <= 0:
+        raise ValueError("No timelike circular Schwarzschild geodesic exists at or below 3GM/c^2.")
+    denominator = float(exact)
+    if denominator <= 0.0:
+        raise ValueError("radius is too close to 3GM/c^2 for a finite result.")
     speed2 = GM_SUN / denominator
     if not math.isfinite(speed2):
         raise ValueError("radius is too close to 3GM/c^2 for a finite result.")
