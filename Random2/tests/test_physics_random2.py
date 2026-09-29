@@ -38,9 +38,9 @@ CORE_MODULE_FILES = (
     "main.py",
     "random2_plot.py",
 )
-# The Beats Help is accepted under either of its names; the Reference Guide
-# version, Random2-original.html, is optional and never required.
-HELP_FILENAMES = ("Random2-claude.html", "Random2.html")
+# Both active tutorials are required together. The archived Reference Guide
+# remains optional and is not synchronized with the current program.
+HELP_FILENAMES = ("Random2-claude.html", "Random2-grok.html")
 
 
 def find_module_dir(start: Path) -> Path:
@@ -115,29 +115,27 @@ class _HelpSemanticParser(HTMLParser):
             self._cell_text.append(data)
 
 
-def find_help_file(module_dir: Path) -> Path:
-    """Find the Beats Help beside the modules or in GFTGU-Documentation/Random2/."""
+def find_help_files(module_dir: Path) -> tuple[Path, Path]:
+    """Require both active tutorials in one folder in either review layout."""
     program_name = "Random2"
-    candidates = []
-    for help_filename in HELP_FILENAMES:
-        candidates.append(module_dir / help_filename)
-        for ancestor in (module_dir, *module_dir.parents):
-            candidates.append(
-                ancestor / "GFTGU-Documentation" / program_name / help_filename
-            )
-            if ancestor.name != program_name:
-                candidates.append(ancestor / program_name / help_filename)
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
+    directories = [module_dir]
+    for ancestor in (module_dir, *module_dir.parents):
+        directories.append(ancestor / "GFTGU-Documentation" / program_name)
+        if ancestor.name != program_name:
+            directories.append(ancestor / program_name)
+    for directory in directories:
+        pair = tuple(directory / name for name in HELP_FILENAMES)
+        if all(path.is_file() for path in pair):
+            return pair
     raise FileNotFoundError(
-        f"Could not find {' or '.join(HELP_FILENAMES)} beside the modules or in "
-        "GFTGU-Documentation/Random2/."
+        "Both Random2-claude.html and Random2-grok.html are required together "
+        "beside the modules or in GFTGU-Documentation/Random2/."
     )
 
 
-HELP_FILE = find_help_file(MODULE_DIR)
+HELP_FILE, GROK_HELP_FILE = find_help_files(MODULE_DIR)
 HELP_HTML = HELP_FILE.read_text(encoding="utf-8")
+GROK_HTML = GROK_HELP_FILE.read_text(encoding="utf-8")
 
 
 def parse_help_file() -> _HelpSemanticParser:
@@ -928,6 +926,90 @@ class HelpStructure(HTMLParser):
 STRUCTURE = HelpStructure(HELP_HTML)
 
 
+class PairedTutorialTests(unittest.TestCase):
+    """The two active tutorials share the core, commands and figure guide."""
+
+    def test_both_active_guides_are_required_in_one_directory(self):
+        with tempfile.TemporaryDirectory() as temp_name:
+            folder = Path(temp_name)
+            (folder / HELP_FILENAMES[0]).write_text("Claude", encoding="utf-8")
+            with self.assertRaisesRegex(FileNotFoundError, "Both Random2-claude.html and Random2-grok.html"):
+                find_help_files(folder)
+            (folder / HELP_FILENAMES[1]).write_text("Grok", encoding="utf-8")
+            self.assertEqual(find_help_files(folder),
+                             tuple(folder / name for name in HELP_FILENAMES))
+
+    def test_both_guides_share_stamp_beats_and_cursor_tip(self):
+        expected = f"Version {physics.MODEL_VERSION}&nbsp;&nbsp;&nbsp;&nbsp;Build {physics.BUILD_ID}"
+        for name, page in (("claude", HELP_HTML), ("grok", GROK_HTML)):
+            with self.subTest(name=name):
+                self.assertIn(expected, page)
+                self.assertEqual(
+                    [int(n) for n in re.findall(r'<section id="beat(\d)">', page)],
+                    list(BEAT_NUMBERS),
+                )
+                self.assertIn("cursor", section_html(page, "overview").lower())
+                self.assertIn("(x, y)", section_html(page, "overview"))
+
+    def test_grok_structure_and_parameter_defaults_match_live_parser(self):
+        structure = HelpStructure(GROK_HTML)
+        self.assertEqual(structure.errors, [])
+        self.assertEqual(len(structure.ids), len(set(structure.ids)))
+        self.assertEqual(structure.sidebar_hrefs, structure.section_ids)
+        self.assertLessEqual(
+            {href[1:] for href in structure.hrefs if href.startswith("#")},
+            set(structure.ids),
+        )
+        parser = _HelpSemanticParser()
+        parser.feed(section_html(GROK_HTML, "parameters"))
+        rows = {r[0]: r[1] for r in parser.table_rows
+                if len(r) >= 2 and r[0].startswith("--")}
+        options = {action.option_strings[0]: action.default
+                   for action in cli.build_parser()._actions
+                   if action.option_strings and action.option_strings[0] not in ("-h", "--version")}
+        self.assertEqual(set(rows), set(options))
+        for name, default in options.items():
+            with self.subTest(name=name):
+                self.assertEqual(rows[name], "omitted" if default is None else str(default))
+
+    def test_grok_commands_and_figure_commands_run(self):
+        commands = documented_commands(GROK_HTML)
+        self.assertGreaterEqual(len(set(commands)), 15)
+        for command in dict.fromkeys(commands):
+            with self.subTest(command=command):
+                run = run_cli(command_arguments(command))
+                self.assertIn(run.exit_code, (None, 0), run.stderr)
+                if "--help" not in command and "--version" not in command:
+                    self.assertEqual(run.stdout.splitlines()[0],
+                                     f"Random2 {physics.MODEL_VERSION} (build {physics.BUILD_ID})")
+        rejected = run_cli(("--max_steps", "1"))
+        self.assertEqual(rejected.exit_code, 2)
+        self.assertIn("max_steps must be at least 2", rejected.stderr)
+        self.assertIn("expected to fail", section_html(GROK_HTML, "beat8"))
+        samples = SAMPLE_OUTPUTS_PATH.read_text(encoding="utf-8")
+        for number in BEAT_NUMBERS:
+            sample = section_html(samples, f"beat{number}")
+            command = html_module.unescape(
+                re.search(r"<pre><code>(.*?)</code></pre>", sample, re.S).group(1))
+            self.assertIn(command, documented_commands(section_html(GROK_HTML, f"beat{number}")))
+
+    def test_grok_quantities_and_student_content(self):
+        for number in BEAT_NUMBERS:
+            body = section_html(GROK_HTML, f"beat{number}")
+            printed = HelpQuotedNumberTests().printed_for(body)
+            tokens = HelpQuotedNumberTests().tokens(body)
+            with self.subTest(beat=number):
+                self.assertTrue(tokens)
+                self.assertEqual(sorted(token for token in tokens if token not in printed), [])
+        self.assertIn(r"\langle r_N^2\rangle=N\langle |s|^2\rangle", GROK_HTML)
+        self.assertIn("large-", html_text(section_html(GROK_HTML, "beat0")))
+        self.assertIn("capped walks are excluded", html_text(section_html(GROK_HTML, "beat4")))
+        for page in (HELP_HTML, GROK_HTML):
+            student = page.split('<section id="license">', 1)[0]
+            for term in ("Codex", "Grok", "Claude", "Xedoc", "Kickoff", "audit"):
+                self.assertNotIn(term, student)
+
+
 class HelpStructureTests(unittest.TestCase):
     def test_help_file_is_html5_utf8_with_one_version_build(self):
         self.assertIn("<!DOCTYPE html>", HELP_HTML[:100])
@@ -1714,23 +1796,6 @@ class Audit21Tests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "radius_given"):
             plot.plot_walk2d(result)
 
-    def test_original_help_lists_every_current_option(self):
-        original = HELP_FILE.with_name("Random2-original.html")
-        if not original.is_file():
-            self.skipTest("Random2-original.html is not present in this layout")
-        parser = _HelpSemanticParser()
-        parser.feed(original.read_text(encoding="utf-8"))
-        listed = {r[0] for r in parser.table_rows if r and r[0].startswith("--")}
-        options = {
-            action.option_strings[0] for action in cli.build_parser()._actions
-            if action.option_strings and action.option_strings[0] not in ("-h", "--version")
-        }
-        self.assertEqual(listed, options)
-        text = " ".join("".join(parser.visible_text).split())
-        self.assertIn("the program prints a table", text)
-        self.assertIn("at least 2", text)
-
-
 def math_blocks(html: str) -> list:
     """TeX source of every \\( \\) and \\[ \\] block outside <pre> and <code>."""
     body = re.sub(r"<(pre|code|script|style)[^>]*>.*?</\1>", "", html, flags=re.DOTALL)
@@ -1738,16 +1803,12 @@ def math_blocks(html: str) -> list:
 
 
 class Audit22Tests(unittest.TestCase):
-    """Rendered meaning of the TeX, the seed sentence, and the original's validation note."""
+    """Rendered meaning of the active tutorial's TeX and seed sentence."""
 
     def test_no_math_block_contains_a_tex_line_break(self):
-        documents = [("claude", HELP_HTML)]
-        original = HELP_FILE.with_name("Random2-original.html")
-        if original.is_file():
-            documents.append(("original", original.read_text(encoding="utf-8")))
-        for name, html in documents:
+        for name, html in (("claude", HELP_HTML), ("grok", GROK_HTML)):
             blocks = math_blocks(html)
-            self.assertGreater(len(blocks), 50)
+            self.assertGreater(len(blocks), 5)
             for block in blocks:
                 with self.subTest(document=name, block=block[:40]):
                     self.assertNotIn("\\\\", block)
@@ -1769,23 +1830,6 @@ class Audit22Tests(unittest.TestCase):
         difference = abs(twelve.averages[-1] - two.averages[-1])
         combined = math.hypot(twelve.standard_errors[-1], two.standard_errors[-1])
         self.assertAlmostEqual(difference / combined, 2.09, places=2)
-
-    def test_original_distinguishes_parser_checks_from_derived_checks(self):
-        original = HELP_FILE.with_name("Random2-original.html")
-        if not original.is_file():
-            self.skipTest("Random2-original.html is not present in this layout")
-        parser = _HelpSemanticParser()
-        parser.feed(original.read_text(encoding="utf-8"))
-        text = " ".join("".join(parser.visible_text).split())
-        self.assertIn("are rejected by the command-line parser", text)
-        self.assertIn("checked by the program after parsing but before any walk starts", text)
-        self.assertNotIn("out-of-range physical parameters", text)
-        run = run_cli(("--display", "walk2d", "--radius", "1e155", "--mean_free_path", "1",
-                       "--n_walks", "1", "--step_cap", "1", *SEED))
-        self.assertTrue(run.stdout.startswith("Random2 "))
-        self.assertEqual(run.stderr, "")
-        self.assertIn("Random2 input/model error", str(run.exit_code))
-
 
 RELEASE_NOTES_PATH = HELP_FILE.parent / "Random2-ReleaseNotes.html"
 SAMPLE_OUTPUTS_PATH = HELP_FILE.parent / "SampleOutputs" / "Random2-SampleOutputs_Guide.html"
@@ -1822,7 +1866,10 @@ class DocumentationSetTests(unittest.TestCase):
         self.assertIn(physics.BUILD_ID, identification)
 
     def test_release_notes_have_the_required_sections_in_order_and_only_plain_html(self):
-        self.assertEqual(re.findall(r"<h2>(.*?)</h2>", self.notes), self.RELEASE_NOTES_HEADINGS)
+        headings = re.findall(r"<h2>(.*?)</h2>", self.notes)
+        self.assertEqual(headings[:7], self.RELEASE_NOTES_HEADINGS)
+        self.assertEqual(headings[7], "Historical Release Notes")
+        self.assertEqual(headings[8:], self.RELEASE_NOTES_HEADINGS)
         for forbidden in ("<table", "<script", "<style", "style=", "<img"):
             self.assertNotIn(forbidden, self.notes)
         tags = set(re.findall(r"</?([a-zA-Z0-9]+)", self.notes))
@@ -1842,16 +1889,11 @@ class DocumentationSetTests(unittest.TestCase):
         if not entries:
             self.assertIn("None", section)
 
-    def test_open_bug_about_the_original_eq6_is_listed_only_while_it_is_open(self):
-        original = HELP_FILE.with_name("Random2-original.html")
-        if not original.is_file():
-            self.skipTest("Random2-original.html is not present in this layout")
-        still_open = "the measured trend should approach the theoretical value" in original.read_text(encoding="utf-8")
-        listed = "<b>OB-1</b>" in self.notes and "Eq. (6)" in self.notes
-        self.assertEqual(still_open, listed)
-        run = run_cli(("--max_steps", "2", "--n_trials", "200000", *SEED)).stdout
-        self.assertIn("0.9789", run)
-        self.assertIn("0.9789", self.notes)
+    def test_legacy_reference_issue_is_historical_not_an_active_bug(self):
+        section = re.search(r"<h2>Open Bugs</h2>(.*?)<h2>", self.notes, re.S).group(1)
+        self.assertIn("None", section)
+        self.assertNotIn("<b>OB-1</b>", section)
+        self.assertIn("archived Reference Guide", self.notes)
 
     def test_release_notes_test_growth_ends_at_the_current_suite_size(self):
         growth = re.search(r"<h2>Test Suite Growth</h2>(.*?)<h2>", self.notes, re.S).group(1)
@@ -1875,6 +1917,7 @@ class DocumentationSetTests(unittest.TestCase):
         self.assertIn(f"Version {physics.MODEL_VERSION}", provenance)
         self.assertIn(f"build {physics.BUILD_ID}", provenance)
         self.assertIn("Random2-claude.html", self.samples)
+        self.assertIn("Random2-grok.html", self.samples)
         self.assertNotIn("Random2.html", self.samples)
 
     def test_sample_outputs_have_one_figure_section_per_beat_in_order(self):
@@ -1925,7 +1968,7 @@ class DocumentationSetTests(unittest.TestCase):
 
 
 class HelpOriginalCompatibilityTests(unittest.TestCase):
-    """The Reference Guide version is optional; these tests never require it."""
+    """The archived Reference Guide is optional and not a current API contract."""
 
     @classmethod
     def setUpClass(cls):
@@ -1934,37 +1977,14 @@ class HelpOriginalCompatibilityTests(unittest.TestCase):
             raise unittest.SkipTest("Random2-original.html is not present in this layout")
         cls.text = cls.original.read_text(encoding="utf-8")
 
-    def test_original_stamp_matches_the_program(self):
+    def test_original_retains_its_historical_identity(self):
         match = re.search(
             r'<p id="version_build"[^>]*>\s*Version\s+([^&<\s]+)(?:&nbsp;)+Build\s+([0-9a-f]{12})',
             self.text,
         )
         self.assertIsNotNone(match)
-        self.assertEqual(match.groups(), (physics.MODEL_VERSION, physics.BUILD_ID))
-
-    def test_original_parameter_defaults_still_match_the_parser(self):
-        parser = _HelpSemanticParser()
-        parser.feed(self.text)
-        rows = {r[0]: r[1] for r in parser.table_rows if len(r) >= 2 and r[0].startswith("--")}
-        for action in cli.build_parser()._actions:
-            name = action.option_strings[0] if action.option_strings else None
-            if name in rows:
-                expected = "omitted" if action.default is None else str(action.default)
-                self.assertEqual(rows[name], expected)
-
-    def test_original_commands_still_run(self):
-        commands = []
-        for line in html_module.unescape(re.sub(r"<[^>]+>", "\n", self.text)).splitlines():
-            line = " ".join(line.replace("\\", " ").split())
-            if line.startswith("python main.py"):
-                commands.append(line)
-        self.assertGreaterEqual(len(commands), 10)
-        for command in dict.fromkeys(commands):
-            arguments = command_arguments(command)
-            if "--n_walks" in arguments and int(arguments[arguments.index("--n_walks") + 1]) > 10:
-                arguments = (*arguments, "--radius", "10")  # keep the check quick
-            with self.subTest(command=command):
-                self.assertIn(run_cli(arguments).exit_code, (None, 0))
+        self.assertEqual(match.groups(), ("1.4.0", "06ebd8fea601"))
+        self.assertNotIn("Random2-original.html", HELP_FILENAMES)
 
 
 if __name__ == "__main__":
