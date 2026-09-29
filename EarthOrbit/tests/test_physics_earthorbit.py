@@ -17,6 +17,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -61,19 +62,14 @@ import physics_earthorbit as physics
 import plot_earthorbit as plotter
 
 
-def find_help_file(module_dir):
-    """Find Help in a flattened upload or the GFTGU-Documentation tree.
+def find_help_files(module_dir):
+    """Require both tutorial Helps in one folder, flattened or in documentation.
 
     Documentation folders no longer use chapter-number prefixes, and the
     Help files live under the sibling ``GFTGU-Documentation`` repository
     rather than beside the program modules inside ``GFTGU-Programs``.
     """
-    # The Beats Help is named EarthOrbit-claude.html until it is adopted as
-    # the live Help, when it is renamed EarthOrbit.html; either name is
-    # accepted, and the first one found is used.  The Reference Guide version,
-    # EarthOrbit-original.html, is optional: the tests written for its text
-    # read it when it is present and skip otherwise.
-    help_filenames = ("EarthOrbit-claude.html", "EarthOrbit.html")
+    help_filenames = ("EarthOrbit-claude.html", "EarthOrbit-grok.html")
     program_name = "EarthOrbit"
     candidates = [module_dir / name for name in help_filenames]
     for ancestor in (module_dir, *module_dir.parents):
@@ -81,16 +77,17 @@ def find_help_file(module_dir):
             candidates.append(ancestor / "GFTGU-Documentation" / program_name / name)
             if ancestor.name != program_name:
                 candidates.append(ancestor / program_name / name)
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
-    raise FileNotFoundError(
-        "Could not find EarthOrbit-claude.html (or EarthOrbit.html) beside the "
-        "program or in GFTGU-Documentation/EarthOrbit/."
-    )
+    for directory in dict.fromkeys(candidate.parent for candidate in candidates):
+        pair = tuple(directory / name for name in help_filenames)
+        if all(path.is_file() for path in pair):
+            return pair
+    raise FileNotFoundError("Both EarthOrbit-claude.html and EarthOrbit-grok.html "
+                            "must be together beside the program or in "
+                            "GFTGU-Documentation/EarthOrbit/.")
 
 
-HELP_FILE = find_help_file(MODULE_DIR)
+HELP_FILES = find_help_files(MODULE_DIR)
+HELP_FILE, GROK_HELP_FILE = HELP_FILES
 DOCUMENTATION_DIR = HELP_FILE.parent
 ORIGINAL_HELP_FILE = DOCUMENTATION_DIR / "EarthOrbit-original.html"
 RELEASE_NOTES_FILE = DOCUMENTATION_DIR / "EarthOrbit-ReleaseNotes.html"
@@ -183,7 +180,7 @@ class VersionAndBuildTests(unittest.TestCase):
 
     def test_version_is_semantic(self):
         self.assertRegex(physics.MODEL_VERSION, r"^\d+\.\d+\.\d+$")
-        self.assertEqual(physics.MODEL_VERSION, "1.4.0")
+        self.assertEqual(physics.MODEL_VERSION, "1.5.0")
 
     def test_build_coverage_is_exactly_the_four_core_modules(self):
         self.assertEqual(physics.BUILD_ID_COVERS, CORE_MODULE_FILENAMES)
@@ -1060,6 +1057,73 @@ class MainProgramTests(unittest.TestCase):
         self.assertIn("Final/maximum altitude at maxSteps:", result.stdout)
         self.assertNotIn("Osculating apogee altitude:", result.stdout)
 
+    def test_extreme_finite_launch_has_clean_one_line_error(self):
+        environment = os.environ.copy()
+        environment["MPLBACKEND"] = "Agg"
+        result = subprocess.run(
+            [sys.executable, "main.py", "--uInit", "1e160", "--dt", "1e-150",
+             "--maxSteps", "2", "--force_law", "inverse_square"],
+            cwd=MODULE_DIR, env=environment, text=True, capture_output=True,
+            timeout=20,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stderr.strip(), "EarthOrbit: summary values must be finite")
+        self.assertNotIn("RuntimeWarning", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+
+class PairedTutorialTests(unittest.TestCase):
+    """A complete installed pair shares the executable command and version contract."""
+
+    def test_both_guides_required(self):
+        self.assertEqual(tuple(path.name for path in HELP_FILES),
+                         ("EarthOrbit-claude.html", "EarthOrbit-grok.html"))
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            (folder / "EarthOrbit-claude.html").write_text("only one")
+            with self.assertRaisesRegex(FileNotFoundError, "Both EarthOrbit"):
+                find_help_files(folder)
+
+    def test_pair_has_same_version_build_beats_and_cli(self):
+        for path in HELP_FILES:
+            with self.subTest(style=path.name):
+                page = path.read_text(encoding="utf-8")
+                self.assertRegex(page, r"Version 1\.5\.0&nbsp;(?:&nbsp;){3}Build "
+                                       + physics.BUILD_ID)
+                ids = _IdCollector()
+                ids.feed(page)
+                self.assertEqual(len(ids.ids), len(set(ids.ids)))
+                self.assertEqual(ids.ids.count("version_build"), 1)
+                for beat in range(10):
+                    self.assertIn(f'<section id="beat{beat}">', page)
+                self.assertIn("(x, y)", page)
+                for option in ("--h0", "--uInit", "--vInit", "--dt",
+                               "--maxSteps", "--force_law"):
+                    self.assertIn(option, page)
+                self.assertIn("python main.py --h0 300000 --uInit 9000", page)
+
+    def test_every_beat_command_uses_the_shared_cli(self):
+        for path in HELP_FILES:
+            page = path.read_text(encoding="utf-8")
+            for beat in range(10):
+                section = re.search(
+                    rf'<section id="beat{beat}">(.*?)</section>', page, re.S
+                )
+                self.assertIsNotNone(section, (path.name, beat))
+                blocks = re.findall(
+                    r'<pre class="code-block"><code>(.*?)</code></pre>',
+                    section.group(1), re.S,
+                )
+                commands = [line.strip() for block in blocks
+                            for line in unescape(block).splitlines()
+                            if line.strip().startswith("python main.py")]
+                self.assertTrue(commands, (path.name, beat))
+                for command in commands:
+                    argv = shlex.split(command)
+                    with self.subTest(style=path.name, beat=beat, command=command):
+                        with mock.patch.object(sys, "argv", argv[1:]):
+                            entrypoint.parse_args()
+
 
 class HelpFileTests(unittest.TestCase):
     """Documentation-interface, scientific wording, and presentation contracts."""
@@ -1267,7 +1331,7 @@ class DocumentationSetTests(unittest.TestCase):
         self.assertTrue(SAMPLE_OUTPUTS_FILE.is_file())
 
     def test_release_notes_match_current_version_and_build(self):
-        self.assertIn(f"Version {physics.MODEL_VERSION}", self.release_notes)
+        self.assertIn(f"<b>Version:</b> {physics.MODEL_VERSION}", self.release_notes)
         self.assertIn(f"<b>Build:</b> {physics.BUILD_ID}", self.release_notes)
         self.assertIn("command-line", self.release_notes)
         self.assertIn("five significant digits", self.release_notes)

@@ -352,9 +352,14 @@ def _progress_crossing(progress, target, *arrays):
 
 def _inverse_square_elements(x, y, u, v):
     """Return osculating two-body elements derived from the initial state."""
+    # Diagnostics arrive as NumPy scalars. Convert them before arithmetic so
+    # an extreme finite launch cannot emit NumPy overflow warnings to students.
+    x, y, u, v = map(float, (x, y, u, v))
     radius = math.hypot(x, y)
     speed_squared = u * u + v * v
     angular_momentum = x * v - y * u
+    if not math.isfinite(speed_squared) or not math.isfinite(angular_momentum):
+        raise ValueError("summary values must be finite")
     energy = 0.5 * speed_squared - phys.MU_EARTH / radius
     eccentricity_squared = (
         1.0
@@ -362,6 +367,8 @@ def _inverse_square_elements(x, y, u, v):
         / (phys.MU_EARTH * phys.MU_EARTH)
     )
     eccentricity = math.sqrt(max(0.0, eccentricity_squared))
+    if not math.isfinite(eccentricity):
+        raise ValueError("summary values must be finite")
 
     if energy < 0.0:
         semimajor_axis = -phys.MU_EARTH / (2.0 * energy)
