@@ -2,12 +2,13 @@
 
 The discovery logic deliberately supports both the repository layout
 (`tests/test_physics_spheregravity.py`) and a flattened upload in which this
-file is placed beside the four core modules.  The Beats Help,
-SphereGravity-claude.html, is required; the Reference Guide Help,
-SphereGravity-original.html, is optional and its tests skip without it.
+file is placed beside the four core modules. Both active Beats Help files,
+SphereGravity-claude.html and SphereGravity-grok.html, are required together.
+The archived Reference Guide, SphereGravity-original.html, is optional.
 """
 
 import ast
+import base64
 from contextlib import redirect_stdout
 import hashlib
 import html
@@ -66,36 +67,34 @@ import plot_spheregravity as plotting
 
 
 
-# The Beats Help file; the Reference Guide version (-original) is never used here.
-HELP_FILENAMES = ("SphereGravity-claude.html", "SphereGravity.html")
+# Active tutorials share one program. The archived Reference Guide is not an active Help.
+HELP_FILENAMES = ("SphereGravity-claude.html", "SphereGravity-grok.html")
 
 
-def find_help_file(module_dir):
-    """Find the Beats Help in a flattened upload or the GFTGU-Documentation tree.
+def find_help_files(module_dir):
+    """Find the paired tutorials in one flattened or sibling documentation folder.
 
     Documentation folders no longer use chapter-number prefixes, and the
     Help files live under the sibling ``GFTGU-Documentation`` repository
     rather than beside the program modules inside ``GFTGU-Programs``.
     """
     program_name = "SphereGravity"
-    for help_filename in HELP_FILENAMES:
-        candidates = [module_dir / help_filename]
-        for ancestor in (module_dir, *module_dir.parents):
-            candidates.append(
-                ancestor / "GFTGU-Documentation" / program_name / help_filename
-            )
-            if ancestor.name != program_name:
-                candidates.append(ancestor / program_name / help_filename)
-        for candidate in candidates:
-            if candidate.is_file():
-                return candidate
+    candidates = [module_dir]
+    for ancestor in (module_dir, *module_dir.parents):
+        candidates.append(ancestor / "GFTGU-Documentation" / program_name)
+        if ancestor.name != program_name:
+            candidates.append(ancestor / program_name)
+    for folder in candidates:
+        pair = tuple(folder / name for name in HELP_FILENAMES)
+        if all(path.is_file() for path in pair):
+            return pair
     raise FileNotFoundError(
-        "Could not find SphereGravity-claude.html beside the program or in "
-        "GFTGU-Documentation/SphereGravity/."
+        "Both SphereGravity-claude.html and SphereGravity-grok.html are required "
+        "beside the program or in GFTGU-Documentation/SphereGravity/."
     )
 
 
-HELP_FILE = find_help_file(MODULE_DIR)
+HELP_FILE, GROK_FILE = find_help_files(MODULE_DIR)
 
 
 class HelpHTMLParser(HTMLParser):
@@ -1767,188 +1766,137 @@ class TestEndToEndSubprocess(unittest.TestCase):
                 self.assertIn(message, completed.stderr)
 
 
-class TestOriginalHelpCompatibility(unittest.TestCase):
-    """The Reference Guide version is optional; these tests never require it."""
+class TestPairedTutorials(unittest.TestCase):
+    """Shared release identity, paired discovery and executable Grok exercises."""
+
+    def test_both_tutorials_have_the_live_stamp_and_cursor_note(self):
+        for page in (HELP_FILE, GROK_FILE):
+            source = page.read_text(encoding="utf-8")
+            with self.subTest(page=page.name):
+                self.assertRegex(source, r'Version\s+1\.4\.0(?:&nbsp;|\s)+Build\s+217c2c26a44a')
+                self.assertIn("cursor hovers over a graph", source)
+                self.assertIn("lower right", source)
+        self.assertEqual(physics.MODEL_VERSION, "1.4.0")
+        self.assertEqual(physics.BUILD_ID, "217c2c26a44a")
+
+    def test_discovery_requires_both_tutorials_in_the_same_folder(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            for name in CORE_MODULE_FILENAMES:
+                (folder / name).write_text("# fixture\n", encoding="utf-8")
+            (folder / HELP_FILENAMES[0]).write_text("Claude", encoding="utf-8")
+            with self.assertRaisesRegex(FileNotFoundError, "Both SphereGravity-claude.html and SphereGravity-grok.html"):
+                find_help_files(folder)
+            (folder / HELP_FILENAMES[1]).write_text("Grok", encoding="utf-8")
+            self.assertEqual(tuple(path.name for path in find_help_files(folder)), HELP_FILENAMES)
+
+    def test_grok_structure_and_student_scope(self):
+        source = GROK_FILE.read_text(encoding="utf-8")
+        structure = HelpStructure(source)
+        self.assertEqual(structure.errors, [])
+        self.assertEqual(len(structure.ids), len(set(structure.ids)))
+        self.assertEqual(set(structure.hrefs) & {f"#beat{i}" for i in range(9)},
+                         {f"#beat{i}" for i in range(9)})
+        self.assertTrue({f"beat{i}" for i in range(9)}.issubset(structure.section_ids))
+        self.assertEqual({ref[1:] for ref in structure.hrefs if ref.startswith("#")} - set(structure.ids), set())
+        text = source.split('<section id="license">', 1)[0]
+        for term in ("Codex", "Audit", "Kickoff", "Claude", "Grok"):
+            with self.subTest(term=term):
+                self.assertNotIn(term, text)
+
+    def test_grok_commands_run_or_reject_as_documented(self):
+        source = GROK_FILE.read_text(encoding="utf-8")
+        commands = list(dict.fromkeys(documented_commands(source)))
+        self.assertGreaterEqual(len(commands), 13)
+        for command in commands:
+            with self.subTest(command=command):
+                run = beat_run(command)
+                if command in REJECTED_COMMANDS:
+                    self.assertEqual(run.exit_code, 2)
+                    self.assertIn(REJECTED_COMMANDS[command], run.stderr)
+                elif command.endswith("--version"):
+                    self.assertEqual(run.exit_code, 0)
+                    self.assertIn(physics.BUILD_ID, run.stdout)
+                elif command.endswith("--help"):
+                    self.assertEqual(run.exit_code, 0)
+                else:
+                    self.assertIn(run.exit_code, (None, 0), run.stderr)
+                    self.assertIn("Shell mass comparison", run.stdout)
+
+    def test_grok_key_claims_match_program_and_exact_shell_limit(self):
+        source = GROK_FILE.read_text(encoding="utf-8")
+        self.assertIn("signed normal component", source)
+        self.assertIn("M_{\\rm num}/M-1", source)
+        self.assertIn("division by a zero expected pull would be undefined", source)
+        default = run_cli(()).stdout
+        coarse = run_cli(("--nDiv", "10")).stdout
+        def mass_error(result):
+            return float(re.search(r"relative difference\s+: (\S+)", result).group(1))
+        self.assertAlmostEqual(mass_error(coarse) / mass_error(default), 100, delta=1)
+        self.assertAlmostEqual(physics.compute_continuum_shell_mass(),
+                               4 * math.pi * physics.DEFAULT_EPSILON)
+
+
+SAMPLE_GUIDE = HELP_FILE.parent / "SampleOutputs" / "SphereGravity-SampleOutputs_Guide.html"
+
+
+@unittest.skipUnless(SAMPLE_GUIDE.is_file(), "Shared Sample Outputs Guide is absent in this layout")
+class TestSharedSampleOutputs(unittest.TestCase):
+    def test_figures_have_executable_commands_in_both_tutorials(self):
+        guide = SAMPLE_GUIDE.read_text(encoding="utf-8")
+        figure_sections = re.findall(r'<section id="(beat[0-8])">(.*?)</section>', guide, re.DOTALL)
+        claude = HELP_FILE.read_text(encoding="utf-8")
+        grok = GROK_FILE.read_text(encoding="utf-8")
+        self.assertEqual(len(figure_sections), 7)
+        for beat, section in figure_sections:
+            command = documented_commands(section)[0]
+            with self.subTest(command=command):
+                self.assertIn(command, section_html(claude, beat))
+                self.assertIn(command, section_html(grok, beat))
+                self.assertIn(beat_run(command).exit_code, (None, 0))
+        self.assertIn("SphereGravity-grok.html", guide)
+        self.assertIn(physics.BUILD_ID, guide)
+
+    def test_embedded_figures_are_valid_indexed_pngs(self):
+        guide = SAMPLE_GUIDE.read_text(encoding="utf-8")
+        figures = re.findall(r'<img src="data:image/png;base64,([A-Za-z0-9+/=]+)"', guide)
+        self.assertEqual(len(figures), 7)
+        for index, encoded in enumerate(figures):
+            data = base64.b64decode(encoded, validate=True)
+            with self.subTest(figure=index):
+                self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"))
+                self.assertEqual(tuple(int.from_bytes(data[k:k+4], 'big') for k in (16, 20)), (800, 600))
+                self.assertEqual(data[25], 3)  # indexed colour
+
+
+class TestOriginalHelpArchive(unittest.TestCase):
+    """The frozen Reference Guide is optional and is not a current API contract."""
 
     @classmethod
     def setUpClass(cls):
         cls.original = HELP_FILE.with_name("SphereGravity-original.html")
         if not cls.original.is_file():
-            raise unittest.SkipTest("SphereGravity-original.html is not present in this layout")
+            raise unittest.SkipTest("Archived Reference Guide is absent in this layout")
         cls.help_text = cls.original.read_text(encoding="utf-8")
         cls.parser = HelpHTMLParser()
         cls.parser.feed(cls.help_text)
         cls.parser.close()
 
-    def test_original_equation_7_is_the_plotted_quantity(self):
-        block = re.search(r'<div class="eq-label">Eq\. 7 [^<]*</div>(.*?)</div>', self.help_text, re.DOTALL)
-        self.assertIsNotNone(block)
-        equation = block.group(1)
-        self.assertIn(r"\dfrac{g_\text{num}(r) - M_\text{num}/r^2}{M_\text{num}/r^2}", equation)
-        self.assertIn(r"\dfrac{g_\text{num}(r)}{M_\text{num}}", equation)
-        self.assertNotIn("g_\\text{Newton}", equation)
-        self.assertNotRegex(equation, r"\{M\}")
-        # Eq. 7 as written reproduces the returned profile, inside and outside.
-        n_div = 100
-        mass_num = physics.compute_shell_mass(n_div)
-        radius, plotted = physics.compute_acceleration_profile_textbook(n_div, "relative difference")
-        _, accel = physics.compute_acceleration_profile_textbook(n_div, "acceleration")
-        for r in (0.5, 0.9, 1.1, 2.0, 4.995):
-            index = int(round(r / physics.RADIUS_STEP))
-            expected = accel[index] / mass_num if r < 1 else accel[index] / (mass_num / r**2) - 1
-            with self.subTest(radius=r):
-                self.assertAlmostEqual(plotted[index], expected, delta=1e-15)
-
-    def test_original_distinguishes_the_plot_from_the_table(self):
-        text = html_text(self.help_text)
-        q = physics.compute_shell_mass(100) / physics.compute_continuum_shell_mass()
-        radius, plotted = physics.compute_acceleration_profile_optimized(100, "relative difference")
-        at = lambda r: plotted[int(round(r / physics.RADIUS_STEP))]
-        table = _table("python main.py --radii 1.1 2")
-        # the worked example of the two normalizations at r = 2
-        self.assertIn(r"the plot at \(r=2\) shows \(5.03\times10^{-5}\), while the table prints 9.1423e-05", text)
-        self.assertEqual(f"{at(2.0):.2e}", "5.03e-05")
-        self.assertEqual(f"{table[2.0][2]:.5g}", "9.1423e-05")
-        self.assertAlmostEqual((1 + at(2.0)) * q - 1, table[2.0][2], delta=5e-10)
-        _, g = physics.compute_acceleration_at_radii(100, [0.5])
-        self.assertAlmostEqual(at(0.5) * q, g[0] / physics.compute_continuum_shell_mass(), delta=1e-15)
-        # the Quick Start figures at r = 1.1
-        self.assertIn(r"the plotted relative difference at \(r=1.1\) is about \(2.5\times10^{-3}\)", text)
-        self.assertIn(r"gives \(2.6\times10^{-3}\) there", text)
-        self.assertEqual(f"{at(1.1):.1e}", "2.5e-03")
-        self.assertEqual(f"{table[1.1][2]:.1e}", "2.6e-03")
-        # the convergence table and Experiment 3 quote the plotted value at r = 1.1
-        self.assertIn(r"Plotted relative difference at \(r=1.1\) (Eq. 7)", text)
-        for n_div, quoted in ((1000, "2.5e-05"), (10000, "2.5e-07")):
-            _, profile = physics.compute_acceleration_profile_optimized(n_div, "relative difference")
-            with self.subTest(n_div=n_div):
-                self.assertEqual(f"{profile[220]:.1e}", quoted)
-
-    def test_original_overview_and_printed_results_match_the_radii_option(self):
-        text = html_text(self.help_text)
-        self.assertNotIn("seven fixed radii", text)
-        self.assertIn("at seven default radii, or at those supplied by --radii", text)
-        self.assertNotIn("All reported numbers use five significant figures", text)
-        self.assertIn("the radius labels use up to ten, and more when needed to show a radius exactly", text)
-
-    def test_original_stamp_matches_the_program(self):
+    def test_archive_retains_its_historical_stamp(self):
         match = re.search(
-            r'<p\s+id="version_build"[^>]*>\s*Version\s+([^&<\s]+)(?:&nbsp;|\s)+Build\s+([0-9a-f]{12})',
-            self.help_text,
+            r'<p\s+id="version_build"[^>]*>\s*Version\s+([^&<\s]+)'
+            r'(?:&nbsp;|\s)+Build\s+([0-9a-f]{12})', self.help_text
         )
         self.assertIsNotNone(match)
-        self.assertEqual(match.groups(), (physics.MODEL_VERSION, physics.BUILD_ID))
+        self.assertEqual(match.groups(), ("1.4.0", "217c2c26a44a"))
 
-    def test_help_ids_are_unique_and_local_navigation_targets_exist(self):
+    def test_archive_has_valid_internal_navigation(self):
         self.assertEqual(len(self.parser.ids), len(set(self.parser.ids)))
         self.assertEqual(set(self.parser.local_targets) - set(self.parser.ids), set())
 
-    def test_help_loads_mathjax_from_the_documented_public_cdn(self):
-        self.assertTrue(any("mathjax" in source.lower() for source in self.parser.script_sources))
-
-    def test_help_has_exactly_four_module_cards(self):
-        self.assertEqual(self.parser.module_card_count, 4)
-
-    def test_help_describes_actual_radial_grid_and_surface_placeholder(self):
-        self.assertIn(r"r \in [0, 4.995]", self.help_text)
-        self.assertIn("compatibility placeholder", self.help_text)
-        self.assertIn("plot leaves a gap", self.help_text)
-
-    def test_help_documents_both_output_modes(self):
-        self.assertIn("--outputType acceleration", self.help_text)
-        self.assertIn("--outputType relative_difference", self.help_text)
-
-    def test_help_documents_driver_epsilon_parameter(self):
-        self.assertRegex(
-            self.help_text,
-            r"run_spheregravity\(nDiv=100,\s*outputType='acceleration',\s*epsilon=0\.001\)",
-        )
-
-    def test_help_documents_every_command_line_parameter(self):
-        for option in ("--nDiv", "--outputType", "--epsilon", "--radii", "--version"):
-            with self.subTest(option=option):
-                self.assertIn(option, self.help_text)
-
-    def test_help_documents_printed_comparison_radii_and_estimate(self):
-        for radius in ("0.5", "0.995", "1.005", "2", "3", "4", "5"):
-            with self.subTest(radius=radius):
-                self.assertIn(radius, self.help_text)
-        self.assertIn("h^2 estimate", self.help_text)
-
-    def test_help_documents_interchangeable_implementations(self):
-        self.assertIn(
-            "compute_acceleration_profile = compute_acceleration_profile_textbook",
-            self.help_text,
-        )
-        self.assertIn(
-            "# compute_acceleration_profile = compute_acceleration_profile_optimized",
-            self.help_text,
-        )
-        self.assertIn("identical signatures and return values", self.help_text)
-
-    def test_exercises_are_numbered_and_ranked(self):
-        expected_headings = (
-            "1 · Introductory",
-            "2 · Introductory–Intermediate",
-            "3 · Intermediate",
-            "4 · Intermediate",
-            "5 · Intermediate–Advanced",
-            "6 · Advanced Programming Extension",
-            "7 · Advanced — NumPy Vectorization",
-        )
-        positions = []
-        for heading in expected_headings:
-            self.assertEqual(self.help_text.count(heading), 1)
-            positions.append(self.help_text.index(heading))
-        self.assertEqual(positions, sorted(positions))
-
-    def test_vectorization_exercise_covers_scientific_computing_tradeoffs(self):
-        self.assertIn("Identify which textbook loops", self.help_text)
-        self.assertIn("equivalent results in both output modes", self.help_text)
-        self.assertIn("bounded chunks", self.help_text)
-        self.assertIn("algorithmic transparency, execution speed, and memory", self.help_text)
-
-    def test_license_retains_java_provenance(self):
-        license_section = self.help_text.split('<section id="license">', 1)[1]
-        self.assertIn("original Java programs", license_section)
-        self.assertIn("Bernard Schutz", license_section)
-        self.assertIn("Thomas Yee", license_section)
-
-    def test_original_commands_run(self):
-        commands = documented_commands(self.help_text)
-        self.assertGreaterEqual(len(commands), 4)
-        for command in dict.fromkeys(commands):
-            arguments = command_arguments(command)
-            if "--help" in arguments:
-                continue
-            with self.subTest(command=command):
-                self.assertIn(run_cli(arguments).exit_code, (None, 0))
-
-    def test_original_array_lookup_snippet_runs_inside_main(self):
-        # Experiment 2 tells students to add the lookup right after the call in
-        # main.py, where radius and accel already exist.
-        snippet = re.search(r"<pre># r = 1\.1 sits on the 0\.005 grid.*?</pre>", self.help_text, re.DOTALL)
-        self.assertIsNotNone(snippet)
-        code = html.unescape(re.sub(r"<[^>]+>", "", snippet.group(0)))
-        source = (MODULE_DIR / "main.py").read_text(encoding="utf-8")
-        self.assertIn("    radius, accel = run_spheregravity(", source)
-        radius, accel = driver.run_spheregravity(nDiv=20, outputType="relative difference")
-        namespace = {"radius": radius, "accel": accel}
-        output = io.StringIO()
-        with redirect_stdout(output):
-            exec(code, namespace)
-        self.assertTrue(output.getvalue().startswith("1.1 "))
-
-    def test_original_names_related_programs_without_links_or_chapter_numbers(self):
-        links = [h for h in re.findall(r'href="([^"]*)"', self.help_text)
-                 if not h.startswith(("#", "http://", "https://", "mailto:"))]
-        self.assertEqual(links, [])
-        related = re.search(r'<h2 id="related">(.*?)(?=<!--|<h2 |</body>)', self.help_text, re.DOTALL)
-        self.assertIsNotNone(related)
-        text = html_text(related.group(1))
-        for name in ("Atmosphere", "Star", "Neutron", "RelativisticOrbit"):
-            self.assertIn(name, text)
-        self.assertNotRegex(text, r"\bChapter\b|\bCh\.|\bInvestigation\b")
+    def test_archive_retains_source_attribution(self):
+        self.assertIn("Bernard Schutz", self.help_text)
+        self.assertIn("Thomas Yee", self.help_text)
 
 
 if __name__ == "__main__":
