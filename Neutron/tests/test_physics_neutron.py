@@ -8,6 +8,7 @@ program modules during upload.
 from __future__ import annotations
 
 import ast
+from html import unescape
 import hashlib
 import math
 import os
@@ -25,13 +26,10 @@ CORE_MODULE_FILENAMES = (
     "main.py",
     "plot_neutron.py",
 )
-# The Beats-format tutorial is the Help file this suite scrapes and requires.
-# It is named Neutron-claude.html until it is adopted as the live Help, when it
-# is renamed Neutron.html; either name is accepted, and the first one found is
-# used.  ``Neutron-original.html`` (the pre-Beats Reference Guide) is not looked
-# for here and a passing run never depends on it existing.
+# Both active tutorial formats must be present together. The archived
+# Reference Guide is not part of this requirement.
 PROGRAM_NAME = "Neutron"
-HELP_FILENAMES = ("Neutron-claude.html", "Neutron.html")
+HELP_FILENAMES = ("Neutron-claude.html", "Neutron-grok.html")
 
 
 def find_module_dir(start: Path) -> Path:
@@ -192,34 +190,30 @@ def _independent_build_id() -> str:
     return digest.hexdigest()[:12]
 
 
-def find_help_file(module_dir: Path) -> Path:
-    """Find the Beats Help file in a flattened upload or the
-    GFTGU-Documentation tree.
+def find_help_files(module_dir: Path) -> tuple[Path, Path]:
+    """Find both tutorial Helps together in a flattened or sibling layout.
 
     Documentation folders no longer use chapter-number prefixes, and the
-    Help files live under the sibling ``GFTGU-Documentation`` repository
-    rather than beside the program modules inside ``GFTGU-Programs``. The
-    program's documentation directory is still named ``Neutron`` even
-    though the file sought inside it may be ``Neutron-claude.html``, so the
-    directory name is kept separate from the Help filename.
+    The program's documentation directory is named ``Neutron``. Requiring
+    both files in the same directory prevents mixing mismatched releases.
     """
-    candidates = [module_dir / name for name in HELP_FILENAMES]
+    candidates = [module_dir]
     for ancestor in (module_dir, *module_dir.parents):
-        for name in HELP_FILENAMES:
-            candidates.append(ancestor / "GFTGU-Documentation" / PROGRAM_NAME / name)
-            if ancestor.name != PROGRAM_NAME:
-                candidates.append(ancestor / PROGRAM_NAME / name)
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
+        candidates.append(ancestor / "GFTGU-Documentation" / PROGRAM_NAME)
+        if ancestor.name != PROGRAM_NAME:
+            candidates.append(ancestor / PROGRAM_NAME)
+    for directory in candidates:
+        files = tuple(directory / name for name in HELP_FILENAMES)
+        if all(file.is_file() for file in files):
+            return files  # type: ignore[return-value]
     raise FileNotFoundError(
-        f"Could not find {' or '.join(HELP_FILENAMES)} beside the program or in "
+        f"Could not find both {' and '.join(HELP_FILENAMES)} together beside the program or in "
         f"GFTGU-Documentation/{PROGRAM_NAME}/."
     )
 
 
 def _help_text() -> str:
-    return find_help_file(MODULE_DIR).read_text(encoding="utf-8")
+    return find_help_files(MODULE_DIR)[0].read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -252,16 +246,35 @@ def test_build_id_covers_exactly_the_four_core_modules() -> None:
 
 
 def test_help_version_and_build_are_in_sync() -> None:
-    html = _help_text()
-    match = re.search(
-        r'<p\s+id="version_build"[^>]*>\s*Version\s+([^&<\s]+)'
-        r'(?:&nbsp;|\s)+Build\s+([0-9a-f]{12})',
-        html,
-        flags=re.IGNORECASE,
-    )
-    assert match, "Help file lacks a parseable version_build paragraph"
-    assert match.group(1) == phys.MODEL_VERSION
-    assert match.group(2) == phys.BUILD_ID
+    for help_file in find_help_files(MODULE_DIR):
+        html = help_file.read_text(encoding="utf-8")
+        match = re.search(
+            r'<p\s+id="version_build"[^>]*>\s*Version\s+([^&<\s]+)'
+            r'(?:&nbsp;|\s)+Build\s+([0-9a-f]{12})',
+            html,
+            flags=re.IGNORECASE,
+        )
+        assert match, f"{help_file.name} lacks a parseable version_build paragraph"
+        assert match.group(1) == phys.MODEL_VERSION
+        assert match.group(2) == phys.BUILD_ID
+
+
+def test_both_active_helps_required_in_one_directory(tmp_path: Path) -> None:
+    (tmp_path / HELP_FILENAMES[0]).write_text("example", encoding="utf-8")
+    with pytest.raises(FileNotFoundError, match="both"):
+        find_help_files(tmp_path)
+    (tmp_path / HELP_FILENAMES[1]).write_text("example", encoding="utf-8")
+    assert tuple(p.name for p in find_help_files(tmp_path)) == HELP_FILENAMES
+
+
+def test_both_tutorials_cover_the_same_eight_beats_and_cli_options() -> None:
+    for help_file in find_help_files(MODULE_DIR):
+        html = help_file.read_text(encoding="utf-8")
+        for beat in range(8):
+            assert f'id="beat{beat}"' in html, (help_file.name, beat)
+        for flag in ("--gamma", "--pC", "--K", "--steps_per_scale",
+                     "--max_steps", "--output_type", "--log_y"):
+            assert flag in html, (help_file.name, flag)
 
 
 def test_main_version_cli() -> None:
@@ -1022,15 +1035,12 @@ def test_help_does_not_generalize_the_weak_field_ranking() -> None:
 
 
 def test_help_does_not_claim_the_sweep_measures_rk4_global_order() -> None:
-    """The steps_per_scale sweep's radius/mass errors do not shrink by the
-    textbook O(h^4) factor of 16 per halving -- that convergence is masked
-    by the lower-order surface-location estimate near the star's edge
-    (Audit22 Codex #2)."""
+    """The measured end-to-end radius/mass errors do not shrink by the
+    textbook O(h^4) factor of 16 per halving. The tutorial does not
+    attribute the difference to a single unisolated source."""
     html = _help_text()
-    assert (
-        "steps_per_scale</code> sweep above or Beat 5's error table actually "
-        "show" in html
-    )
+    rendered = " ".join(unescape(re.sub(r"<[^>]+>", " ", html)).split())
+    assert "steps_per_scale sweep above or Beat 5's error table actually show" in rendered
     # The actually observed, non-uniform ratios must be stated explicitly.
     assert "1.5, 1.0 and 2.1" in html
     assert "4.2, 4.4 and 4.2" in html

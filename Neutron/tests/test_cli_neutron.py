@@ -9,7 +9,8 @@ import sys
 import unittest
 from unittest import mock
 
-ROOT = Path(__file__).resolve().parents[1]
+TEST_DIR = Path(__file__).resolve().parent
+ROOT = TEST_DIR if (TEST_DIR/'main.py').is_file() else TEST_DIR.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 import main
@@ -76,46 +77,23 @@ class CommandLineTests(unittest.TestCase):
         )
 
     def test_docs_build_metadata(self):
-        # Neutron-claude.html (the Beats tutorial) is the Help file this
-        # check requires; Neutron-original.html (the pre-Beats Reference
-        # Guide) is checked only if present, since it is not shipped in a
-        # flattened code-review upload and removing it in a future round
-        # must not break this test. Documentation candidates are searched
-        # the same way test_physics_neutron.py's find_help_file() does, so
-        # this test also works from a flattened upload (Neutron-claude.html
-        # beside the program modules) as well as a full sibling-repo
-        # checkout. If no candidate carries Neutron-claude.html at all --
-        # e.g. a code-review snapshot that omits the documentation tree
-        # entirely -- the synchronization check is skipped rather than
-        # failed, since there is nothing to synchronize against.
-        # The Beats Help may also be named Neutron.html once it is adopted as
-        # the live Help; the first name found is used.
-        help_names = ('Neutron-claude.html', 'Neutron.html')
+        # Check both active tutorials together, in the same directory.
+        help_names = ('Neutron-claude.html', 'Neutron-grok.html')
         candidates = [ROOT]
         for ancestor in (ROOT, *ROOT.parents):
             candidates.append(ancestor/'GFTGU-Documentation'/'Neutron')
             if ancestor.name != 'Neutron':
                 candidates.append(ancestor/'Neutron')
-        help_file = next(
-            (c/name for c in candidates for name in help_names
-             if (c/name).is_file()),
+        docs_dir = next(
+            (c for c in candidates if all((c/name).is_file() for name in help_names)),
             None,
         )
-        if help_file is None:
-            self.skipTest(
-                'Neutron-claude.html (or Neutron.html) not found beside the '
-                'program or in a GFTGU-Documentation/Neutron/ tree; nothing to '
-                'synchronize.'
-            )
-        docs_dir = help_file.parent
-        self.assertIn(
-            physics.BUILD_ID,
-            help_file.read_text(encoding='utf-8'),
-        )
+        self.assertIsNotNone(docs_dir, 'Both active Neutron Help files are required together')
+        for name in help_names:
+            self.assertIn(physics.BUILD_ID, (docs_dir/name).read_text(encoding='utf-8'))
         for optional in (
             docs_dir/'Neutron-ReleaseNotes.html',
             docs_dir/'SampleOutputs/Neutron-SampleOutputs_Guide.html',
-            docs_dir/'Neutron-original.html',
         ):
             if optional.is_file():
                 self.assertIn(
