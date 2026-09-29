@@ -68,36 +68,28 @@ import planck2_physics as phys  # noqa: E402
 import planck2_plot as plotter  # noqa: E402
 
 
-HELP_FILENAMES = ("Planck2-claude.html", "Planck2.html")
+HELP_FILENAMES = ("Planck2-claude.html", "Planck2-grok.html")
 
 
-def find_help_file(module_dir: Path) -> Path:
-    """Find the Beats Help in a flattened upload or the GFTGU-Documentation tree.
-
-    The live Beats Help is accepted under either of its names,
-    ``Planck2-claude.html`` or ``Planck2.html``.  The Reference Guide version,
-    ``Planck2-original.html``, is never returned, and no test requires it.
-    """
+def find_help_files(module_dir: Path) -> tuple[Path, Path]:
+    """Require the two active tutorial guides together in one documentation folder."""
     program_name = "Planck2"
-    candidates = []
-    for help_filename in HELP_FILENAMES:
-        candidates.append(module_dir / help_filename)
-        for ancestor in (module_dir, *module_dir.parents):
-            candidates.append(
-                ancestor / "GFTGU-Documentation" / program_name / help_filename
-            )
-            if ancestor.name != program_name:
-                candidates.append(ancestor / program_name / help_filename)
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
+    directories = [module_dir]
+    for ancestor in (module_dir, *module_dir.parents):
+        directories.append(ancestor / "GFTGU-Documentation" / program_name)
+        if ancestor.name != program_name:
+            directories.append(ancestor / program_name)
+    for directory in directories:
+        pair = tuple(directory / name for name in HELP_FILENAMES)
+        if all(path.is_file() for path in pair):
+            return pair
     raise FileNotFoundError(
-        f"Could not find {' or '.join(HELP_FILENAMES)} beside the program or in "
-        "GFTGU-Documentation/Planck2/."
+        "Both Planck2-claude.html and Planck2-grok.html are required together "
+        "beside the program or in GFTGU-Documentation/Planck2/."
     )
 
 
-HELP_FILE = find_help_file(MODULE_DIR)
+HELP_FILE, GROK_HELP_FILE = find_help_files(MODULE_DIR)
 
 
 def relative_error(actual, expected):
@@ -1053,6 +1045,7 @@ class TestPlotting(unittest.TestCase):
 
 
 HELP_HTML = HELP_FILE.read_text(encoding="utf-8")
+GROK_HTML = GROK_HELP_FILE.read_text(encoding="utf-8")
 BEAT_NUMBERS = tuple(range(0, 9))
 VOID_TAGS = {
     "area", "base", "br", "col", "embed", "hr", "img", "input", "link",
@@ -1222,6 +1215,63 @@ class HelpStructure(HTMLParser):
 
 
 STRUCTURE = HelpStructure(HELP_HTML)
+
+
+class PairedTutorialTests(unittest.TestCase):
+    """Both active guides use the same executable and companion figures."""
+
+    def test_pair_is_present_and_has_the_same_build(self):
+        self.assertEqual({HELP_FILE.name, GROK_HELP_FILE.name}, set(HELP_FILENAMES))
+        for page in (HELP_HTML, GROK_HTML):
+            with self.subTest(page=page[:90]):
+                self.assertIn(f"Version {phys.MODEL_VERSION}&nbsp;&nbsp;&nbsp;&nbsp;Build {phys.BUILD_ID}", page)
+                self.assertIn("cursor", section_html(page, "overview").lower())
+                self.assertIn("(x, y)", section_html(page, "overview"))
+
+    def test_grok_html_is_balanced_with_valid_internal_links(self):
+        structure = HelpStructure(GROK_HTML)
+        self.assertEqual(structure.errors, [])
+        self.assertEqual(len(structure.ids), len(set(structure.ids)))
+        self.assertEqual(structure.sidebar_hrefs, structure.section_ids)
+        self.assertLessEqual(set(h[1:] for h in structure.hrefs if h.startswith("#")), set(structure.ids))
+        self.assertEqual([f"beat{n}" for n in BEAT_NUMBERS],
+                         [s for s in structure.section_ids if s.startswith("beat")])
+
+    def test_grok_parameter_defaults_and_modes_match_parser(self):
+        parser = HelpStructureParser()
+        parser.feed(GROK_HTML)
+        rows = {r[0]: r[1] for s, r in parser.rows
+                if s == "parameters" and len(r) >= 2 and r[0] != "Parameter"}
+        for action in planck2_main.build_parser()._actions:
+            if action.option_strings and action.option_strings[0] not in ("-h", "--version"):
+                default = action.default
+                expected = f'"{default}"' if isinstance(default, str) else str(default)
+                self.assertEqual(rows[action.option_strings[0]], expected)
+
+    def test_grok_commands_run_and_each_beat_has_one_sample_figure_command(self):
+        samples = SAMPLE_OUTPUTS_PATH.read_text(encoding="utf-8")
+        commands = documented_commands(GROK_HTML)
+        self.assertGreaterEqual(len(set(commands)), 25)
+        for command in dict.fromkeys(commands):
+            with self.subTest(command=command):
+                run = run_cli(command_arguments(command))
+                self.assertIn(run.exit_code, (None, 0), run.stderr)
+                if "--help" not in command and "--version" not in command:
+                    self.assertEqual(len(run.stdout.splitlines()), 5)
+        for number in BEAT_NUMBERS:
+            section = section_html(samples, f"beat{number}")
+            command = html_module.unescape(re.search(r"<pre><code>(.*?)</code></pre>", section, re.S).group(1))
+            self.assertIn(command, documented_commands(section_html(GROK_HTML, f"beat{number}")))
+
+    def test_critical_science_and_user_handoff_are_explicit(self):
+        plain = html_text(GROK_HTML)
+        for phrase in ("per wavelength", "per frequency", "2.821", "4.965",
+                       "one grid step", "expected to fail",
+                       "W m−2 sr−1", "J m−3"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, plain)
+        self.assertIn(r"\(x=hc/(\lambda kT)=h\nu/(kT)\)", GROK_HTML)
+        self.assertIn(r"4\pi/c", GROK_HTML)
 
 
 class HelpStructureTests(unittest.TestCase):
@@ -2198,7 +2248,7 @@ class DocumentationSetTests(unittest.TestCase):
 
 
 class HelpOriginalCompatibilityTests(unittest.TestCase):
-    """The Reference Guide version is optional; these tests never require it."""
+    """The historical Reference Guide is optional and deliberately not synchronized."""
 
     @classmethod
     def setUpClass(cls):
@@ -2207,38 +2257,16 @@ class HelpOriginalCompatibilityTests(unittest.TestCase):
             raise unittest.SkipTest("Planck2-original.html is not present in this layout")
         cls.text = cls.original.read_text(encoding="utf-8")
 
-    def test_original_stamp_matches_the_program(self):
+    def test_original_is_identified_as_historical(self):
         match = re.search(
             r'<p id="version_build"[^>]*>\s*Version\s+([^&<\s]+)(?:&nbsp;)+Build\s+([0-9a-f]{12})',
             self.text,
         )
         self.assertIsNotNone(match)
-        self.assertEqual(match.groups(), (phys.MODEL_VERSION, phys.BUILD_ID))
+        self.assertEqual(match.groups(), ("1.2.0", "c586ea3aebd4"))
 
-    def test_original_parameter_defaults_still_match_the_parser(self):
-        parser = HelpStructureParser()
-        parser.feed(self.text)
-        rows = {r[0]: r[1] for s, r in parser.rows if s == "parameters" and len(r) >= 2 and r[0] != "Parameter"}
-        for action in planck2_main.build_parser()._actions:
-            if action.option_strings and action.option_strings[0] not in ("-h", "--version"):
-                default = action.default
-                expected = f'"{default}"' if isinstance(default, str) else str(default)
-                self.assertEqual(rows[action.option_strings[0]], expected)
-
-    def test_original_commands_still_run(self):
-        commands = []
-        for block in re.findall(r'<div class="sig">(.*?)</div>', self.text, re.DOTALL):
-            for line in html_module.unescape(re.sub(r"<[^>]+>", "", block)).splitlines():
-                line = " ".join(line.split())
-                if line.startswith("python main.py"):
-                    commands.append(line)
-        self.assertGreaterEqual(len(commands), 4)
-        for command in dict.fromkeys(commands):
-            arguments = command_arguments(command)
-            if "--help" in arguments:
-                continue
-            with self.subTest(command=command):
-                self.assertIn(run_cli(arguments).exit_code, (None, 0))
+    def test_original_is_not_one_of_the_active_pair(self):
+        self.assertNotIn("Planck2-original.html", HELP_FILENAMES)
 
 
 class TestQuantitySpecSynchronization(unittest.TestCase):
