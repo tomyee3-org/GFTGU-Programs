@@ -318,8 +318,9 @@ def lane_emden_surface(n: float, relative_step: float = None):
 
     The equation (1/xi^2) d/dxi (xi^2 dtheta/dxi) = -theta**n, with
     theta(0) = 1 and theta'(0) = 0, is started from its series at a small xi
-    and integrated with classical fourth-order Runge-Kutta steps of 0.1% of
-    xi (or of 0.001 near the centre), shortened in proportion to theta once
+    and integrated with classical fourth-order Runge-Kutta steps set by
+    relative_step (by default 0.1% of xi, or 0.001 near the centre),
+    shortened in proportion to theta once
     theta < 0.1 when n < 2, and refined a thousandfold in three stages once a
     step crosses the zero.  The first zero of theta is located on a cubic Hermite interpolant
     of the final step, and the mass factor is completed with the integral of
@@ -329,8 +330,10 @@ def lane_emden_surface(n: float, relative_step: float = None):
     if the surface lies beyond LANE_EMDEN_MAX_XI, or if it is not reached in
     LANE_EMDEN_MAX_STEPS steps.
 
-    For 0 <= n <= 4.99 the result agrees with an independent high-accuracy
-    solution to better than 1e-10.  Closer to n = 5 the error of xi_1 grows
+    At the default relative_step, for 0 <= n <= 4.99, the result was
+    checked against an independent high-accuracy solution to better than
+    1e-10.  A coarser relative_step is less accurate. Closer to n = 5
+    the error of xi_1 grows
     as 1/(5 - n), to the order of 1e-6 at n = 4.9999999; lane_emden_solution()
     estimates it.
     """

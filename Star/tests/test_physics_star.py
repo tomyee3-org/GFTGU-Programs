@@ -5,9 +5,9 @@ The locator deliberately supports both repository layout::
     Star/tests/test_physics_star.py
 
 and a flattened upload in which this test file is placed beside the four
-program modules.  The Beats tutorial Help, Star-claude.html (or Star.html once
-it is adopted), is required; the Reference Guide Help, Star-original.html, is
-optional and its tests skip without it.
+program modules.  Both tutorial Help files, Star-claude.html and Star-grok.html, are required
+together in one folder. The archived Reference Guide, Star-original.html, is
+optional and is never checked against the current release stamp.
 """
 
 import ast
@@ -55,37 +55,26 @@ def find_module_dir(start):
 
 MODULE_DIR = find_module_dir(Path(__file__).resolve().parent)
 TEST_FILE = Path(__file__).resolve()
-HELP_FILENAMES = ("Star-claude.html", "Star.html")
+HELP_FILENAMES = ("Star-claude.html", "Star-grok.html")
 
 
-def find_help_file(module_dir):
-    """Find Help in a flattened upload or the GFTGU-Documentation tree.
-
-    Documentation folders no longer use chapter-number prefixes, and the
-    Help files live under the sibling ``GFTGU-Documentation`` repository
-    rather than beside the program modules inside ``GFTGU-Programs``.
-    """
-    # The Beats Help is named Star-claude.html until it is adopted as the live
-    # Help, when it is renamed Star.html; either name is accepted, and the first
-    # one found is used.  The Reference Guide version, Star-original.html, is
-    # never used here.
-    program_name = "Star"
-    candidates = [module_dir / name for name in HELP_FILENAMES]
+def find_help_files(module_dir):
+    """Find the paired active tutorials in a flat or sibling docs layout."""
+    folders = [module_dir]
     for ancestor in (module_dir, *module_dir.parents):
-        for name in HELP_FILENAMES:
-            candidates.append(ancestor / "GFTGU-Documentation" / program_name / name)
-            if ancestor.name != program_name:
-                candidates.append(ancestor / program_name / name)
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
+        folders.append(ancestor / "GFTGU-Documentation" / "Star")
+        if ancestor.name != "Star":
+            folders.append(ancestor / "Star")
+    for folder in dict.fromkeys(folders):
+        if all((folder / name).is_file() for name in HELP_FILENAMES):
+            return tuple(folder / name for name in HELP_FILENAMES)
     raise FileNotFoundError(
-        "Could not find Star-claude.html (or Star.html) beside the program or in "
-        "GFTGU-Documentation/Star/."
+        "Star-claude.html and Star-grok.html must both be present "
+        "in the same program or documentation folder."
     )
 
 
-HELP_FILE = find_help_file(MODULE_DIR)
+HELP_FILE, GROK_FILE = find_help_files(MODULE_DIR)
 if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 
@@ -286,6 +275,7 @@ class TestLocationAndReleaseMetadata(unittest.TestCase):
             for name in CORE_MODULE_FILENAMES:
                 shutil.copy2(MODULE_DIR / name, flat / name)
             shutil.copy2(HELP_FILE, flat / HELP_FILE.name)
+            shutil.copy2(GROK_FILE, flat / GROK_FILE.name)
             shutil.copy2(TEST_FILE, flat / TEST_FILE.name)
             code = (
                 "import importlib.util, pathlib; "
@@ -971,109 +961,15 @@ class TestPlottingAndEntryPoint(unittest.TestCase):
         )
 
 
-class TestOriginalHelpCompatibility(unittest.TestCase):
-    """The Reference Guide version is optional; these tests never require it."""
+class TestArchivedReferenceGuide(unittest.TestCase):
+    """The optional Reference Guide is preserved as a historical artifact."""
 
-    @classmethod
-    def setUpClass(cls):
-        cls.original = HELP_FILE.with_name("Star-original.html")
-        if not cls.original.is_file():
-            raise unittest.SkipTest("Star-original.html is not present in this layout")
-        cls.html = cls.original.read_text(encoding="utf-8")
-
-    def test_help_file_exists_and_has_version_element(self):
-        self.assertTrue(self.original.is_file())
-        self.assertRegex(self.html, r'<p\s+id="version_build"[^>]*>')
-
-    def test_help_version_and_build_match_code(self):
-        match = re.search(
-            r'<p\s+id="version_build"[^>]*>\s*Version\s+([^&<\s]+)'
-            r'(?:&nbsp;)+Build\s+([0-9a-f]{12})\s*</p>',
-            self.html,
-            flags=re.IGNORECASE,
-        )
-        self.assertIsNotNone(match)
-        self.assertEqual(match.group(1), phys.MODEL_VERSION)
-        self.assertEqual(match.group(2), phys.BUILD_ID)
-
-    def test_help_default_table_matches_main_assignments_structurally(self):
-        self.assertEqual(set(MAIN_DEFAULTS), set(DEFAULT_PARAMETER_NAMES))
-        self.assertEqual(extract_help_defaults(self.html), MAIN_DEFAULTS)
-
-    def test_help_lists_every_runtime_output_mode(self):
-        for mode in driver_star.OUTPUT_TYPES:
-            self.assertIn(f'<code>"{mode}"</code>', self.html)
-
-    def test_help_states_model_scope_and_finite_radius_condition(self):
-        self.assertIn("not be confused with a high-accuracy solar-interior model", self.html)
-        self.assertIn(r"\(\gamma > 6/5\)", self.html)
-        self.assertIn(r"\(\gamma=4/3\)", self.html)
-
-    def test_help_documents_core_only_build_scope_and_plot_return(self):
-        self.assertIn("computed from the four executable core modules", self.html)
-        self.assertIn("Help file or the regression tests alone", self.html)
-        self.assertIn("plot_star_structure(result, log_y=False) → (fig, ax)", self.html)
-
-    def test_mathjax_greater_than_symbols_are_literal(self):
-        self.assertNotRegex(self.html, r"\\\([^)]*&gt;[^)]*\\\)")
-
-    def test_experiment_six_distinguishes_fixed_gamma_from_fixed_eos(self):
-        self.assertIn("6 · Advanced — Compare Two Kinds of Polytropic Family", self.html)
-        self.assertIn(r"not a fixed-\(K\) sequence", self.html)
-        self.assertIn("genuinely fixed-equation-of-state family", self.html)
-        self.assertIn(r"(\gamma-2)/(2\gamma)", self.html)
-        self.assertIn(r"(3\gamma-4)/(2\gamma)", self.html)
-
-    def test_development_history_is_confined_to_license_provenance(self):
-        student_content = self.html.split('<section id="license">', 1)[0].lower()
-        for phrase in ("ai-generated", "legacy critique", "converted from java"):
-            self.assertNotIn(phrase, student_content)
-
-    def test_original_describes_the_new_summary_lines_and_limits(self):
-        text = " ".join(html.unescape(re.sub(r"<[^>]+>", " ", self.html)).split())
-        for phrase in ("Numerical grid", "Restarts (radial step doubled)",
-                       "Lane-Emden solution of the same polytrope (numerical reference)",
-                       "Warning: gamma is so close to 6/5",
-                       "measure the error of the Euler integration",
-                       "from 3 to 1000000"):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, text)
-        self.assertNotIn("at least 3.", text)
-        self.assertNotIn("(exact)", text)
-        self.assertNotIn("exact Lane", text)
-        # the accuracy of the Lane-Emden reference is stated as checked, and
-        # the step difference as an estimate
-        self.assertIn("agree with it to better than \\(10^{-10}\\)", text)
-        self.assertIn("not a guaranteed bound", text)
-        self.assertIn("1.5\\times10^{-7}", text)
-        self.assertNotIn("1.3\\times10^{-7}", text)
-        self.assertNotIn("better than \\(10^{-8}\\)", text)
-
-    def test_original_gives_no_chapter_numbers_and_links_to_no_other_help(self):
-        text = " ".join(html.unescape(re.sub(r"<[^>]+>", " ", self.html)).split())
-        self.assertNotRegex(text, r"\bChapter\s+\d|\bInvestigations?\s+\d")
-        links = [h for h in re.findall(r'href="([^"]*)"', self.html)
-                 if not h.startswith(("#", "http://", "https://", "mailto:"))]
-        self.assertEqual(links, [])
-
-    def test_original_commands_run(self):
-        commands = []
-        for block in re.findall(r'<div class="sc-params">(.*?)</div>', self.html, re.DOTALL) + \
-                re.findall(r"<pre[^>]*>(.*?)</pre>", self.html, re.DOTALL):
-            text = html.unescape(re.sub(r"<br\s*/?>", "\n", block))
-            text = re.sub(r"<[^>]+>", "", text).replace("\\\n", " ")
-            joined = re.sub(r"\n\s+--", " --", text)
-            for line in joined.splitlines():
-                line = " ".join(line.split())
-                if line.startswith("python main.py") and "--help" not in line and "--version" not in line:
-                    commands.append(line)
-        self.assertGreaterEqual(len(commands), 15)
-        for command in dict.fromkeys(commands):
-            with self.subTest(command=command):
-                run = run_cli(command_arguments(command))
-                self.assertIn(run.exit_code, (None, 0), run.stderr)
-                self.assertIn("Stellar structure summary", run.stdout)
-
+    def test_archive_is_never_selected_as_an_active_tutorial(self):
+        archive = HELP_FILE.with_name("Star-original.html")
+        if not archive.exists():
+            self.skipTest("no archived Reference Guide in this layout")
+        self.assertNotIn(archive, find_help_files(MODULE_DIR))
+        self.assertIn('id="version_build"', archive.read_text(encoding="utf-8"))
 
 
 # ---------------------------------------------------------------------------
@@ -1607,6 +1503,74 @@ class HelpStructure(HTMLParser):
                     pass
             return
         self._stack.pop()
+
+
+GROK_HTML = GROK_FILE.read_text(encoding="utf-8")
+GROK_STRUCTURE = HelpStructure(GROK_HTML)
+
+
+class TestGrokTutorial(unittest.TestCase):
+    """Shared executable, separate teaching path, paired active documentation."""
+
+    def test_paired_locator_requires_both_in_one_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "Star"
+            folder.mkdir()
+            (folder / HELP_FILENAMES[0]).write_text("Claude", encoding="utf-8")
+            with self.assertRaises(FileNotFoundError):
+                find_help_files(folder)
+            (folder / HELP_FILENAMES[1]).write_text("Grok", encoding="utf-8")
+            self.assertEqual(find_help_files(folder), tuple(folder / n for n in HELP_FILENAMES))
+
+    def test_stamps_and_house_style_match(self):
+        for page in (HELP_HTML, GROK_HTML):
+            match = re.search(
+                r'<p\s+id="version_build"[^>]*>\s*Version\s+([^&<\s]+)'
+                r'(?:&nbsp;)+Build\s+([0-9a-f]{12})\s*</p>', page
+            )
+            self.assertIsNotNone(match)
+            self.assertEqual(match.groups(), (phys.MODEL_VERSION, phys.BUILD_ID))
+            self.assertIn("lower right corner", html_text(section_html(page, "overview")))
+        for page in (HELP_HTML, GROK_HTML):
+            self.assertIn('class="page-wrap"', page)
+            self.assertIn('nav id="sidebar"', page)
+            self.assertIn('class="badge"', page)
+        self.assertEqual(re.search(r"<style>(.*?)</style>", HELP_HTML, re.S).group(1),
+                         re.search(r"<style>(.*?)</style>", GROK_HTML, re.S).group(1))
+
+    def test_grok_structure_and_links(self):
+        self.assertEqual(GROK_STRUCTURE.errors, [])
+        self.assertEqual(len(GROK_STRUCTURE.ids), len(set(GROK_STRUCTURE.ids)))
+        self.assertEqual(GROK_STRUCTURE.sidebar_hrefs, GROK_STRUCTURE.section_ids)
+        for href in GROK_STRUCTURE.hrefs:
+            if href.startswith("#"):
+                self.assertIn(href[1:], GROK_STRUCTURE.ids)
+        self.assertEqual([s for s in GROK_STRUCTURE.section_ids if re.fullmatch(r"beat[0-8]", s)],
+                         [f"beat{n}" for n in range(9)])
+        self.assertLess(len(GROK_HTML), len(HELP_HTML))
+
+    def test_commands_and_headline_values_are_current(self):
+        commands = documented_commands(GROK_HTML)
+        self.assertGreaterEqual(len(commands), 11)
+        for command in dict.fromkeys(commands):
+            with self.subTest(command=command):
+                run = run_cli(command_arguments(command))
+                if command == "python main.py --gamma 1.2":
+                    self.assertEqual(run.exit_code, 2)
+                    self.assertIn("finite-radius polytrope", str(run.exit_code) + run.stderr)
+                else:
+                    self.assertIn(run.exit_code, (None, 0), run.stderr)
+                    self.assertIn("Stellar structure summary", run.stdout)
+        for beat, command in enumerate((
+            "python main.py", "python main.py --output_type density --log_y",
+            "python main.py --output_type temperature", "python main.py --output_type mass",
+            "python main.py --T_c 2.4893e7", "python main.py --gamma 2",
+            "python main.py --steps_per_scale 800 --max_points 4000",
+            "python main.py --max_points 1000", "python main.py --gamma 1.21",
+        )):
+            with self.subTest(beat=beat):
+                self.assertIn(command, documented_commands(section_html(GROK_HTML, f"beat{beat}")))
+        self.assertEqual(extract_help_defaults(GROK_HTML), MAIN_DEFAULTS)
 
 
 STRUCTURE = HelpStructure(HELP_HTML)
