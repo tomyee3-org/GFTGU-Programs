@@ -1549,7 +1549,7 @@ class TestGrokTutorial(unittest.TestCase):
                          [f"beat{n}" for n in range(9)])
         self.assertLess(len(GROK_HTML), len(HELP_HTML))
 
-    def test_commands_and_headline_values_are_current(self):
+    def test_commands_and_defaults_are_current(self):
         commands = documented_commands(GROK_HTML)
         self.assertGreaterEqual(len(commands), 11)
         for command in dict.fromkeys(commands):
@@ -1571,6 +1571,66 @@ class TestGrokTutorial(unittest.TestCase):
             with self.subTest(beat=beat):
                 self.assertIn(command, documented_commands(section_html(GROK_HTML, f"beat{beat}")))
         self.assertEqual(extract_help_defaults(GROK_HTML), MAIN_DEFAULTS)
+
+
+    def test_quoted_grok_values_match_documented_runs(self):
+        # Each pair is (number printed in the tutorial, number printed by
+        # the command). Keeping both checks catches stale prose and a changed
+        # program result. Approximate rounded prose is paired with its full
+        # five-figure console counterpart.
+        checks = (
+            (0, "python main.py", (("6.9674e+08", "6.9674e+08"),
+                                    ("1.9825e+30", "1.9825e+30"),
+                                    ("7.158e+15", "7.158e+15"))),
+            (1, "python main.py --output_type density --log_y",
+             (("2313", "2313.2"), ("6.65", "6.6545"), ("49187", "49187"))),
+            (2, "python main.py --output_type temperature",
+             (("7.53e+06", "7.5289e+06"), ("2.263e+07", "2.263e+07"))),
+            (3, "python main.py --output_type mass",
+             (("1.6732e+30", "1.6732e+30"),)),
+            (4, "python main.py --T_c 2.4893e7",
+             (("7.6641e+08", "7.6641e+08"), ("2.3988e+30", "2.3988e+30"))),
+            (5, "python main.py --gamma 2",
+             (("2.6392e+08", "2.6392e+08"), ("2.6239e+08", "2.6239e+08"))),
+            (6, "python main.py --steps_per_scale 800 --max_points 4000",
+             (("2.6323e+05", "2.6323e+05"), ("2666", "2666"),
+              ("-0.0075071", "-0.0075071"), ("-0.00092707", "-0.00092707"))),
+            (7, "python main.py --max_points 1000",
+             (("654", "654"), ("-0.02726", "-0.02726"))),
+            (8, "python main.py --gamma 1.21",
+             (("4.7619", "4.7619"), ("7.2406e+09", "7.2406e+09"),
+              ("9.9626e+09", "9.9626e+09"), ("-0.27322", "-0.27322"))),
+        )
+        for beat, command, values in checks:
+            text = html_text(section_html(GROK_HTML, f"beat{beat}"))
+            output = beat_run(command).stdout
+            for quote, printed in values:
+                with self.subTest(beat=beat, quote=quote):
+                    self.assertIn(quote, text)
+                    self.assertIn(printed, output)
+        extreme = beat_run("python main.py --gamma 1.2000000001").stdout
+        self.assertIn("4.9999999975", html_text(section_html(GROK_HTML, "beat8")))
+        self.assertIn("4.9999999975", extreme)
+        self.assertIn("Warning: gamma is so close", extreme)
+        self.assertRegex(phys.lane_emden_surface.__doc__,
+                         re.compile(r"At the default relative_step.*?checked against an independent high-accuracy solution", re.DOTALL))
+
+    def test_release_notes_current_sections_precede_history(self):
+        notes_path = HELP_FILE.parent / "Star-ReleaseNotes.html"
+        if not notes_path.is_file():
+            self.skipTest("Release Notes absent in the flat two-tutorial layout")
+        notes = notes_path.read_text(encoding="utf-8")
+        current, sep, history = notes.partition("<h2>Historical Release Notes</h2>")
+        self.assertTrue(sep)
+        expected = ("Release Status", "Open Bugs", "Major Improvements in This Release",
+                    "Test Suite Growth", "Known Limitations", "Known Minor Maintenance Items",
+                    "Version Identification")
+        self.assertEqual(tuple(re.findall(r"<h2>(.*?)</h2>", current)), expected)
+        self.assertEqual(tuple(re.findall(r"<h2>(.*?)</h2>", history)), expected)
+        self.assertNotIn("<details>", notes)
+        self.assertIn("OB-1", history)
+        self.assertIn("No open numerical or student-facing defect", current)
+
 
 
 STRUCTURE = HelpStructure(HELP_HTML)
@@ -1635,13 +1695,21 @@ class TestBeatsHelpStructure(unittest.TestCase):
                 self.assertEqual(len(re.findall(r"\\\\", block)), 0)
 
     def test_student_content_contains_no_ai_or_review_history(self):
-        student_text = HELP_HTML.split('<section id="license">', 1)[0]
+        student_texts = [page.split('<section id="license">', 1)[0]
+                         for page in (HELP_HTML, GROK_HTML)]
         for term in ("Claude", "Copilot", "Gemini", "ChatGPT", "Anthropic", "Codex", "Grok",
                      "AI-generated", "audit", "Kickoff", "previous version", "reviewer",
                      "Java"):
-            with self.subTest(term=term):
-                self.assertNotIn(term, student_text)
+            for student_text in student_texts:
+                with self.subTest(term=term, tutorial="Grok" if student_text == student_texts[1] else "Claude"):
+                    self.assertNotIn(term, student_text)
         self.assertIn("Java", HELP_HTML.split('<section id="license">', 1)[1])
+        guide_path = HELP_FILE.parent / "SampleOutputs" / "Star-SampleOutputs_Guide.html"
+        if guide_path.is_file():
+            guide = guide_path.read_text(encoding="utf-8")
+            for term in ("AI-generated", "audit", "Kickoff", "previous version", "reviewer"):
+                with self.subTest(term=term, document="Sample Outputs Guide"):
+                    self.assertNotIn(term, guide)
 
     def test_no_chapter_or_investigation_numbers(self):
         text = html_text(HELP_HTML)
