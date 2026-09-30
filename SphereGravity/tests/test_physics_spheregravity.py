@@ -1770,14 +1770,34 @@ class TestPairedTutorials(unittest.TestCase):
     """Shared release identity, paired discovery and executable Grok exercises."""
 
     def test_both_tutorials_have_the_live_stamp_and_cursor_note(self):
+        expected = (rf'Version\s+{re.escape(physics.MODEL_VERSION)}'
+                    rf'(?:&nbsp;|\s)+Build\s+{re.escape(physics.BUILD_ID)}')
         for page in (HELP_FILE, GROK_FILE):
             source = page.read_text(encoding="utf-8")
             with self.subTest(page=page.name):
-                self.assertRegex(source, r'Version\s+1\.4\.0(?:&nbsp;|\s)+Build\s+217c2c26a44a')
+                self.assertRegex(source, expected)
                 self.assertIn("cursor hovers over a graph", source)
                 self.assertIn("lower right", source)
-        self.assertEqual(physics.MODEL_VERSION, "1.4.0")
-        self.assertEqual(physics.BUILD_ID, "217c2c26a44a")
+
+    def test_grok_header_palette_and_sidebar_match_house_style(self):
+        claude = HELP_FILE.read_text(encoding="utf-8")
+        grok = GROK_FILE.read_text(encoding="utf-8")
+        def block(source, tag):
+            return re.search(rf'<{tag}[^>]*>(.*?)</{tag}>', source, re.DOTALL).group(1)
+        for label, url in (("Source Code", "https://github.com/tomyee3-org/GFTGU-Programs"),
+                           ("Documentation", "https://github.com/tomyee3-org/GFTGU-Documentation")):
+            with self.subTest(label=label):
+                markup = rf'{label}:\s*<a href="{re.escape(url)}"[^>]*>{re.escape(url)}</a>'
+                self.assertRegex(block(claude, "header"), markup)
+                self.assertRegex(block(grok, "header"), markup)
+        for name in ("--bg", "--surface", "--border", "--accent", "--gold"):
+            css_property = rf'{re.escape(name)}:\s*([^;]+);'
+            self.assertEqual(re.search(css_property, block(claude, "style")).group(1),
+                             re.search(css_property, block(grok, "style")).group(1))
+        self.assertTrue(block(grok, "style").startswith(block(claude, "style")))
+        self.assertIn('class="badge"', block(grok, "header"))
+        self.assertIn('class="nav-label"', block(grok, "nav"))
+        self.assertIn("IntersectionObserver", grok)
 
     def test_discovery_requires_both_tutorials_in_the_same_folder(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1800,9 +1820,15 @@ class TestPairedTutorials(unittest.TestCase):
         self.assertTrue({f"beat{i}" for i in range(9)}.issubset(structure.section_ids))
         self.assertEqual({ref[1:] for ref in structure.hrefs if ref.startswith("#")} - set(structure.ids), set())
         text = source.split('<section id="license">', 1)[0]
-        for term in ("Codex", "Audit", "Kickoff", "Claude", "Grok"):
+        for term in ("codex", "audit", "kickoff", "claude", "grok", "xedoc", "anthropic"):
             with self.subTest(term=term):
-                self.assertNotIn(term, text)
+                self.assertNotIn(term, text.lower())
+        for target, label in re.findall(r'<a href="#([^"]+)">([^<]+)</a>',
+                                        re.search(r'<nav[^>]*>(.*?)</nav>', source, re.DOTALL).group(1)):
+            heading = re.search(rf'<section id="{re.escape(target)}"><h2>(.*?)</h2>', source)
+            if heading:
+                self.assertEqual(html_text(label).removeprefix(target[4:] + ' · '),
+                                 html_text(heading.group(1)).removeprefix('Beat ' + target[4:] + ' · '))
 
     def test_grok_commands_run_or_reject_as_documented(self):
         source = GROK_FILE.read_text(encoding="utf-8")
@@ -1836,12 +1862,45 @@ class TestPairedTutorials(unittest.TestCase):
         self.assertAlmostEqual(physics.compute_continuum_shell_mass(),
                                4 * math.pi * physics.DEFAULT_EPSILON)
 
+    def test_surface_jump_wording_and_starred_rows(self):
+        claude = section_html(HELP_HTML, "beat5")
+        grok = section_html(GROK_FILE.read_text(encoding="utf-8"), "beat5")
+        self.assertIn("signed normal component", claude)
+        self.assertNotIn("whatever the shape of a surface layer", claude)
+        self.assertIn("signed normal component", grok)
+        self.assertIn("every row except <em>r</em> = 1.1", grok)
+        run = run_cli(("--radii", "0.995", "1.005", "1.01", "1.05", "1.1")).stdout
+        rows = [line for line in run.splitlines() if re.match(r"\s+(?:0\.995|1\.005|1\.01|1\.05|1\.1)\s", line)]
+        self.assertEqual(["*" in line for line in rows], [True, True, True, True, False])
+
+    def test_grok_parameter_defaults_match_parser(self):
+        rows = HelpStructure(GROK_FILE.read_text(encoding="utf-8")).table_rows
+        defaults = {row[0]: row[1] for row in rows if len(row) == 3 and row[0].startswith("--")}
+        parser = entry_point.build_parser()
+        actions = {a.option_strings[0]: a for a in parser._actions
+                   if a.option_strings and a.option_strings[0] not in ("-h", "--version")}
+        self.assertEqual(defaults.keys(), actions.keys())
+        for option, action in actions.items():
+            with self.subTest(option=option):
+                if isinstance(action.default, list):
+                    self.assertEqual([float(x) for x in defaults[option].split()], action.default)
+                elif isinstance(action.default, str):
+                    self.assertEqual(defaults[option], action.default)
+                else:
+                    self.assertEqual(float(defaults[option]), float(action.default))
+
 
 SAMPLE_GUIDE = HELP_FILE.parent / "SampleOutputs" / "SphereGravity-SampleOutputs_Guide.html"
 
 
 @unittest.skipUnless(SAMPLE_GUIDE.is_file(), "Shared Sample Outputs Guide is absent in this layout")
 class TestSharedSampleOutputs(unittest.TestCase):
+    def test_instructor_guide_has_no_development_review_jargon(self):
+        guide = SAMPLE_GUIDE.read_text(encoding="utf-8")
+        visible = re.sub(r'data:image/png;base64,[A-Za-z0-9+/=]+', '', guide)
+        visible = visible.replace('SphereGravity-claude.html', '').replace('SphereGravity-grok.html', '')
+        self.assertNotRegex(visible.lower(), r'\b(?:codex|audit\d*|kickoff|xedoc|anthropic)\b')
+
     def test_figures_have_executable_commands_in_both_tutorials(self):
         guide = SAMPLE_GUIDE.read_text(encoding="utf-8")
         figure_sections = re.findall(r'<section id="(beat[0-8])">(.*?)</section>', guide, re.DOTALL)
