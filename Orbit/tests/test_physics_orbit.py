@@ -70,7 +70,7 @@ def find_help_files(module_dir: Path) -> tuple[Path, Path]:
     Help files live under the sibling ``GFTGU-Documentation`` repository
     rather than beside the program modules inside ``GFTGU-Programs``.
     """
-    help_filenames = ("Orbit-claude.html", "Orbit-grok.html")
+    help_filenames = ("Orbit-extended.html", "Orbit-short.html")
     program_name = "Orbit"
     candidates = [module_dir]
     for ancestor in (module_dir, *module_dir.parents):
@@ -82,7 +82,7 @@ def find_help_files(module_dir: Path) -> tuple[Path, Path]:
         if all(file.is_file() for file in files):
             return files
     raise FileNotFoundError(
-        "Could not find both Orbit-claude.html and Orbit-grok.html together beside the program or in "
+        "Could not find both Orbit-extended.html and Orbit-short.html together beside the program or in "
         "GFTGU-Documentation/Orbit/."
     )
 
@@ -227,7 +227,7 @@ class BuildMetadataTests(unittest.TestCase):
             copied = Path(temp_name)
             for name in CORE_MODULE_FILES:
                 shutil.copy2(MODULE_DIR / name, copied / name)
-            (copied / "Orbit-claude.html").write_text("changed help", encoding="utf-8")
+            (copied / "Orbit-extended.html").write_text("changed help", encoding="utf-8")
             (copied / "test_physics_orbit.py").write_text("changed tests", encoding="utf-8")
             self.assertEqual(expected_build_id(copied), physics.BUILD_ID)
 
@@ -1212,13 +1212,13 @@ class PairedTutorialTests(unittest.TestCase):
     def test_both_tutorials_are_required_in_the_same_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             folder = Path(temporary)
-            (folder / "Orbit-claude.html").write_text("example", encoding="utf-8")
+            (folder / "Orbit-extended.html").write_text("example", encoding="utf-8")
             with self.assertRaisesRegex(FileNotFoundError, "both"):
                 find_help_files(folder)
-            (folder / "Orbit-grok.html").write_text("example", encoding="utf-8")
+            (folder / "Orbit-short.html").write_text("example", encoding="utf-8")
             self.assertEqual(
                 tuple(path.name for path in find_help_files(folder)),
-                ("Orbit-claude.html", "Orbit-grok.html"),
+                ("Orbit-extended.html", "Orbit-short.html"),
             )
 
     def test_grok_guide_structure_version_and_commands(self) -> None:

@@ -35,7 +35,7 @@ CORE_MODULE_FILES = (
 )
 # Both active tutorials are one documentation set. The archived Reference
 # Guide remains optional for its historical text checks.
-HELP_FILENAMES = ("Multiple-claude.html", "Multiple-grok.html")
+HELP_FILENAMES = ("Multiple-extended.html", "Multiple-short.html")
 PROGRAM_NAME = "Multiple"
 
 

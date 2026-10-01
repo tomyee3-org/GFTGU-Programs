@@ -35,7 +35,7 @@ CORE_MODULE_FILENAMES = (
 )
 # Both active tutorial formats are required in one documentation folder. The
 # original Reference Guide is retained for historical checks only.
-HELP_FILENAMES = ("MercPert-claude.html", "MercPert-grok.html")
+HELP_FILENAMES = ("MercPert-extended.html", "MercPert-short.html")
 PROGRAM_NAME = "MercPert"
 
 
@@ -72,7 +72,7 @@ def find_help_files(module_dir: Path) -> tuple[Path, Path]:
         if all(path.is_file() for path in pair):
             return pair
     raise FileNotFoundError(
-        "Both MercPert-claude.html and MercPert-grok.html must be in one folder "
+        "Both MercPert-extended.html and MercPert-short.html must be in one folder "
         f"beside the program or in GFTGU-Documentation/{PROGRAM_NAME}/."
     )
 

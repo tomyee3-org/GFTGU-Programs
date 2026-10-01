@@ -5,7 +5,7 @@ The locator deliberately supports both repository layout::
     Star/tests/test_physics_star.py
 
 and a flattened upload in which this test file is placed beside the four
-program modules.  Both tutorial Help files, Star-claude.html and Star-grok.html, are required
+program modules.  Both tutorial Help files, Star-extended.html and Star-short.html, are required
 together in one folder. The archived Reference Guide, Star-original.html, is
 optional and is never checked against the current release stamp.
 """
@@ -55,7 +55,7 @@ def find_module_dir(start):
 
 MODULE_DIR = find_module_dir(Path(__file__).resolve().parent)
 TEST_FILE = Path(__file__).resolve()
-HELP_FILENAMES = ("Star-claude.html", "Star-grok.html")
+HELP_FILENAMES = ("Star-extended.html", "Star-short.html")
 
 
 def find_help_files(module_dir):
@@ -69,7 +69,7 @@ def find_help_files(module_dir):
         if all((folder / name).is_file() for name in HELP_FILENAMES):
             return tuple(folder / name for name in HELP_FILENAMES)
     raise FileNotFoundError(
-        "Star-claude.html and Star-grok.html must both be present "
+        "Star-extended.html and Star-short.html must both be present "
         "in the same program or documentation folder."
     )
 

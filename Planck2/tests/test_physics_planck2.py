@@ -68,7 +68,7 @@ import planck2_physics as phys  # noqa: E402
 import planck2_plot as plotter  # noqa: E402
 
 
-HELP_FILENAMES = ("Planck2-claude.html", "Planck2-grok.html")
+HELP_FILENAMES = ("Planck2-extended.html", "Planck2-short.html")
 
 
 def find_help_files(module_dir: Path) -> tuple[Path, Path]:
@@ -84,7 +84,7 @@ def find_help_files(module_dir: Path) -> tuple[Path, Path]:
         if all(path.is_file() for path in pair):
             return pair
     raise FileNotFoundError(
-        "Both Planck2-claude.html and Planck2-grok.html are required together "
+        "Both Planck2-extended.html and Planck2-short.html are required together "
         "beside the program or in GFTGU-Documentation/Planck2/."
     )
 

@@ -47,7 +47,7 @@ def find_module_dir(start: Path) -> Path:
     )
 
 
-HELP_FILENAMES = ("Binary-claude.html", "Binary.html", "Binary-grok.html")
+HELP_FILENAMES = ("Binary-extended.html", "Binary.html", "Binary-short.html")
 
 
 def find_help_files(module_dir: Path) -> list[Path]:
@@ -56,9 +56,9 @@ def find_help_files(module_dir: Path) -> list[Path]:
     Documentation folders no longer use chapter-number prefixes, and the
     Help files live under the sibling ``GFTGU-Documentation`` repository
     rather than beside the program modules inside ``GFTGU-Programs``.
-    ``Binary-claude.html`` (or ``Binary.html`` once adopted as the live Help)
+    ``Binary-extended.html`` (or ``Binary.html`` once adopted as the live Help)
     is listed first so dense contract tests keep pinning the lab-manual file.
-    ``Binary-grok.html`` is the shorter terminal-script Beats file.  The
+    ``Binary-short.html`` is the shorter terminal-script Beats file.  The
     Reference Guide version, ``Binary-original.html``, is never used here.
     """
     program_name = "Binary"
@@ -82,20 +82,20 @@ def find_help_files(module_dir: Path) -> list[Path]:
 def find_help_file(module_dir: Path):
     """Return the dense Beats Help, or None if only Grok (or nothing) is present.
 
-    ``Binary-grok.html`` is never the canonical file. Physics tests must still
+    ``Binary-short.html`` is never the canonical file. Physics tests must still
     import when Help is missing; Help-contract classes skip in that layout.
     A second copy of the same filename beside the program is allowed for a
     packaged zip and is not required in a normal Programs/Documentation split.
     """
     found = find_help_files(module_dir)
-    preferred = [path for path in found if path.name != "Binary-grok.html"]
+    preferred = [path for path in found if path.name != "Binary-short.html"]
     return preferred[0] if preferred else None
 
 
 MODULE_DIR = find_module_dir(Path(__file__))
 HELP_FILES = find_help_files(MODULE_DIR)
 HELP_FILE = find_help_file(MODULE_DIR)
-GROK_HELP_FILE = next((path for path in HELP_FILES if path.name == "Binary-grok.html"), None)
+GROK_HELP_FILE = next((path for path in HELP_FILES if path.name == "Binary-short.html"), None)
 DENSE_HELP_PRESENT = HELP_FILE is not None
 if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
@@ -1333,7 +1333,7 @@ class TestHelpFile(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         if HELP_FILE is None or not HELP_FILE.is_file():
-            raise unittest.SkipTest("dense Help (Binary-claude.html or Binary.html) is not present")
+            raise unittest.SkipTest("dense Help (Binary-extended.html or Binary.html) is not present")
         cls.html = HELP_FILE.read_text(encoding="utf-8")
         cls.prose = re.sub(r"\s+", " ", cls.html)
         cls.contract = HelpContractParser()
@@ -2274,7 +2274,7 @@ needs_beats = unittest.skipUnless(
 )
 needs_dense_help = unittest.skipUnless(
     DENSE_HELP_PRESENT,
-    "dense Help (Binary-claude.html or Binary.html) is not present",
+    "dense Help (Binary-extended.html or Binary.html) is not present",
 )
 
 
@@ -2427,18 +2427,18 @@ class TestBothHelpFiles(unittest.TestCase):
         if HELP_FILE is None:
             self.skipTest("dense Help is not present")
         self.assertTrue(HELP_FILE.is_file())
-        self.assertNotEqual(HELP_FILE.name, "Binary-grok.html")
+        self.assertNotEqual(HELP_FILE.name, "Binary-short.html")
 
     def test_grok_help_is_discovered_beside_the_canonical_file(self):
         if GROK_HELP_FILE is None:
-            self.skipTest("Binary-grok.html is not in the documentation tree")
+            self.skipTest("Binary-short.html is not in the documentation tree")
         if HELP_FILE is None:
             self.skipTest("dense Help is not present; Grok-only is not the release layout")
         self.assertTrue(GROK_HELP_FILE.is_file())
         self.assertEqual(GROK_HELP_FILE.parent, HELP_FILE.parent)
         names = {path.name for path in HELP_FILES}
-        self.assertIn("Binary-grok.html", names)
-        self.assertTrue({"Binary-claude.html", "Binary.html"} & names)
+        self.assertIn("Binary-short.html", names)
+        self.assertTrue({"Binary-extended.html", "Binary.html"} & names)
 
     def test_every_beats_help_carries_the_live_version_and_build(self):
         files = [path for path in (HELP_FILE, GROK_HELP_FILE) if path is not None]
@@ -2459,7 +2459,7 @@ class TestBothHelpFiles(unittest.TestCase):
 
     def test_grok_help_has_beats_zero_to_seven_and_the_licence(self):
         if GROK_HELP_FILE is None:
-            self.skipTest("Binary-grok.html is not in the documentation tree")
+            self.skipTest("Binary-short.html is not in the documentation tree")
         html = GROK_HELP_FILE.read_text(encoding="utf-8")
         ids = re.findall(r'<section id="(beat\d+)"', html)
         self.assertEqual(ids, [f"beat{n}" for n in range(8)])
@@ -2480,7 +2480,7 @@ class TestBothHelpFiles(unittest.TestCase):
 
     def test_every_command_in_the_grok_help_parses(self):
         if GROK_HELP_FILE is None:
-            self.skipTest("Binary-grok.html is not in the documentation tree")
+            self.skipTest("Binary-short.html is not in the documentation tree")
         html = GROK_HELP_FILE.read_text(encoding="utf-8")
         commands = documented_commands(html)
         self.assertGreaterEqual(len(commands), 8)
@@ -2507,7 +2507,7 @@ class TestBothHelpFiles(unittest.TestCase):
             self.skipTest("no documentation tree is on the search path")
         self.assertIsNotNone(HELP_FILE)
         self.assertTrue(HELP_FILE.is_file())
-        self.assertNotEqual(HELP_FILE.name, "Binary-grok.html")
+        self.assertNotEqual(HELP_FILE.name, "Binary-short.html")
 
     def test_duplicate_help_copies_match_byte_for_byte(self):
         grouped = help_copies_by_name(MODULE_DIR)
@@ -2523,7 +2523,7 @@ class TestBothHelpFiles(unittest.TestCase):
 class TestGrokQuotedFacts(unittest.TestCase):
     """Physics quoted in the short Help, bound to Grok's own Beats.
 
-    These pins stay on Binary-grok.html. They do not copy Claude's
+    These pins stay on Binary-short.html. They do not copy Claude's
     lab-manual sections. A governing-law mutant (r^2 -> r^3 in Beat 0)
     must fail this class, as must a sign flip in Beat 1's B-x equation.
     """
@@ -2543,7 +2543,7 @@ class TestGrokQuotedFacts(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         if GROK_HELP_FILE is None or not GROK_HELP_FILE.is_file():
-            raise unittest.SkipTest("Binary-grok.html is not in the documentation tree")
+            raise unittest.SkipTest("Binary-short.html is not in the documentation tree")
         cls.html = GROK_HELP_FILE.read_text(encoding="utf-8")
         cls.beat0 = html_text(section_html(cls.html, "beat0"))
         cls.beat1 = html_text(section_html(cls.html, "beat1"))

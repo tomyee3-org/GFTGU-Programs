@@ -43,7 +43,7 @@ CORE_MODULE_FILENAMES = (
 )
 # Both active tutorials are required in the same directory. The archived
 # Reference Guide is optional and does not track subsequent core changes.
-HELP_FILENAMES = ("RelativisticOrbit-claude.html", "RelativisticOrbit-grok.html")
+HELP_FILENAMES = ("RelativisticOrbit-extended.html", "RelativisticOrbit-short.html")
 PROGRAM_NAME = "RelativisticOrbit"
 MINIMUM_PYTHON_VERSION = (3, 10)
 
@@ -81,7 +81,7 @@ def find_help_files(module_dir: Path) -> tuple[Path, Path]:
         if all(path.is_file() for path in pair):
             return pair
     raise FileNotFoundError(
-        "Both RelativisticOrbit-claude.html and RelativisticOrbit-grok.html "
+        "Both RelativisticOrbit-extended.html and RelativisticOrbit-short.html "
         "are required together beside the program or in "
         "GFTGU-Documentation/RelativisticOrbit/."
     )
@@ -1480,7 +1480,7 @@ class TestPairedTutorials(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             folder = Path(temp_dir)
             (folder / HELP_FILENAMES[0]).write_text("Claude", encoding="utf-8")
-            with self.assertRaisesRegex(FileNotFoundError, "Both RelativisticOrbit-claude.html and RelativisticOrbit-grok.html"):
+            with self.assertRaisesRegex(FileNotFoundError, "Both RelativisticOrbit-extended.html and RelativisticOrbit-short.html"):
                 find_help_files(folder)
             (folder / HELP_FILENAMES[1]).write_text("Grok", encoding="utf-8")
             self.assertEqual(find_help_files(folder), tuple(folder / name for name in HELP_FILENAMES))

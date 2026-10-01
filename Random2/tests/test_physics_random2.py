@@ -40,7 +40,7 @@ CORE_MODULE_FILES = (
 )
 # Both active tutorials are required together. The archived Reference Guide
 # remains optional and is not synchronized with the current program.
-HELP_FILENAMES = ("Random2-claude.html", "Random2-grok.html")
+HELP_FILENAMES = ("Random2-extended.html", "Random2-short.html")
 
 
 def find_module_dir(start: Path) -> Path:
@@ -128,7 +128,7 @@ def find_help_files(module_dir: Path) -> tuple[Path, Path]:
         if all(path.is_file() for path in pair):
             return pair
     raise FileNotFoundError(
-        "Both Random2-claude.html and Random2-grok.html are required together "
+        "Both Random2-extended.html and Random2-short.html are required together "
         "beside the modules or in GFTGU-Documentation/Random2/."
     )
 
@@ -933,7 +933,7 @@ class PairedTutorialTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_name:
             folder = Path(temp_name)
             (folder / HELP_FILENAMES[0]).write_text("Claude", encoding="utf-8")
-            with self.assertRaisesRegex(FileNotFoundError, "Both Random2-claude.html and Random2-grok.html"):
+            with self.assertRaisesRegex(FileNotFoundError, "Both Random2-extended.html and Random2-short.html"):
                 find_help_files(folder)
             (folder / HELP_FILENAMES[1]).write_text("Grok", encoding="utf-8")
             self.assertEqual(find_help_files(folder),
@@ -1910,11 +1910,11 @@ class DocumentationSetTests(unittest.TestCase):
         provenance = re.search(r'<section id="provenance">(.*?)</section>', self.samples, re.S).group(1)
         self.assertIn(f"Version {physics.MODEL_VERSION}", provenance)
         self.assertIn(f"build {physics.BUILD_ID}", provenance)
-        self.assertIn("Random2-claude.html", self.samples)
-        self.assertIn("Random2-grok.html", self.samples)
+        self.assertIn("Random2-extended.html", self.samples)
+        self.assertIn("Random2-short.html", self.samples)
         self.assertNotIn("Random2.html", self.samples)
         student = re.sub(r"base64,[A-Za-z0-9+/=]+", "", self.samples)
-        student = student.replace("Random2-grok.html", "").replace("Random2-claude.html", "").lower()
+        student = student.replace("Random2-short.html", "").replace("Random2-extended.html", "").lower()
         for term in ("codex", "grok", "claude", "xedoc", "kickoff", "audit"):
             self.assertNotIn(term, student)
 

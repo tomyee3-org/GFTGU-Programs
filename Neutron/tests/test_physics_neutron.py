@@ -29,7 +29,7 @@ CORE_MODULE_FILENAMES = (
 # Both active tutorial formats must be present together. The archived
 # Reference Guide is not part of this requirement.
 PROGRAM_NAME = "Neutron"
-HELP_FILENAMES = ("Neutron-claude.html", "Neutron-grok.html")
+HELP_FILENAMES = ("Neutron-extended.html", "Neutron-short.html")
 
 
 def find_module_dir(start: Path) -> Path:

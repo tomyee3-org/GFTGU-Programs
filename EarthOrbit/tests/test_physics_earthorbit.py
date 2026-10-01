@@ -69,7 +69,7 @@ def find_help_files(module_dir):
     Help files live under the sibling ``GFTGU-Documentation`` repository
     rather than beside the program modules inside ``GFTGU-Programs``.
     """
-    help_filenames = ("EarthOrbit-claude.html", "EarthOrbit-grok.html")
+    help_filenames = ("EarthOrbit-extended.html", "EarthOrbit-short.html")
     program_name = "EarthOrbit"
     candidates = [module_dir / name for name in help_filenames]
     for ancestor in (module_dir, *module_dir.parents):
@@ -81,7 +81,7 @@ def find_help_files(module_dir):
         pair = tuple(directory / name for name in help_filenames)
         if all(path.is_file() for path in pair):
             return pair
-    raise FileNotFoundError("Both EarthOrbit-claude.html and EarthOrbit-grok.html "
+    raise FileNotFoundError("Both EarthOrbit-extended.html and EarthOrbit-short.html "
                             "must be together beside the program or in "
                             "GFTGU-Documentation/EarthOrbit/.")
 
@@ -445,7 +445,7 @@ class DriverValidationTests(unittest.TestCase):
         # about -16,564 m (an impacting trajectory), so it did not exercise
         # a near-miss at all. See test_close_perigee_elements_match_target
         # below for the perigee-altitude check, and Experiment 6 in
-        # EarthOrbit-claude.html for why the analytic (launch-state) perigee
+        # EarthOrbit-extended.html for why the analytic (launch-state) perigee
         # and the numerically integrated outcome are not the same question.
         result = driver.run_earth_orbit(
             h0=300_000.0, uInit=7636.511278627493, vInit=0.0, dt=1.0,
@@ -1077,10 +1077,10 @@ class PairedTutorialTests(unittest.TestCase):
 
     def test_both_guides_required(self):
         self.assertEqual(tuple(path.name for path in HELP_FILES),
-                         ("EarthOrbit-claude.html", "EarthOrbit-grok.html"))
+                         ("EarthOrbit-extended.html", "EarthOrbit-short.html"))
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp)
-            (folder / "EarthOrbit-claude.html").write_text("only one")
+            (folder / "EarthOrbit-extended.html").write_text("only one")
             with self.assertRaisesRegex(FileNotFoundError, "Both EarthOrbit"):
                 find_help_files(folder)
 

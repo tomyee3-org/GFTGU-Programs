@@ -3,7 +3,7 @@
 The discovery logic deliberately supports both the repository layout
 (`tests/test_physics_spheregravity.py`) and a flattened upload in which this
 file is placed beside the four core modules. Both active Beats Help files,
-SphereGravity-claude.html and SphereGravity-grok.html, are required together.
+SphereGravity-extended.html and SphereGravity-short.html, are required together.
 The archived Reference Guide, SphereGravity-original.html, is optional.
 """
 
@@ -68,7 +68,7 @@ import plot_spheregravity as plotting
 
 
 # Active tutorials share one program. The archived Reference Guide is not an active Help.
-HELP_FILENAMES = ("SphereGravity-claude.html", "SphereGravity-grok.html")
+HELP_FILENAMES = ("SphereGravity-extended.html", "SphereGravity-short.html")
 
 
 def find_help_files(module_dir):
@@ -89,7 +89,7 @@ def find_help_files(module_dir):
         if all(path.is_file() for path in pair):
             return pair
     raise FileNotFoundError(
-        "Both SphereGravity-claude.html and SphereGravity-grok.html are required "
+        "Both SphereGravity-extended.html and SphereGravity-short.html are required "
         "beside the program or in GFTGU-Documentation/SphereGravity/."
     )
 
@@ -1805,7 +1805,7 @@ class TestPairedTutorials(unittest.TestCase):
             for name in CORE_MODULE_FILENAMES:
                 (folder / name).write_text("# fixture\n", encoding="utf-8")
             (folder / HELP_FILENAMES[0]).write_text("Claude", encoding="utf-8")
-            with self.assertRaisesRegex(FileNotFoundError, "Both SphereGravity-claude.html and SphereGravity-grok.html"):
+            with self.assertRaisesRegex(FileNotFoundError, "Both SphereGravity-extended.html and SphereGravity-short.html"):
                 find_help_files(folder)
             (folder / HELP_FILENAMES[1]).write_text("Grok", encoding="utf-8")
             self.assertEqual(tuple(path.name for path in find_help_files(folder)), HELP_FILENAMES)
@@ -1898,7 +1898,7 @@ class TestSharedSampleOutputs(unittest.TestCase):
     def test_instructor_guide_has_no_development_review_jargon(self):
         guide = SAMPLE_GUIDE.read_text(encoding="utf-8")
         visible = re.sub(r'data:image/png;base64,[A-Za-z0-9+/=]+', '', guide)
-        visible = visible.replace('SphereGravity-claude.html', '').replace('SphereGravity-grok.html', '')
+        visible = visible.replace('SphereGravity-extended.html', '').replace('SphereGravity-short.html', '')
         self.assertNotRegex(visible.lower(), r'\b(?:codex|audit\d*|kickoff|xedoc|anthropic)\b')
 
     def test_figures_have_executable_commands_in_both_tutorials(self):
@@ -1913,7 +1913,7 @@ class TestSharedSampleOutputs(unittest.TestCase):
                 self.assertIn(command, section_html(claude, beat))
                 self.assertIn(command, section_html(grok, beat))
                 self.assertIn(beat_run(command).exit_code, (None, 0))
-        self.assertIn("SphereGravity-grok.html", guide)
+        self.assertIn("SphereGravity-short.html", guide)
         self.assertIn(physics.BUILD_ID, guide)
 
     def test_embedded_figures_are_valid_indexed_pngs(self):
