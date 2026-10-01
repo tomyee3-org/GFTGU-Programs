@@ -10,7 +10,7 @@ corrector fails to converge.
 from dataclasses import dataclass
 from math import atan2, hypot, isfinite, pi
 from numbers import Real
-from typing import List
+from typing import List, Optional
 
 import physics_binary as phys
 from physics_binary import BinaryState, accelerations, energies
@@ -35,6 +35,8 @@ class BinaryResult:
     total_angle_rad: float = 0.0
     model_version: str = phys.MODEL_VERSION
     build_id: str = phys.BUILD_ID
+    MA: Optional[float] = None
+    MB: Optional[float] = None
 
 
 def _positive_int(name: str, value: int) -> None:
@@ -351,4 +353,5 @@ def integrate_binary(
         total_angle_rad=total_angle,
         model_version=phys.MODEL_VERSION,
         build_id=phys.BUILD_ID,
+        MA=MA, MB=MB,
     )

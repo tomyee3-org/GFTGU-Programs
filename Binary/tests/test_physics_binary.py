@@ -1399,7 +1399,7 @@ class TestHelpFile(unittest.TestCase):
                 "--vInitA, --vInitB", "--uInitA, --uInitB", "--dt",
                 "--max_steps", "--eps1", "--eps2",
                 "--stop_after_one_orbit, --no-stop_after_one_orbit",
-                "--output_type",
+                "--output_type", "--frame",
             ),
         )
         self.assertEqual(
@@ -1407,7 +1407,7 @@ class TestHelpFile(unittest.TestCase):
             (
                 "2e30 each", "+4.6e10, -4.6e10", "0, 0", "0, 0",
                 "+13000, -13000", "2000", "10000", "0.05", "1e-4",
-                "stop", "orbits",
+                "stop", "orbits", "user",
             ),
         )
 
@@ -1937,7 +1937,7 @@ class TestCommandLineWiring(unittest.TestCase):
         # plt.show() blocks until the window is closed, so the summary must already be out.
         seen = {}
         with redirect_stdout(io.StringIO()) as out, mock.patch.object(
-                entry, "plot_binary", side_effect=lambda *a: seen.update(text=out.getvalue())):
+                entry, "plot_binary", side_effect=lambda *a, **kw: seen.update(text=out.getvalue())):
             entry.main(["--max_steps", "3"])
         self.assertIn("Energy at fractions of total run days", seen["text"])
 
@@ -2745,7 +2745,7 @@ class TestGrokQuotedFacts(unittest.TestCase):
         self.assertGreater(abs(bogus - (1e30 / 3e30) * v_rel) / v_rel, 0.1)
 
     def test_experiment_6_is_a_mild_ellipse_that_runs(self):
-        card = re.search(r"EXP-6.*?(?=EXP-7|$)", section_html(self.html, "experiments"), re.DOTALL)
+        card = re.search(r'<h3 id="exp6">.*?(?=<h3 id="exp7">|$)', section_html(self.html, "experiments"), re.DOTALL)
         self.assertIsNotNone(card)
         card = card.group(0)
         self.assertIn("Orbit", card)
@@ -3000,14 +3000,14 @@ class BeatStructureTests(unittest.TestCase):
                 self.assertRegex(body, rf"<h2>Beat {number} · ")
                 self.assertEqual(body.count("<pre>"), 1)
                 self.assertEqual(body.count("Three tasks, in order."), 1)
-                self.assertEqual(body.count("<em>Then</em>"), 1)
                 self.assertEqual(body.count("Experiments that go with this beat"), 1)
                 self.assertRegex(body, r'<a href="#exp\d">')
                 between = body[body.index("</pre>"):body.index("Three tasks, in order.")]
                 self.assertRegex(between, r"\b[Ll]ook\b[^.]*? at\b")
                 self.assertLess(body.index("<pre>"), body.index("Three tasks, in order."))
-                self.assertLess(body.index("Three tasks, in order."), body.index("<em>Then</em>"))
-                self.assertLess(body.index("<em>Then</em>"), body.index("Experiments that go with"))
+                self.assertLess(body.index("Three tasks, in order."), body.index("Experiments that go with"))
+                explanation = body[body.index("Three tasks, in order."):body.index("Experiments that go with")]
+                self.assertRegex(explanation, r"</p>\s*<(?:p|div)")
 
     def test_sidebar_labels_carry_the_beat_numbers(self):
         for number in range(8):
@@ -4055,7 +4055,9 @@ EXPECTED_COMMANDS = {'beat0': ['python main.py'],
  'beat1': ['python main.py --MA 2e30 --MB 1e30 --xInitA 3.0666666667e10 --xInitB -6.1333333333e10 --uInitA '
            '15550.5265 --uInitB -31101.053'],
  'beat2': ['python main.py --xInitA 5e10 --xInitB -4.2e10 --yInitA 1e10 --yInitB 1e10',
-           'python main.py --vInitA 60000 --vInitB 60000'],
+           'python main.py --vInitA 60000 --vInitB 60000',
+           'python main.py --vInitA 60000 --vInitB 60000 --frame com',
+           'python main.py --xInitA 5e10 --xInitB -4.2e10 --yInitA 1e10 --yInitB 1e10 --frame com'],
  'beat3': ['python main.py --output_type energy_vs_time',
            'python main.py --uInitA 38091.14 --uInitB -38091.14 --no-stop_after_one_orbit --max_steps 1000 '
            '--output_type energy_vs_time',
@@ -4127,6 +4129,7 @@ EXPECTED_CROSS_REFERENCES = {'overview': ['Beats 5 to 7'],
  'beat2': ['Beat 2',
            'Equation (1)',
            'Eqs. (2) and (3)',
+           'Beat 0',
            'Beat 0',
            'Beat 0',
            'Eqs. (2) and (3)',
@@ -4787,6 +4790,150 @@ class FrameAndWordingTests(unittest.TestCase):
             for formula in re.findall(r"\\\((.*?)\\\)", body, re.DOTALL):
                 with self.subTest(section=section, formula=formula[:40]):
                     self.assertLessEqual(len(" ".join(formula.split())), 55)
+
+
+class TestCentreOfMassDisplay(unittest.TestCase):
+    """Frames change the picture and plotted energy, never the saved run."""
+
+    def setUp(self):
+        self.result = integrate(MB=1e30, vInitA=60000, vInitB=60000,
+                                uInitA=17000, uInitB=-9000, max_steps=3)
+
+    def tearDown(self):
+        plotting.plt.close("all")
+
+    def test_driver_records_actual_masses(self):
+        self.assertEqual((self.result.MA, self.result.MB), (2e30, 1e30))
+
+    def test_user_frame_returns_the_original_data(self):
+        self.assertIs(plotting.in_plot_frame(self.result, "user"), self.result)
+
+    def test_com_is_mass_weighted_and_preserves_each_relative_component(self):
+        displayed = plotting.in_plot_frame(self.result, "com")
+        ma, mb = self.result.MA, self.result.MB
+        for component in ("x", "y", "v", "u"):
+            for a, b, ca, cb in zip(getattr(self.result, component + "A"),
+                                    getattr(self.result, component + "B"),
+                                    getattr(displayed, component + "A"),
+                                    getattr(displayed, component + "B")):
+                centre = (ma * a + mb * b) / (ma + mb)
+                self.assertAlmostEqual(ca, a - centre, delta=max(abs(a), abs(b), 1) * 2e-15)
+                self.assertAlmostEqual(cb, b - centre, delta=max(abs(a), abs(b), 1) * 2e-15)
+                self.assertAlmostEqual(ca - cb, a - b, delta=max(abs(a-b), 1) * 2e-15)
+
+    def test_energy_uses_relative_velocities_and_removes_bulk_motion(self):
+        displayed = plotting.in_plot_frame(self.result, "com")
+        ma, mb = self.result.MA, self.result.MB
+        for i in range(len(self.result.times)):
+            vx = (ma * self.result.vA[i] + mb * self.result.vB[i]) / (ma + mb)
+            vy = (ma * self.result.uA[i] + mb * self.result.uB[i]) / (ma + mb)
+            bulk = 0.5 * (ma + mb) * (vx * vx + vy * vy)
+            self.assertAlmostEqual(self.result.K[i] - displayed.K[i], bulk, delta=bulk * 2e-15)
+            relative_k = 0.5 * ma * (displayed.vA[i]**2 + displayed.uA[i]**2) + \
+                         0.5 * mb * (displayed.vB[i]**2 + displayed.uB[i]**2)
+            self.assertAlmostEqual(displayed.K[i], relative_k, delta=relative_k * 2e-15)
+        self.assertGreater(self.result.E[0], 0)
+        self.assertLess(displayed.E[0], 0)
+        self.assertEqual(displayed.U, self.result.U)
+
+    def test_translation_and_two_component_boost_disappear_from_display(self):
+        from copy import deepcopy
+        reference = integrate(MB=1e30, max_steps=3)
+        moved = deepcopy(reference)
+        for component, offset, boost in (("x", 8e10, 60000), ("y", -3e10, -20000)):
+            velocity = "v" if component == "x" else "u"
+            for body in ("A", "B"):
+                setattr(moved, component + body, [q + offset + boost * t for q, t
+                        in zip(getattr(reference, component + body), reference.times)])
+                setattr(moved, velocity + body, [q + boost for q in getattr(reference, velocity + body)])
+        a, b = plotting.in_plot_frame(reference, "com"), plotting.in_plot_frame(moved, "com")
+        for field in ("xA", "yA", "xB", "yB", "vA", "uA", "vB", "uB", "K", "E"):
+            for original, shifted in zip(getattr(a, field), getattr(b, field)):
+                self.assertAlmostEqual(original, shifted, delta=max(abs(original), 1) * 3e-12)
+
+    def test_com_does_not_mutate_any_saved_data(self):
+        from copy import deepcopy
+        before = deepcopy(self.result)
+        plotting.in_plot_frame(self.result, "com")
+        with mock.patch.object(plotting.plt, "show"):
+            plotting.plot_binary(self.result, "orbits", frame="com")
+        self.assertEqual(self.result, before)
+
+    def test_all_plot_types_use_com_coordinates_and_identify_the_frame(self):
+        data = plotting.in_plot_frame(self.result, "com")
+        pairs = {
+            "orbits": [(data.xA, data.yA), (data.xB, data.yB)],
+            "velocity space": [(data.vA, data.uA), (data.vB, data.uB)],
+            "position vs. time, body A": [(data.times, data.xA), (data.times, data.yA)],
+            "position vs. time, body B": [(data.times, data.xB), (data.times, data.yB)],
+            "velocity vs. time, body A": [(data.times, data.vA), (data.times, data.uA)],
+            "velocity vs. time, body B": [(data.times, data.vB), (data.times, data.uB)],
+            "energy vs time": [(data.times, data.U), (data.times, data.K), (data.times, data.E)],
+        }
+        for selector, expected in pairs.items():
+            with self.subTest(selector=selector), mock.patch.object(plotting.plt, "show"):
+                plotting.plot_binary(self.result, selector, frame="com")
+                ax = plotting.plt.gca()
+                self.assertTrue(ax.get_title().endswith(" (COM frame)"))
+                self.assertEqual(len(ax.lines), len(expected))
+                for line, (xs, ys) in zip(ax.lines, expected):
+                    self.assertEqual(list(line.get_xdata()), xs)
+                    self.assertEqual(list(line.get_ydata()), ys)
+                plotting.plt.close("all")
+
+    def test_frame_values_are_validated(self):
+        self.assertEqual(entry.parse_args([]).frame, "user")
+        self.assertEqual(entry.parse_args(["--frame", "com"]).frame, "com")
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            entry.parse_args(["--frame", "cm"])
+        with self.assertRaisesRegex(ValueError, "Unknown frame"):
+            plotting.plot_binary(self.result, "orbits", frame="cm")
+
+    def test_com_rejects_missing_or_invalid_masses(self):
+        from dataclasses import replace
+        for mass in (None, 0, -1, True, math.inf, math.nan):
+            for body in ("MA", "MB"):
+                with self.subTest(mass=mass, body=body), self.assertRaisesRegex(ValueError, "positive MA and MB"):
+                    plotting.in_plot_frame(replace(self.result, **{body: mass}), "com")
+        legacy = replace(self.result, MA=None, MB=None)
+        self.assertIs(plotting.in_plot_frame(legacy, "user"), legacy)
+
+    def test_cli_sends_frame_to_plotter_not_integrator_and_summary_is_unchanged(self):
+        summaries = []
+        for frame in ("user", "com"):
+            with redirect_stdout(io.StringIO()) as text, \
+                 mock.patch.object(entry, "integrate_binary", return_value=self.result) as run, \
+                 mock.patch.object(entry, "plot_binary") as plot:
+                entry.main(["--MB", "1e30", "--max_steps", "3", "--frame", frame])
+                self.assertNotIn("frame", run.call_args.kwargs)
+                self.assertEqual(plot.call_args.kwargs, {"frame": frame})
+                summaries.append(text.getvalue())
+        self.assertEqual(*summaries)
+
+    def test_beat_two_documents_and_runs_both_frame_comparisons(self):
+        for path in (HELP_FILE, GROK_HELP_FILE):
+            body = section_html(path.read_text(encoding="utf-8"), "beat2")
+            commands = documented_commands(body)
+            self.assertEqual(sum("com" in command for command in commands), 2)
+            self.assertIn("Galilean", body)
+            self.assertIn("input frame", body)
+            self.assertIn("printed summary", body)
+            for command in commands:
+                with mock.patch.object(plotting.plt, "show"), redirect_stdout(io.StringIO()):
+                    entry.main(command)
+                ax = plotting.plt.gca()
+                if "com" in command:
+                    self.assertIn("COM frame", ax.get_title())
+                    self.assertLess(max(abs(x) for line in ax.lines for x in line.get_xdata()), 5e10)
+                plotting.plt.close("all")
+
+    def test_both_parameter_tables_explain_the_display_only_option(self):
+        for path in (HELP_FILE, GROK_HELP_FILE):
+            table = section_html(path.read_text(encoding="utf-8"), "parameters")
+            self.assertIn("--frame", table)
+            self.assertIn("user", table)
+            self.assertIn("com", table)
+            self.assertIn("summary stays in the input frame", table)
 
 
 if __name__ == "__main__":

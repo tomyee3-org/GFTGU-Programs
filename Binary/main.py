@@ -12,6 +12,8 @@ velocity-change threshold; both strictly between zero and one.
 position_vs_time_body_a/b (coordinates versus time),
 velocity_vs_time_body_a/b (velocity components versus time), or
 energy_vs_time (potential, kinetic, total mechanical energies).
+--frame: user (input coordinates, default) or com (centre-of-mass plots).
+The plot frame does not change the integration or the printed summary.
 """
 
 import argparse
@@ -117,6 +119,10 @@ def parse_args(argv=None):
                              "position_vs_time_body_a/b = positions versus time; "
                              "velocity_vs_time_body_a/b = velocities versus time; "
                              "energy_vs_time = potential, kinetic and total energies")
+    parser.add_argument("--frame", choices=("user", "com"), default="user",
+                        help="display frame for all plots: user = input coordinates; "
+                             "com = centre-of-mass positions, velocities and energies; "
+                             "the printed summary always uses the input frame")
     # argparse treats exponent-form negative numbers such as -4.6e10 as new
     # options when separated by a space. Preserve ordinary --name -4.6e10
     # spelling by binding recognized numeric values to their options.
@@ -214,7 +220,7 @@ def main(argv=None):
     try:
         result = integrate_binary(**parameters)
         print_summary(result, parameters)
-        plot_binary(result, OUTPUT_TYPES[args.output_type])
+        plot_binary(result, OUTPUT_TYPES[args.output_type], frame=args.frame)
     except (ValueError, RuntimeError, OverflowError) as error:
         raise SystemExit(f"Binary: {error}") from error
 
