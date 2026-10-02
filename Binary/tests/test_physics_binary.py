@@ -5025,10 +5025,11 @@ class TestCOMAuditCorrections(unittest.TestCase):
         self.assertNotIn("53b5e2037ced", current)
         self.assertIn("1.2.4", history)
         self.assertIn("53b5e2037ced", history)
-        for heading in ("Release Status", "Open Bugs", "Major Improvements in This Release",
-                        "Test Suite Growth", "Known Limitations", "Known Minor Maintenance Items",
-                        "Version Identification"):
-            self.assertIn("<h2>" + heading + "</h2>", current)
+        self.assertEqual(re.findall(r"<h2>(.*?)</h2>", current), [
+            "Release Status", "Open Bugs", "Major Improvements in This Release",
+            "Test Suite Growth", "Known Limitations", "Known Minor Maintenance Items",
+            "Version Identification",
+        ])
 
 
 if __name__ == "__main__":
