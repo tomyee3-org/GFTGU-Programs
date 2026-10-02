@@ -2993,6 +2993,34 @@ class BeatStructureTests(unittest.TestCase):
                                "algorithm", "modules", "quickstart", "parameters", "output-types",
                                "summary", "experiments", "related", "license"])
 
+    TASK_CUES = {
+        0: ("read the two separations", "look at the plot", "read how long the trip took"),
+        1: ("compare the semi-major axes", "compare the speeds", "look at the plot"),
+        2: ("the shifted run", "the second run", "read the Total E column"),
+        3: ("read row 0.0", "compare each total", "look at the last column"),
+        4: ("the circular run", "the default run", "compare the integration with the formulas", "look at the plot"),
+        5: ("read Accepted steps", "read row 0.5", "read row 1.0"),
+        6: ("the run with the default eps1", "the run with eps1 = 0.5", "set the two runs side by side"),
+        7: ("row 0.5", "the sampled minimum separation", "Then row 1.0"),
+    }
+
+    def assert_task_order(self, text, cues):
+        text = " ".join(text.split()).casefold()
+        positions = []
+        for cue in cues:
+            pos = text.find(cue.casefold())
+            self.assertGreaterEqual(pos, 0, f"Missing task: {cue}")
+            positions.append(pos)
+        self.assertEqual(positions, sorted(positions), "Tasks are out of order")
+        self.assertEqual(len(positions), len(set(positions)))
+
+    def test_task_order_check_rejects_missing_and_reordered_tasks(self):
+        cues = self.TASK_CUES[0]
+        with self.assertRaises(AssertionError):
+            self.assert_task_order(". ".join((cues[0], cues[2])), cues)
+        with self.assertRaises(AssertionError):
+            self.assert_task_order(". ".join((cues[1], cues[0], cues[2])), cues)
+
     def test_every_beat_has_the_same_parts_in_the_same_order(self):
         for number in range(8):
             with self.subTest(beat=number):
@@ -3006,8 +3034,9 @@ class BeatStructureTests(unittest.TestCase):
                 self.assertRegex(between, r"\b[Ll]ook\b[^.]*? at\b")
                 self.assertLess(body.index("<pre>"), body.index("Three tasks, in order."))
                 self.assertLess(body.index("Three tasks, in order."), body.index("Experiments that go with"))
-                explanation = body[body.index("Three tasks, in order."):body.index("Experiments that go with")]
-                self.assertRegex(explanation, r"</p>\s*<(?:p|div)")
+                task_paragraph = re.search(r"<p>Three tasks, in order\..*?</p>", body, re.DOTALL)
+                self.assertIsNotNone(task_paragraph)
+                self.assert_task_order(html_text(task_paragraph.group(0)), self.TASK_CUES[number])
 
     def test_sidebar_labels_carry_the_beat_numbers(self):
         for number in range(8):
@@ -3777,7 +3806,7 @@ class ExperimentQuotedNumberTests(unittest.TestCase):
                 with self.subTest(experiment=number, argv=argv):
                     self.assertEqual(head(P(*shown)), reference)
         self.assertEqual(len(experiment_commands(2)), 1)
-        self.assertEqual(len(experiment_commands(3)), 2)
+        self.assertEqual(len(experiment_commands(3)), 4)
 
     def test_experiment_3_the_small_boost_hardly_moves_the_hodograph_and_the_large_one_does(self):
         base = run_result()
@@ -4056,8 +4085,9 @@ EXPECTED_COMMANDS = {'beat0': ['python main.py'],
            '15550.5265 --uInitB -31101.053'],
  'beat2': ['python main.py --xInitA 5e10 --xInitB -4.2e10 --yInitA 1e10 --yInitB 1e10',
            'python main.py --vInitA 60000 --vInitB 60000',
+           'python main.py --xInitA 5e10 --xInitB -4.2e10 --yInitA 1e10 --yInitB 1e10 --frame com',
            'python main.py --vInitA 60000 --vInitB 60000 --frame com',
-           'python main.py --xInitA 5e10 --xInitB -4.2e10 --yInitA 1e10 --yInitB 1e10 --frame com'],
+           'python main.py --vInitA 60000 --vInitB 60000 --frame com --output_type energy_vs_time'],
  'beat3': ['python main.py --output_type energy_vs_time',
            'python main.py --uInitA 38091.14 --uInitB -38091.14 --no-stop_after_one_orbit --max_steps 1000 '
            '--output_type energy_vs_time',
@@ -4076,7 +4106,9 @@ EXPECTED_COMMANDS = {'beat0': ['python main.py'],
  'exp2': ['python main.py --xInitA 5e10 --xInitB -4.2e10 --yInitA 1e10 --yInitB 1e10'],
  'exp3': ['python main.py --vInitA 500 --vInitB 500 --uInitA 13500 --uInitB -12500 --output_type '
           'velocity_space',
-          'python main.py --vInitA 30000 --vInitB 30000 --output_type velocity_space'],
+          'python main.py --vInitA 30000 --vInitB 30000 --output_type velocity_space',
+          'python main.py --vInitA 60000 --vInitB 60000 --output_type velocity_space',
+          'python main.py --vInitA 60000 --vInitB 60000 --output_type velocity_space --frame com'],
  'exp4': ['python main.py --uInitA 26934.5 --uInitB -26934.5 --output_type velocity_space',
           'python main.py --output_type velocity_space',
           'python main.py --uInitA 60000 --uInitB -60000 --no-stop_after_one_orbit --max_steps 1000 '
@@ -4467,7 +4499,7 @@ class ProsePinTests(unittest.TestCase):
         self.assertGreater(float(R("--vInitA", "60000", "--vInitB", "60000")[0.0][4]), 0)
         self.assertIn_section(
             "beat2",
-            "the same ellipse with eccentricity 0.76705, which is bound",
+            "the initial Keplerian orbit is still the same bound ellipse with eccentricity 0.76705",
             "For a boost of 10 6 m s −1 , far faster than any orbital speed here, they differ by about 7 parts in 10 4",
             "For a boost of 500 m s −1 , as in Experiment 3, the corrector makes the same decisions as without it",
         )
@@ -4726,12 +4758,12 @@ class FrameAndWordingTests(unittest.TestCase):
 
         self.assertAlmostEqual(abs(winding(run_result())), 1.0, delta=0.01)
         self.assertLess(abs(winding(run_result(vInitA=60000.0, vInitB=60000.0))), 0.25)
-        text = html_text(section_html(HELP_HTML, "beat4"))
+        text = re.sub(r"\s+([,.;:])", r"\1", html_text(section_html(HELP_HTML, "beat4")))
         for phrase in ("which are measured relative to the centre of mass",
                        "when the centre of mass is at rest, a glance at the velocity-space plot tells you "
                        "whether an orbit is bound",
                        "so with a moving centre of mass the origin test applies only after \\(\\mathbf V_{\\rm CM}\\) has "
-                       "been subtracted, and a large enough boost puts the origin outside the circle of a bound orbit"):
+                       "been subtracted, for example with --frame com, and a large enough boost puts the origin outside the circle of a bound orbit"):
             with self.subTest(phrase=phrase[:50]):
                 self.assertIn(phrase, text)
 
@@ -4914,7 +4946,10 @@ class TestCentreOfMassDisplay(unittest.TestCase):
         for path in (HELP_FILE, GROK_HELP_FILE):
             body = section_html(path.read_text(encoding="utf-8"), "beat2")
             commands = documented_commands(body)
-            self.assertEqual(sum("com" in command for command in commands), 2)
+            self.assertIn(["--vInitA", "60000", "--vInitB", "60000"], commands)
+            self.assertIn(["--vInitA", "60000", "--vInitB", "60000", "--frame", "com"], commands)
+            self.assertIn(["--vInitA", "60000", "--vInitB", "60000", "--frame", "com",
+                           "--output_type", "energy_vs_time"], commands)
             self.assertIn("Galilean", body)
             self.assertIn("input frame", body)
             self.assertIn("printed summary", body)
@@ -4934,6 +4969,66 @@ class TestCentreOfMassDisplay(unittest.TestCase):
             self.assertIn("user", table)
             self.assertIn("com", table)
             self.assertIn("summary stays in the input frame", table)
+
+
+class TestCOMAuditCorrections(unittest.TestCase):
+    def test_ellipse_focus_language_matches_the_geometry(self):
+        for path in (HELP_FILE, GROK_HELP_FILE):
+            body = section_html(path.read_text(encoding="utf-8"), "beat2")
+            self.assertIn("focus", body)
+            self.assertNotIn("ellipses centred on the origin", body)
+        result = integrate()
+        centre_a = 0.5 * (min(result.xA) + max(result.xA))
+        centre_b = 0.5 * (min(result.xB) + max(result.xB))
+        self.assertAlmostEqual(centre_a / 2e10, 1, delta=0.01)
+        self.assertAlmostEqual(centre_b / -2e10, 1, delta=0.01)
+
+    def test_boosted_hodographs_need_com_velocities_for_the_origin_test(self):
+        result = integrate(vInitA=60000, vInitB=60000)
+        com = plotting.in_plot_frame(result, "com")
+        for body in ("A", "B"):
+            for data, outside in ((result, True), (com, False)):
+                vx, vy = getattr(data, "v" + body), getattr(data, "u" + body)
+                cx = (min(vx) + max(vx)) / 2
+                cy = (min(vy) + max(vy)) / 2
+                radius = (max(vx) - min(vx)) / 2
+                self.assertEqual(math.hypot(cx, cy) > radius, outside)
+        short = section_html(GROK_HELP_FILE.read_text(encoding="utf-8"), "beat4")
+        self.assertIn("origin lies outside both circles", short)
+        self.assertIn("--frame com", short)
+
+    def test_guide_has_nine_current_palette_figures_and_correct_focus_alt_text(self):
+        import base64
+        from PIL import Image
+        path = HELP_FILE.parent / "SampleOutputs" / "Binary-SampleOutputs_Guide.html"
+        page = path.read_text(encoding="utf-8")
+        images = re.findall(r'<img\b[^>]*src="data:image/png;base64,([^"]+)"[^>]*>', page)
+        self.assertEqual(len(images), 9)
+        self.assertIn("These nine figures", page)
+        self.assertIn("All nine figures were regenerated", page)
+        self.assertIn(physics.MODEL_VERSION, page)
+        self.assertIn(physics.BUILD_ID, page)
+        self.assertNotIn("eight input-frame figures were regenerated", page)
+        self.assertIn("each with one focus at the origin", page)
+        self.assertNotIn("ellipses centred on the origin", page)
+        for encoded in images:
+            with Image.open(io.BytesIO(base64.b64decode(encoded))) as image:
+                self.assertEqual(image.mode, "P")
+                self.assertLessEqual(len(image.getcolors()), 256)
+
+    def test_release_identification_is_current_before_preserved_history(self):
+        page = HELP_FILE.with_name("Binary-ReleaseNotes.html").read_text(encoding="utf-8")
+        current, history = page.split('<section id="historical-release-notes">', 1)
+        self.assertIn("MODEL_VERSION: " + physics.MODEL_VERSION, current)
+        self.assertIn("BUILD_ID: " + physics.BUILD_ID, current)
+        self.assertNotIn("1.2.4", current)
+        self.assertNotIn("53b5e2037ced", current)
+        self.assertIn("1.2.4", history)
+        self.assertIn("53b5e2037ced", history)
+        for heading in ("Release Status", "Open Bugs", "Major Improvements in This Release",
+                        "Test Suite Growth", "Known Limitations", "Known Minor Maintenance Items",
+                        "Version Identification"):
+            self.assertIn("<h2>" + heading + "</h2>", current)
 
 
 if __name__ == "__main__":
