@@ -214,15 +214,38 @@ def _format_conservation_totals(label: str, state: dict, masses_solar) -> str:
 
 
 def print_conservation_samples(result):
-    """Print eleven locally interpolated accepted-step diagnostic sets."""
-    print("Conservation over ten equal time intervals (user coordinates, scaled by one solar mass):")
-    print("E, E_internal, K [m^2/s^2]; P [m/s]; L [m^2/s]")
+    """Print aligned conservation samples, reserving a sign in each value."""
+    rows = []
     for sample in result["conservation_samples"]:
-        print(f"  Fraction {sample['fraction']:.1f}; t={five(sample['time'] / 86400)} days: "
-              f"E={five(sample['energy'])}; E_internal={five(sample['internal_energy'])}; "
-              f"K={five(sample['kinetic_energy'])}")
-        print(f"    P=({', '.join(five(value) for value in sample['momentum'])}); "
-              f"L=({', '.join(five(value) for value in sample['angular_momentum'])})")
+        scalar_values = (sample["time"] / 86400, sample["energy"],
+                         sample["internal_energy"], sample["kinetic_energy"])
+        rows.append((f"{sample['fraction']:.1f}",
+                     [f"{float(value): .4e}" for value in scalar_values],
+                     sample["momentum"], sample["angular_momentum"]))
+
+    # Widen columns for three-digit exponents rather than shifting later
+    # columns. Ordinary positive and negative values occupy equal widths.
+    scalar_widths = [max([12] + [len(row[1][i]) for row in rows])
+                     for i in range(4)]
+    component_width = max([11] + [len(f"{float(value): .4e}")
+                                 for row in rows for vector in row[2:]
+                                 for value in vector])
+
+    def vector_text(values):
+        return "(" + ", ".join(f"{float(value): {component_width}.4e}"
+                               for value in values) + ")"
+
+    vector_width = 3 * component_width + 6
+    widths = [8, *scalar_widths, vector_width, vector_width]
+    headings = ("Fraction", "t", "E", "E_internal", "K", "P", "L")
+    print("Conservation over ten equal time intervals (user coordinates, scaled by one solar mass):")
+    print("t [days]; E, E_internal, K [m^2/s^2]; P [m/s]; L [m^2/s]")
+    print(" ".join(label.ljust(width) for label, width in zip(headings, widths)).rstrip())
+    for fraction, scalars, momentum, angular in rows:
+        cells = [fraction.ljust(widths[0]),
+                 *(value.rjust(width) for value, width in zip(scalars, scalar_widths)),
+                 vector_text(momentum), vector_text(angular)]
+        print(" ".join(cells))
 
 
 def main(argv=None):

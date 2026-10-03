@@ -1468,12 +1468,17 @@ class TestBuildDocumentationAndCompatibility(unittest.TestCase):
 
     def test_development_history_is_confined_to_license_provenance(self):
         help_text = HELP_PATH.read_text(encoding="utf-8")
-        pre_license, license_and_after = help_text.split('<section id="license">', 1)
+        license_start = re.search(r'<section\b[^>]*\bid="license"[^>]*>', help_text)
+        self.assertIsNotNone(license_start)
+        pre_license = help_text[:license_start.start()]
+        license_and_after = help_text[license_start.start():]
         for suspicious in ("Copilot", "Gemini", "Claude", "Audit", "legacy fix"):
             with self.subTest(suspicious=suspicious):
                 self.assertNotIn(suspicious, pre_license)
-        self.assertIn("port and extension", license_and_after)
-        self.assertIn("Triana/Java", license_and_after)
+        self.assertIn("Bernard Schutz", license_and_after)
+        self.assertIn("CC BY-NC-SA 4.0", license_and_after)
+        self.assertIn("Original Java", license_and_after)
+        self.assertIn("Python port", license_and_after)
 
     def test_help_scenario_cards_each_have_one_difficulty_badge(self):
         help_text = original_help_text(self)
@@ -1543,6 +1548,17 @@ class _HelpInspector(HTMLParser):
             self.fragment_links.append(href[1:])
 
 
+def tutorial_commands(source):
+    """Read whole commands, including continued lines in edited tutorials."""
+    commands = []
+    for block in re.findall(r'<pre class="code-block"><code>(.*?)</code></pre>',
+                            source, flags=re.DOTALL):
+        block = unescape(block).replace("\\\r\n", " ").replace("\\\n", " ")
+        commands.extend(" ".join(line.split()) for line in block.splitlines()
+                        if line.strip().startswith("python main.py"))
+    return commands
+
+
 class PairedTutorialTests(unittest.TestCase):
     def test_both_tutorials_are_required_together(self):
         self.assertEqual((HELP_PATH.name, GROK_HELP_PATH.name), HELP_FILENAMES)
@@ -1576,11 +1592,7 @@ class PairedTutorialTests(unittest.TestCase):
 
     def test_grok_commands_parse_and_activities_are_complete(self):
         source = GROK_HELP_PATH.read_text(encoding="utf-8")
-        commands = []
-        for block in re.findall(r'<pre class="code-block"><code>(.*?)</code></pre>',
-                                source, flags=re.DOTALL):
-            commands.extend(line.strip() for line in unescape(block).splitlines()
-                            if line.strip().startswith("python main.py"))
+        commands = tutorial_commands(source)
         self.assertGreaterEqual(len(commands), 14)
         for command in commands:
             with self.subTest(command=command), contextlib.redirect_stderr(io.StringIO()):
@@ -1588,11 +1600,19 @@ class PairedTutorialTests(unittest.TestCase):
         self.assertEqual([int(i) for i in re.findall(r'<b>Try (\d+):</b>', source)],
                          list(range(1, 11)))
 
-    def test_instructor_guide_matches_build_and_has_nine_images(self):
+    def test_instructor_guide_matches_documented_release_and_has_nine_images(self):
         guide = (HELP_PATH.parent / "SampleOutputs" /
                  "Multiple-SampleOutputs_Guide.html").read_text(encoding="utf-8")
-        self.assertIn(f"Version {phys.MODEL_VERSION}", guide)
-        self.assertIn(f"Build {phys.BUILD_ID}", guide)
+        # The guide and release notes are intentionally held at the previous
+        # release during copy editing. Active Help follows the working core;
+        # figure provenance follows the release recorded with those figures.
+        notes = HELP_PATH.with_name("Multiple-ReleaseNotes.html").read_text(encoding="utf-8")
+        version = re.search(r'<b>Version:</b>\s*([0-9.]+)', notes)
+        build = re.search(r'<b>Build:</b>\s*([0-9a-f]+)', notes)
+        self.assertIsNotNone(version)
+        self.assertIsNotNone(build)
+        self.assertIn(f"Version {version.group(1)}", guide)
+        self.assertIn(f"Build {build.group(1)}", guide)
         images = re.findall(r'data:image/png;base64,([A-Za-z0-9+/=]+)', guide)
         self.assertEqual(len(images), 9)
         for encoded in images:
@@ -1616,18 +1636,8 @@ class BeatsHelpTests(unittest.TestCase):
         return match.group(1)
 
     def _commands(self):
-        pre_pattern = r'<pre class="code-block"><code>(.*?)</code></pre>'
-        lines = []
-        for block in re.findall(pre_pattern, self.text, flags=re.DOTALL):
-            lines.extend(unescape(block).splitlines())
-        commands = []
-        for line in lines:
-            line = " ".join(line.split())
-            if (line.startswith("python main.py")
-                    and line not in ("python main.py --help",
-                                     "python main.py --version")):
-                commands.append(line)
-        return commands
+        return [command for command in tutorial_commands(self.text)
+                if command not in ("python main.py --help", "python main.py --version")]
 
     def test_version_and_build_match_program(self) -> None:
         match = re.search(
@@ -1738,6 +1748,70 @@ class BeatsHelpTests(unittest.TestCase):
         with self.assertRaises(RuntimeError) as failure:
             driver.run_simulation(params)
         self.assertIn("too small to advance simulation time", str(failure.exception))
+
+
+class TestConservationTableFormatting(unittest.TestCase):
+    @staticmethod
+    def capture(samples):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            entry.print_conservation_samples({"conservation_samples": samples})
+        return output.getvalue().splitlines()
+
+    @staticmethod
+    def sample(fraction, energy, momentum, angular):
+        return {"fraction": fraction, "time": fraction * 1234567.0,
+                "energy": energy, "internal_energy": -1.23456789e9,
+                "kinetic_energy": 9.87654321e10,
+                "momentum": momentum, "angular_momentum": angular}
+
+    def test_eleven_rows_preserve_units_values_and_five_significant_digits(self):
+        samples = [self.sample(i / 10, (-1) ** i * 7.377412345e9,
+                               [(-1) ** i * 2.7e5, -3e4, -0.0],
+                               [0.0, 1.234567e7, (-1) ** i * 1.84e15])
+                   for i in range(11)]
+        before = repr(samples)
+        lines = self.capture(samples)
+        self.assertEqual(len(lines), 14)
+        self.assertEqual(lines[1], "t [days]; E, E_internal, K [m^2/s^2]; P [m/s]; L [m^2/s]")
+        self.assertEqual(lines[2].split(), ["Fraction", "t", "E", "E_internal", "K", "P", "L"])
+        for sample, line in zip(samples, lines[3:]):
+            self.assertEqual(line.split()[0], f"{sample['fraction']:.1f}")
+            values = [sample["time"] / 86400, sample["energy"],
+                      sample["internal_energy"], sample["kinetic_energy"],
+                      *sample["momentum"], *sample["angular_momentum"]]
+            printed = re.findall(r"-?\d\.\d{4}e[+-]\d+", line)
+            self.assertEqual(printed, [f"{float(value):.4e}" for value in values])
+        self.assertEqual(repr(samples), before)
+
+    def test_changing_signs_keeps_scalar_and_vector_columns_aligned(self):
+        samples = [self.sample(0.0, 7.3774e9, [2.7e5, -3e4, 0], [0, 0, -1.84e15]),
+                   self.sample(1.0, -1.2735e9, [-2.7e5, 3e4, -0.0], [-1, 2, 1.84e15])]
+        lines = self.capture(samples)
+        header, rows = lines[2], lines[3:]
+        starts = [header.index(name) for name in ("t", "E", "E_internal", "K", "P", "L")]
+        self.assertEqual(len(rows[0]), len(rows[1]))
+        for a, b in zip(starts[:4], starts[1:5]):
+            self.assertEqual(rows[0][a:b].index('.'), rows[1][a:b].index('.'))
+        for row in rows:
+            self.assertEqual(row[starts[4]], '(')
+            self.assertEqual(row[starts[5]], '(')
+        for vector_start in starts[4:]:
+            self.assertEqual([m.start() for m in re.finditer(r"[(),]", rows[0][vector_start:])],
+                             [m.start() for m in re.finditer(r"[(),]", rows[1][vector_start:])])
+        self.assertIn("( 2.7000e+05, -3.0000e+04,  0.0000e+00)", rows[0])
+
+    def test_three_digit_exponents_expand_columns_without_truncating(self):
+        samples = [self.sample(0.0, 1e9, [1, 0, -1], [1, -1, 0]),
+                   self.sample(1.0, -1e300, [-1e300, 1e-300, 0], [1e300, -1e-300, 0])]
+        lines = self.capture(samples)
+        header, rows = lines[2], lines[3:]
+        self.assertEqual(len(rows[0]), len(rows[1]))
+        for label in ("P", "L"):
+            start = header.index(label)
+            self.assertTrue(all(row[start] == '(' for row in rows))
+        self.assertIn("-1.0000e+300", rows[1])
+        self.assertIn("1.0000e-300", rows[1])
 
 
 if __name__ == "__main__":
