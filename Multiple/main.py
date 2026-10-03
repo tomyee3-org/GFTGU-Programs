@@ -237,7 +237,7 @@ def print_conservation_samples(result):
 
     vector_width = 3 * component_width + 6
     widths = [8, *scalar_widths, vector_width, vector_width]
-    headings = ("Fraction", "t", "E", "E_internal", "K", "P", "L")
+    headings = ("Fraction", "  t", "  E", "  E_internal", "  K", "  P", "  L")
     print("Conservation over ten equal time intervals (user coordinates, scaled by one solar mass):")
     print("t [days]; E, E_internal, K [m^2/s^2]; P [m/s]; L [m^2/s]")
     print(" ".join(label.ljust(width) for label, width in zip(headings, widths)).rstrip())
