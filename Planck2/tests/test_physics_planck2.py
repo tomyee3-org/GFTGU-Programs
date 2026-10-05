@@ -68,28 +68,28 @@ import planck2_physics as phys  # noqa: E402
 import planck2_plot as plotter  # noqa: E402
 
 
-HELP_FILENAMES = ("Planck2-extended.html", "Planck2-short.html")
+HELP_FILENAMES = ("Planck2.html",)
 
 
-def find_help_files(module_dir: Path) -> tuple[Path, Path]:
-    """Require the two active tutorial guides together in one documentation folder."""
-    program_name = "Planck2"
+def find_help_files(module_dir):
+    """Find the merged Planck2.html in the program or sibling docs tree."""
+    module_dir = Path(module_dir)
     directories = [module_dir]
     for ancestor in (module_dir, *module_dir.parents):
-        directories.append(ancestor / "GFTGU-Documentation" / program_name)
-        if ancestor.name != program_name:
-            directories.append(ancestor / program_name)
+        directories.extend((ancestor / "GFTGU-Documentation" / "Planck2",
+                            ancestor / "Planck2-Documentation",
+                            ancestor / "Planck2-docs"))
+        if ancestor.name != "Planck2":
+            directories.append(ancestor / "Planck2")
     for directory in directories:
-        pair = tuple(directory / name for name in HELP_FILENAMES)
-        if all(path.is_file() for path in pair):
-            return pair
-    raise FileNotFoundError(
-        "Both Planck2-extended.html and Planck2-short.html are required together "
-        "beside the program or in GFTGU-Documentation/Planck2/."
-    )
+        candidate = directory / "Planck2.html"
+        if candidate.is_file():
+            return (candidate,)
+    raise FileNotFoundError("Could not find Planck2.html beside the program or in GFTGU-Documentation/Planck2/.")
 
 
-HELP_FILE, GROK_HELP_FILE = find_help_files(MODULE_DIR)
+HELP_FILE, = find_help_files(MODULE_DIR)
+GROK_HELP_FILE = HELP_FILE  # Existing scientific checks now read the same merged page.
 
 
 def relative_error(actual, expected):
@@ -174,7 +174,7 @@ class TestFileLocationAndReleaseMetadata(unittest.TestCase):
 
     def test_find_module_dir_fails_clearly(self):
         with tempfile.TemporaryDirectory() as temp_name:
-            with self.assertRaisesRegex(FileNotFoundError, "all Planck2 modules"):
+            with self.assertRaisesRegex(FileNotFoundError, r"all Planck2 modules"):
                 find_module_dir(temp_name)
 
     def test_core_source_files_exist(self):

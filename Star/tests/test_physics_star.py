@@ -5,7 +5,7 @@ The locator deliberately supports both repository layout::
     Star/tests/test_physics_star.py
 
 and a flattened upload in which this test file is placed beside the four
-program modules.  Both tutorial Help files, Star-extended.html and Star-short.html, are required
+program modules.  Both tutorial Help files, Star.html and Star.html, are required
 together in one folder. The archived Reference Guide, Star-original.html, is
 optional and is never checked against the current release stamp.
 """
@@ -55,26 +55,28 @@ def find_module_dir(start):
 
 MODULE_DIR = find_module_dir(Path(__file__).resolve().parent)
 TEST_FILE = Path(__file__).resolve()
-HELP_FILENAMES = ("Star-extended.html", "Star-short.html")
+HELP_FILENAMES = ("Star.html",)
 
 
 def find_help_files(module_dir):
-    """Find the paired active tutorials in a flat or sibling docs layout."""
-    folders = [module_dir]
+    """Find the merged Star.html in the program or sibling docs tree."""
+    module_dir = Path(module_dir)
+    directories = [module_dir]
     for ancestor in (module_dir, *module_dir.parents):
-        folders.append(ancestor / "GFTGU-Documentation" / "Star")
+        directories.extend((ancestor / "GFTGU-Documentation" / "Star",
+                            ancestor / "Star-Documentation",
+                            ancestor / "Star-docs"))
         if ancestor.name != "Star":
-            folders.append(ancestor / "Star")
-    for folder in dict.fromkeys(folders):
-        if all((folder / name).is_file() for name in HELP_FILENAMES):
-            return tuple(folder / name for name in HELP_FILENAMES)
-    raise FileNotFoundError(
-        "Star-extended.html and Star-short.html must both be present "
-        "in the same program or documentation folder."
-    )
+            directories.append(ancestor / "Star")
+    for directory in directories:
+        candidate = directory / "Star.html"
+        if candidate.is_file():
+            return (candidate,)
+    raise FileNotFoundError("Could not find Star.html beside the program or in GFTGU-Documentation/Star/.")
 
 
-HELP_FILE, GROK_FILE = find_help_files(MODULE_DIR)
+HELP_FILE, = find_help_files(MODULE_DIR)
+GROK_FILE = HELP_FILE  # Existing scientific checks now read the same merged page.
 if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 
@@ -1512,15 +1514,16 @@ GROK_STRUCTURE = HelpStructure(GROK_HTML)
 class TestGrokTutorial(unittest.TestCase):
     """Shared executable, separate teaching path, paired active documentation."""
 
-    def test_paired_locator_requires_both_in_one_folder(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            folder = Path(tmp) / "Star"
-            folder.mkdir()
-            (folder / HELP_FILENAMES[0]).write_text("Claude", encoding="utf-8")
-            with self.assertRaises(FileNotFoundError):
+    def test_merged_help_is_required_and_archives_are_ignored(self):
+        with tempfile.TemporaryDirectory() as temp_name:
+            folder = Path(temp_name)
+            for suffix in ("short", "extended", "original", "java"):
+                (folder / "Star-{}.html".format(suffix)).write_text("archive", encoding="utf-8")
+            with self.assertRaisesRegex(FileNotFoundError, r"Star\.html"):
                 find_help_files(folder)
-            (folder / HELP_FILENAMES[1]).write_text("Grok", encoding="utf-8")
-            self.assertEqual(find_help_files(folder), tuple(folder / n for n in HELP_FILENAMES))
+            merged = folder / "Star.html"
+            merged.write_text("merged", encoding="utf-8")
+            self.assertEqual(find_help_files(folder), (merged,))
 
     def test_stamps_and_house_style_match(self):
         for page in (HELP_HTML, GROK_HTML):

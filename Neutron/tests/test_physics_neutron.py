@@ -29,7 +29,7 @@ CORE_MODULE_FILENAMES = (
 # Both active tutorial formats must be present together. The archived
 # Reference Guide is not part of this requirement.
 PROGRAM_NAME = "Neutron"
-HELP_FILENAMES = ("Neutron-extended.html", "Neutron-short.html")
+HELP_FILENAMES = ("Neutron.html",)
 
 
 def find_module_dir(start: Path) -> Path:
@@ -190,26 +190,21 @@ def _independent_build_id() -> str:
     return digest.hexdigest()[:12]
 
 
-def find_help_files(module_dir: Path) -> tuple[Path, Path]:
-    """Find both tutorial Helps together in a flattened or sibling layout.
-
-    Documentation folders no longer use chapter-number prefixes, and the
-    The program's documentation directory is named ``Neutron``. Requiring
-    both files in the same directory prevents mixing mismatched releases.
-    """
-    candidates = [module_dir]
+def find_help_files(module_dir):
+    """Find the merged Neutron.html in the program or sibling docs tree."""
+    module_dir = Path(module_dir)
+    directories = [module_dir]
     for ancestor in (module_dir, *module_dir.parents):
-        candidates.append(ancestor / "GFTGU-Documentation" / PROGRAM_NAME)
-        if ancestor.name != PROGRAM_NAME:
-            candidates.append(ancestor / PROGRAM_NAME)
-    for directory in candidates:
-        files = tuple(directory / name for name in HELP_FILENAMES)
-        if all(file.is_file() for file in files):
-            return files  # type: ignore[return-value]
-    raise FileNotFoundError(
-        f"Could not find both {' and '.join(HELP_FILENAMES)} together beside the program or in "
-        f"GFTGU-Documentation/{PROGRAM_NAME}/."
-    )
+        directories.extend((ancestor / "GFTGU-Documentation" / "Neutron",
+                            ancestor / "Neutron-Documentation",
+                            ancestor / "Neutron-docs"))
+        if ancestor.name != "Neutron":
+            directories.append(ancestor / "Neutron")
+    for directory in directories:
+        candidate = directory / "Neutron.html"
+        if candidate.is_file():
+            return (candidate,)
+    raise FileNotFoundError("Could not find Neutron.html beside the program or in GFTGU-Documentation/Neutron/.")
 
 
 def _help_text() -> str:
@@ -259,12 +254,13 @@ def test_help_version_and_build_are_in_sync() -> None:
         assert match.group(2) == phys.BUILD_ID
 
 
-def test_both_active_helps_required_in_one_directory(tmp_path: Path) -> None:
-    (tmp_path / HELP_FILENAMES[0]).write_text("example", encoding="utf-8")
-    with pytest.raises(FileNotFoundError, match="both"):
+def test_merged_help_is_required_and_archives_are_ignored(tmp_path: Path) -> None:
+    (tmp_path / "Neutron-short.html").write_text("archive", encoding="utf-8")
+    with pytest.raises(FileNotFoundError):
         find_help_files(tmp_path)
-    (tmp_path / HELP_FILENAMES[1]).write_text("example", encoding="utf-8")
-    assert tuple(p.name for p in find_help_files(tmp_path)) == HELP_FILENAMES
+    merged = tmp_path / "Neutron.html"
+    merged.write_text("merged", encoding="utf-8")
+    assert find_help_files(tmp_path) == (merged,)
 
 
 def test_both_tutorials_cover_the_same_eight_beats_and_cli_options() -> None:

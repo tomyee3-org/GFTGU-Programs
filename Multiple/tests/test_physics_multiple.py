@@ -35,7 +35,7 @@ CORE_MODULE_FILES = (
 )
 # Both active tutorials are one documentation set. The archived Reference
 # Guide remains optional for its historical text checks.
-HELP_FILENAMES = ("Multiple-extended.html", "Multiple-short.html")
+HELP_FILENAMES = ("Multiple.html",)
 PROGRAM_NAME = "Multiple"
 
 
@@ -53,20 +53,20 @@ def find_module_dir(start) -> Path:
 
 
 def find_help_files(module_dir):
-    """Find both active tutorials together in a flattened or sibling tree."""
-    candidates = [module_dir]
+    """Find the merged Multiple.html in the program or sibling docs tree."""
+    module_dir = Path(module_dir)
+    directories = [module_dir]
     for ancestor in (module_dir, *module_dir.parents):
-        candidates.append(ancestor / "GFTGU-Documentation" / PROGRAM_NAME)
-        if ancestor.name != PROGRAM_NAME:
-            candidates.append(ancestor / PROGRAM_NAME)
-    for directory in candidates:
-        paths = tuple(directory / name for name in HELP_FILENAMES)
-        if all(path.is_file() for path in paths):
-            return paths
-    raise FileNotFoundError(
-        f"Both Multiple tutorial files ({', '.join(HELP_FILENAMES)}) must be "
-        f"present together beside the program or in GFTGU-Documentation/{PROGRAM_NAME}/."
-    )
+        directories.extend((ancestor / "GFTGU-Documentation" / "Multiple",
+                            ancestor / "Multiple-Documentation",
+                            ancestor / "Multiple-docs"))
+        if ancestor.name != "Multiple":
+            directories.append(ancestor / "Multiple")
+    for directory in directories:
+        candidate = directory / "Multiple.html"
+        if candidate.is_file():
+            return (candidate,)
+    raise FileNotFoundError("Could not find Multiple.html beside the program or in GFTGU-Documentation/Multiple/.")
 
 
 def original_help_text(test) -> str:
@@ -77,7 +77,8 @@ def original_help_text(test) -> str:
 
 
 MODULE_DIR = find_module_dir(Path(__file__))
-HELP_PATH, GROK_HELP_PATH = find_help_files(MODULE_DIR)
+HELP_PATH, = find_help_files(MODULE_DIR)
+GROK_HELP_PATH = HELP_PATH  # Both existing check groups read the merged baseline.
 BEATS_HELP_FILE: Optional[Path] = HELP_PATH
 ORIGINAL_HELP_FILE = HELP_PATH.parent / "Multiple-original.html"
 if str(MODULE_DIR) not in sys.path:
@@ -139,7 +140,7 @@ class TestPortableLocator(unittest.TestCase):
 
     def test_missing_modules_raise_clear_error(self):
         with tempfile.TemporaryDirectory() as temporary:
-            with self.assertRaisesRegex(FileNotFoundError, "all core modules"):
+            with self.assertRaisesRegex(FileNotFoundError, r"all core modules"):
                 find_module_dir(Path(temporary) / "test.py")
 
 
@@ -1560,13 +1561,16 @@ def tutorial_commands(source):
 
 
 class PairedTutorialTests(unittest.TestCase):
-    def test_both_tutorials_are_required_together(self):
-        self.assertEqual((HELP_PATH.name, GROK_HELP_PATH.name), HELP_FILENAMES)
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            (root / HELP_FILENAMES[0]).touch()
-            with self.assertRaisesRegex(FileNotFoundError, "Both Multiple tutorial"):
-                find_help_files(root)
+    def test_merged_help_is_required_and_archives_are_ignored(self):
+        with tempfile.TemporaryDirectory() as temp_name:
+            folder = Path(temp_name)
+            for suffix in ("short", "extended", "original", "java"):
+                (folder / "Multiple-{}.html".format(suffix)).write_text("archive", encoding="utf-8")
+            with self.assertRaisesRegex(FileNotFoundError, r"Multiple\.html"):
+                find_help_files(folder)
+            merged = folder / "Multiple.html"
+            merged.write_text("merged", encoding="utf-8")
+            self.assertEqual(find_help_files(folder), (merged,))
 
     def test_both_tutorials_share_build_options_and_navigation(self):
         for path in (HELP_PATH, GROK_HELP_PATH):

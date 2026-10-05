@@ -40,7 +40,7 @@ CORE_MODULE_FILES = (
 )
 # Both active tutorials are required together. The archived Reference Guide
 # remains optional and is not synchronized with the current program.
-HELP_FILENAMES = ("Random2-extended.html", "Random2-short.html")
+HELP_FILENAMES = ("Random2.html",)
 
 
 def find_module_dir(start: Path) -> Path:
@@ -115,25 +115,25 @@ class _HelpSemanticParser(HTMLParser):
             self._cell_text.append(data)
 
 
-def find_help_files(module_dir: Path) -> tuple[Path, Path]:
-    """Require both active tutorials in one folder in either review layout."""
-    program_name = "Random2"
+def find_help_files(module_dir):
+    """Find the merged Random2.html in the program or sibling docs tree."""
+    module_dir = Path(module_dir)
     directories = [module_dir]
     for ancestor in (module_dir, *module_dir.parents):
-        directories.append(ancestor / "GFTGU-Documentation" / program_name)
-        if ancestor.name != program_name:
-            directories.append(ancestor / program_name)
+        directories.extend((ancestor / "GFTGU-Documentation" / "Random2",
+                            ancestor / "Random2-Documentation",
+                            ancestor / "Random2-docs"))
+        if ancestor.name != "Random2":
+            directories.append(ancestor / "Random2")
     for directory in directories:
-        pair = tuple(directory / name for name in HELP_FILENAMES)
-        if all(path.is_file() for path in pair):
-            return pair
-    raise FileNotFoundError(
-        "Both Random2-extended.html and Random2-short.html are required together "
-        "beside the modules or in GFTGU-Documentation/Random2/."
-    )
+        candidate = directory / "Random2.html"
+        if candidate.is_file():
+            return (candidate,)
+    raise FileNotFoundError("Could not find Random2.html beside the program or in GFTGU-Documentation/Random2/.")
 
 
-HELP_FILE, GROK_HELP_FILE = find_help_files(MODULE_DIR)
+HELP_FILE, = find_help_files(MODULE_DIR)
+GROK_HELP_FILE = HELP_FILE  # Existing scientific checks now read the same merged page.
 HELP_HTML = HELP_FILE.read_text(encoding="utf-8")
 GROK_HTML = GROK_HELP_FILE.read_text(encoding="utf-8")
 
@@ -183,7 +183,7 @@ class TestPortableDiscovery(unittest.TestCase):
 
     def test_missing_modules_raise_clear_error(self):
         with tempfile.TemporaryDirectory() as temporary:
-            with self.assertRaisesRegex(FileNotFoundError, "Random2 core files"):
+            with self.assertRaisesRegex(FileNotFoundError, r"Random2 core files"):
                 find_module_dir(Path(temporary))
 
 
@@ -929,15 +929,16 @@ STRUCTURE = HelpStructure(HELP_HTML)
 class PairedTutorialTests(unittest.TestCase):
     """The two active tutorials share the core, commands and figure guide."""
 
-    def test_both_active_guides_are_required_in_one_directory(self):
+    def test_merged_help_is_required_and_archives_are_ignored(self):
         with tempfile.TemporaryDirectory() as temp_name:
             folder = Path(temp_name)
-            (folder / HELP_FILENAMES[0]).write_text("Claude", encoding="utf-8")
-            with self.assertRaisesRegex(FileNotFoundError, "Both Random2-extended.html and Random2-short.html"):
+            for suffix in ("short", "extended", "original", "java"):
+                (folder / "Random2-{}.html".format(suffix)).write_text("archive", encoding="utf-8")
+            with self.assertRaisesRegex(FileNotFoundError, r"Random2\.html"):
                 find_help_files(folder)
-            (folder / HELP_FILENAMES[1]).write_text("Grok", encoding="utf-8")
-            self.assertEqual(find_help_files(folder),
-                             tuple(folder / name for name in HELP_FILENAMES))
+            merged = folder / "Random2.html"
+            merged.write_text("merged", encoding="utf-8")
+            self.assertEqual(find_help_files(folder), (merged,))
 
     def test_both_guides_share_stamp_beats_and_cursor_tip(self):
         expected = f"Version {physics.MODEL_VERSION}&nbsp;&nbsp;&nbsp;&nbsp;Build {physics.BUILD_ID}"
@@ -1910,11 +1911,11 @@ class DocumentationSetTests(unittest.TestCase):
         provenance = re.search(r'<section id="provenance">(.*?)</section>', self.samples, re.S).group(1)
         self.assertIn(f"Version {physics.MODEL_VERSION}", provenance)
         self.assertIn(f"build {physics.BUILD_ID}", provenance)
-        self.assertIn("Random2-extended.html", self.samples)
-        self.assertIn("Random2-short.html", self.samples)
+        self.assertIn("Random2.html", self.samples)
+        self.assertIn("Random2.html", self.samples)
         self.assertNotIn("Random2.html", self.samples)
         student = re.sub(r"base64,[A-Za-z0-9+/=]+", "", self.samples)
-        student = student.replace("Random2-short.html", "").replace("Random2-extended.html", "").lower()
+        student = student.replace("Random2.html", "").replace("Random2.html", "").lower()
         for term in ("codex", "grok", "claude", "xedoc", "kickoff", "audit"):
             self.assertNotIn(term, student)
 

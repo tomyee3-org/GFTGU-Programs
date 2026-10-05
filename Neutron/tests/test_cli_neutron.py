@@ -77,8 +77,8 @@ class CommandLineTests(unittest.TestCase):
         )
 
     def test_docs_build_metadata(self):
-        # Check both active tutorials together, in the same directory.
-        help_names = ('Neutron-claude.html', 'Neutron-grok.html')
+        # Check the merged active Help in the current documentation tree.
+        help_names = ('Neutron.html',)
         candidates = [ROOT]
         for ancestor in (ROOT, *ROOT.parents):
             candidates.append(ancestor/'GFTGU-Documentation'/'Neutron')
@@ -88,7 +88,7 @@ class CommandLineTests(unittest.TestCase):
             (c for c in candidates if all((c/name).is_file() for name in help_names)),
             None,
         )
-        self.assertIsNotNone(docs_dir, 'Both active Neutron Help files are required together')
+        self.assertIsNotNone(docs_dir, 'Neutron.html is required')
         for name in help_names:
             self.assertIn(physics.BUILD_ID, (docs_dir/name).read_text(encoding='utf-8'))
         for optional in (

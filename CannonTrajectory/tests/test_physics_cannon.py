@@ -35,11 +35,11 @@ CORE_MODULE_FILES = (
     "main.py",
     "plot_cannon.py",
 )
-# The Beats Help is named CannonTrajectory-extended.html until it is adopted as
+# The Beats Help is named CannonTrajectory.html until it is adopted as
 # the live Help, when it is renamed CannonTrajectory.html; either name is
 # accepted, and the first one found is used.  The Reference Guide version,
 # CannonTrajectory-original.html, is never used here.
-HELP_FILENAMES = ("CannonTrajectory-extended.html", "CannonTrajectory.html")
+HELP_FILENAMES = ("CannonTrajectory.html",)
 PROGRAM_NAME = "CannonTrajectory"
 
 

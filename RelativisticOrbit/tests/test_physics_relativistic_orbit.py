@@ -43,7 +43,7 @@ CORE_MODULE_FILENAMES = (
 )
 # Both active tutorials are required in the same directory. The archived
 # Reference Guide is optional and does not track subsequent core changes.
-HELP_FILENAMES = ("RelativisticOrbit-extended.html", "RelativisticOrbit-short.html")
+HELP_FILENAMES = ("RelativisticOrbit.html",)
 PROGRAM_NAME = "RelativisticOrbit"
 MINIMUM_PYTHON_VERSION = (3, 10)
 
@@ -64,31 +64,26 @@ def find_module_dir(start: str | os.PathLike[str]) -> Path:
     )
 
 
-def find_help_files(module_dir: Path) -> tuple[Path, Path]:
-    """Find both active tutorials in a flattened or sibling repository layout.
-
-    Documentation folders no longer use chapter-number prefixes, and the
-    Help files live under the sibling ``GFTGU-Documentation`` repository
-    rather than beside the program modules inside ``GFTGU-Programs``.
-    """
+def find_help_files(module_dir):
+    """Find the merged RelativisticOrbit.html in the program or sibling docs tree."""
+    module_dir = Path(module_dir)
     directories = [module_dir]
     for ancestor in (module_dir, *module_dir.parents):
-        directories.append(ancestor / "GFTGU-Documentation" / PROGRAM_NAME)
-        if ancestor.name != PROGRAM_NAME:
-            directories.append(ancestor / PROGRAM_NAME)
+        directories.extend((ancestor / "GFTGU-Documentation" / "RelativisticOrbit",
+                            ancestor / "RelativisticOrbit-Documentation",
+                            ancestor / "RelativisticOrbit-docs"))
+        if ancestor.name != "RelativisticOrbit":
+            directories.append(ancestor / "RelativisticOrbit")
     for directory in directories:
-        pair = tuple(directory / name for name in HELP_FILENAMES)
-        if all(path.is_file() for path in pair):
-            return pair
-    raise FileNotFoundError(
-        "Both RelativisticOrbit-extended.html and RelativisticOrbit-short.html "
-        "are required together beside the program or in "
-        "GFTGU-Documentation/RelativisticOrbit/."
-    )
+        candidate = directory / "RelativisticOrbit.html"
+        if candidate.is_file():
+            return (candidate,)
+    raise FileNotFoundError("Could not find RelativisticOrbit.html beside the program or in GFTGU-Documentation/RelativisticOrbit/.")
 
 
 MODULE_DIR = find_module_dir(Path(__file__).resolve().parent)
-HELP_FILE, GROK_HELP_FILE = find_help_files(MODULE_DIR)
+HELP_FILE, = find_help_files(MODULE_DIR)
+GROK_HELP_FILE = HELP_FILE  # Existing scientific checks now read the same merged page.
 if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 
@@ -169,7 +164,7 @@ class TestDiscoveryAndReleaseMetadata(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             nested = Path(temp_dir) / "one" / "two"
             nested.mkdir(parents=True)
-            with self.assertRaisesRegex(FileNotFoundError, "physics_relativistic_orbit.py"):
+            with self.assertRaisesRegex(FileNotFoundError, r"physics_relativistic_orbit.py"):
                 find_module_dir(nested)
 
     def test_build_id_is_independently_reproducible(self):
@@ -1476,14 +1471,16 @@ GROK_STRUCTURE = HelpStructure(GROK_HTML)
 class TestPairedTutorials(unittest.TestCase):
     """Both active tutorials use one core and describe its executable interface."""
 
-    def test_pair_is_required_in_one_folder(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            folder = Path(temp_dir)
-            (folder / HELP_FILENAMES[0]).write_text("Claude", encoding="utf-8")
-            with self.assertRaisesRegex(FileNotFoundError, "Both RelativisticOrbit-extended.html and RelativisticOrbit-short.html"):
+    def test_merged_help_is_required_and_archives_are_ignored(self):
+        with tempfile.TemporaryDirectory() as temp_name:
+            folder = Path(temp_name)
+            for suffix in ("short", "extended", "original", "java"):
+                (folder / "RelativisticOrbit-{}.html".format(suffix)).write_text("archive", encoding="utf-8")
+            with self.assertRaisesRegex(FileNotFoundError, r"RelativisticOrbit\.html"):
                 find_help_files(folder)
-            (folder / HELP_FILENAMES[1]).write_text("Grok", encoding="utf-8")
-            self.assertEqual(find_help_files(folder), tuple(folder / name for name in HELP_FILENAMES))
+            merged = folder / "RelativisticOrbit.html"
+            merged.write_text("merged", encoding="utf-8")
+            self.assertEqual(find_help_files(folder), (merged,))
 
     def test_shared_build_beats_and_cursor_note(self):
         for page in (HELP_HTML, GROK_HTML):
@@ -1589,7 +1586,7 @@ class TestCompanionDocuments(unittest.TestCase):
 
     def test_guide_student_text_has_no_review_jargon(self):
         student = re.sub(r"base64,[A-Za-z0-9+/=]+", "", self.samples)
-        student = student.replace(HELP_FILENAMES[0], "").replace(HELP_FILENAMES[1], "").lower()
+        student = student.replace(HELP_FILENAMES[0], "").replace(HELP_FILENAMES[0], "").lower()
         for term in ("codex", "grok", "claude", "xedoc", "kickoff", "audit"):
             self.assertNotIn(term, student)
 

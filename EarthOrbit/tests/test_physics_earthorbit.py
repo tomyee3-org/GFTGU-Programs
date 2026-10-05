@@ -63,31 +63,25 @@ import plot_earthorbit as plotter
 
 
 def find_help_files(module_dir):
-    """Require both tutorial Helps in one folder, flattened or in documentation.
-
-    Documentation folders no longer use chapter-number prefixes, and the
-    Help files live under the sibling ``GFTGU-Documentation`` repository
-    rather than beside the program modules inside ``GFTGU-Programs``.
-    """
-    help_filenames = ("EarthOrbit-extended.html", "EarthOrbit-short.html")
-    program_name = "EarthOrbit"
-    candidates = [module_dir / name for name in help_filenames]
+    """Find the merged EarthOrbit.html in the program or sibling docs tree."""
+    module_dir = Path(module_dir)
+    directories = [module_dir]
     for ancestor in (module_dir, *module_dir.parents):
-        for name in help_filenames:
-            candidates.append(ancestor / "GFTGU-Documentation" / program_name / name)
-            if ancestor.name != program_name:
-                candidates.append(ancestor / program_name / name)
-    for directory in dict.fromkeys(candidate.parent for candidate in candidates):
-        pair = tuple(directory / name for name in help_filenames)
-        if all(path.is_file() for path in pair):
-            return pair
-    raise FileNotFoundError("Both EarthOrbit-extended.html and EarthOrbit-short.html "
-                            "must be together beside the program or in "
-                            "GFTGU-Documentation/EarthOrbit/.")
+        directories.extend((ancestor / "GFTGU-Documentation" / "EarthOrbit",
+                            ancestor / "EarthOrbit-Documentation",
+                            ancestor / "EarthOrbit-docs"))
+        if ancestor.name != "EarthOrbit":
+            directories.append(ancestor / "EarthOrbit")
+    for directory in directories:
+        candidate = directory / "EarthOrbit.html"
+        if candidate.is_file():
+            return (candidate,)
+    raise FileNotFoundError("Could not find EarthOrbit.html beside the program or in GFTGU-Documentation/EarthOrbit/.")
 
 
 HELP_FILES = find_help_files(MODULE_DIR)
-HELP_FILE, GROK_HELP_FILE = HELP_FILES
+HELP_FILE, = HELP_FILES
+GROK_HELP_FILE = HELP_FILE  # Existing scientific checks now read the same merged page.
 DOCUMENTATION_DIR = HELP_FILE.parent
 ORIGINAL_HELP_FILE = DOCUMENTATION_DIR / "EarthOrbit-original.html"
 RELEASE_NOTES_FILE = DOCUMENTATION_DIR / "EarthOrbit-ReleaseNotes.html"
@@ -171,7 +165,7 @@ class ModuleDiscoveryTests(unittest.TestCase):
 
     def test_missing_modules_raise_clear_error(self):
         with tempfile.TemporaryDirectory() as temp_name:
-            with self.assertRaisesRegex(FileNotFoundError, "all EarthOrbit modules"):
+            with self.assertRaisesRegex(FileNotFoundError, r"all EarthOrbit modules"):
                 find_module_dir(temp_name)
 
 
@@ -445,7 +439,7 @@ class DriverValidationTests(unittest.TestCase):
         # about -16,564 m (an impacting trajectory), so it did not exercise
         # a near-miss at all. See test_close_perigee_elements_match_target
         # below for the perigee-altitude check, and Experiment 6 in
-        # EarthOrbit-extended.html for why the analytic (launch-state) perigee
+        # EarthOrbit.html for why the analytic (launch-state) perigee
         # and the numerically integrated outcome are not the same question.
         result = driver.run_earth_orbit(
             h0=300_000.0, uInit=7636.511278627493, vInit=0.0, dt=1.0,
@@ -1075,14 +1069,16 @@ class MainProgramTests(unittest.TestCase):
 class PairedTutorialTests(unittest.TestCase):
     """A complete installed pair shares the executable command and version contract."""
 
-    def test_both_guides_required(self):
-        self.assertEqual(tuple(path.name for path in HELP_FILES),
-                         ("EarthOrbit-extended.html", "EarthOrbit-short.html"))
-        with tempfile.TemporaryDirectory() as tmp:
-            folder = Path(tmp)
-            (folder / "EarthOrbit-extended.html").write_text("only one")
-            with self.assertRaisesRegex(FileNotFoundError, "Both EarthOrbit"):
+    def test_merged_help_is_required_and_archives_are_ignored(self):
+        with tempfile.TemporaryDirectory() as temp_name:
+            folder = Path(temp_name)
+            for suffix in ("short", "extended", "original", "java"):
+                (folder / "EarthOrbit-{}.html".format(suffix)).write_text("archive", encoding="utf-8")
+            with self.assertRaisesRegex(FileNotFoundError, r"EarthOrbit\.html"):
                 find_help_files(folder)
+            merged = folder / "EarthOrbit.html"
+            merged.write_text("merged", encoding="utf-8")
+            self.assertEqual(find_help_files(folder), (merged,))
 
     def test_pair_has_same_version_build_beats_and_cli(self):
         for path in HELP_FILES:

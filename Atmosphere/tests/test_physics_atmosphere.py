@@ -101,11 +101,7 @@ def closest_index(values, target):
     return min(range(len(values)), key=lambda index: abs(values[index] - target))
 
 
-HELP_FILENAMES = (
-    "Atmosphere-short.html",
-    "Atmosphere-extended.html",
-    "Atmosphere.html",
-)
+HELP_FILENAMES = ("Atmosphere.html",)
 
 
 def _help_candidates(module_dir: Path):
@@ -148,8 +144,7 @@ def find_help_file(module_dir: Path) -> Path:
     if found:
         return found[0]
     raise FileNotFoundError(
-        "Could not find Atmosphere-short.html, Atmosphere-extended.html, or "
-        "Atmosphere.html beside the program or in GFTGU-Documentation/Atmosphere/ "
+        "Could not find Atmosphere.html beside the program or in GFTGU-Documentation/Atmosphere/ "
         "or Atmosphere-Documentation/."
     )
 
@@ -2098,8 +2093,8 @@ class EdgeProfileFamilyTests(unittest.TestCase):
 
 
 HELP_HTML = HELP_FILE.read_text(encoding="utf-8")
-CLAUDE_HELP_FILE = find_named_help(MODULE_DIR, "Atmosphere-extended.html")
-GROK_HELP_FILE = find_named_help(MODULE_DIR, "Atmosphere-short.html")
+CLAUDE_HELP_FILE = find_named_help(MODULE_DIR, "Atmosphere.html")
+GROK_HELP_FILE = find_named_help(MODULE_DIR, "Atmosphere.html")
 CLAUDE_HTML = (
     CLAUDE_HELP_FILE.read_text(encoding="utf-8") if CLAUDE_HELP_FILE is not None else ""
 )
@@ -3083,9 +3078,9 @@ class GrokQuotedClaimTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        path = find_named_help(MODULE_DIR, "Atmosphere-short.html")
+        path = find_named_help(MODULE_DIR, "Atmosphere.html")
         if path is None:
-            raise unittest.SkipTest("Atmosphere-short.html is not on the search path")
+            raise unittest.SkipTest("Atmosphere.html is not on the search path")
         cls.html = path.read_text(encoding="utf-8")
         cls.text = html_text(cls.html)
 
@@ -3279,9 +3274,10 @@ class GoverningEquationAuditTests(unittest.TestCase):
     def _help_pages(self):
         pages = []
         if GROK_HTML:
-            pages.append(("Atmosphere-short.html", GROK_HTML))
+            pages.append(("Atmosphere.html", GROK_HTML))
         if CLAUDE_HTML:
-            pages.append(("Atmosphere-extended.html", CLAUDE_HTML))
+            if not pages:
+                pages.append(("Atmosphere.html", CLAUDE_HTML))
         if not pages:
             self.skipTest("no Beats Help file is on the search path")
         return pages
@@ -3289,8 +3285,8 @@ class GoverningEquationAuditTests(unittest.TestCase):
     def test_displayed_equation_blocks_match_the_golden_text(self):
         """Every displayed equation in each named Help is pinned as a whole block."""
         expected = {
-            "Atmosphere-short.html": GROK_DISPLAYED_EQUATIONS,
-            "Atmosphere-extended.html": CLAUDE_DISPLAYED_EQUATIONS,
+            "Atmosphere.html": GROK_DISPLAYED_EQUATIONS,
+            "Atmosphere.html": CLAUDE_DISPLAYED_EQUATIONS,
         }
         for name, html in self._help_pages():
             with self.subTest(help=name):
@@ -3413,8 +3409,8 @@ class GoverningEquationAuditTests(unittest.TestCase):
     def test_inline_physical_relations_are_present(self):
         """Each listed inline relation must occur the documented number of times."""
         expected = {
-            "Atmosphere-short.html": GROK_INLINE_COUNTS,
-            "Atmosphere-extended.html": CLAUDE_INLINE_COUNTS,
+            "Atmosphere.html": GROK_INLINE_COUNTS,
+            "retired_extended_fixture": CLAUDE_INLINE_COUNTS,
         }
         for name, html in self._help_pages():
             with self.subTest(help=name):
@@ -3443,7 +3439,7 @@ class GoverningEquationAuditTests(unittest.TestCase):
     def test_long_help_step_rule_is_in_beat2_beat6_and_algorithm(self):
         """The Schutz step is stated in the three places a student meets it."""
         if not CLAUDE_HTML:
-            self.skipTest("Atmosphere-extended.html is not on the search path")
+            self.skipTest("Atmosphere.html is not on the search path")
         rule = r"\Delta h = H_{\min}/200"
         for section_id in ("beat2", "beat6", "algorithm"):
             with self.subTest(section=section_id):
@@ -3554,12 +3550,12 @@ class DualHelpFileTests(unittest.TestCase):
             and ("Documentation" in str(candidate) or "docs" in str(candidate))
             for candidate in _help_candidates(MODULE_DIR)
         ):
-            self.assertGreaterEqual(compared, 1)
+            self.assertTrue(grouped, "No active Atmosphere.html was discovered")
 
     def test_claude_help_is_checked_even_when_grok_is_primary(self):
-        path = find_named_help(MODULE_DIR, "Atmosphere-extended.html")
+        path = find_named_help(MODULE_DIR, "Atmosphere.html")
         if path is None:
-            self.skipTest("Atmosphere-extended.html is not on the search path")
+            self.skipTest("Atmosphere.html is not on the search path")
         html = path.read_text(encoding="utf-8")
         text = html_text(html)
         source = (MODULE_DIR / "driver_atmosphere.py").read_text(encoding="utf-8")
@@ -3592,9 +3588,9 @@ class DualHelpFileTests(unittest.TestCase):
         self.assertEqual(f"{isothermal:.4f}", "0.7144")
 
     def test_a_wrong_claude_experiment_8_check_value_is_rejected(self):
-        path = find_named_help(MODULE_DIR, "Atmosphere-extended.html")
+        path = find_named_help(MODULE_DIR, "Atmosphere.html")
         if path is None:
-            self.skipTest("Atmosphere-extended.html is not on the search path")
+            self.skipTest("Atmosphere.html is not on the search path")
         html = path.read_text(encoding="utf-8")
         text = html_text(html)
         printed = table_rows(run_main([
@@ -3607,9 +3603,9 @@ class DualHelpFileTests(unittest.TestCase):
         self.assertNotIn("38043", html)
 
     def test_a_wrong_grok_scientific_value_is_rejected_in_the_dual_layout(self):
-        path = find_named_help(MODULE_DIR, "Atmosphere-short.html")
+        path = find_named_help(MODULE_DIR, "Atmosphere.html")
         if path is None:
-            self.skipTest("Atmosphere-short.html is not on the search path")
+            self.skipTest("Atmosphere.html is not on the search path")
         html = path.read_text(encoding="utf-8")
         text = html_text(html)
         self.assertIn("8.43", html)

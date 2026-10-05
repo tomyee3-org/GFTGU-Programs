@@ -63,31 +63,25 @@ import physics_orbit as physics  # noqa: E402
 import plot_orbit as plotting  # noqa: E402
 
 
-def find_help_files(module_dir: Path) -> tuple[Path, Path]:
-    """Require both active Helps together in a flattened or sibling layout.
-
-    Documentation folders no longer use chapter-number prefixes, and the
-    Help files live under the sibling ``GFTGU-Documentation`` repository
-    rather than beside the program modules inside ``GFTGU-Programs``.
-    """
-    help_filenames = ("Orbit-extended.html", "Orbit-short.html")
-    program_name = "Orbit"
-    candidates = [module_dir]
+def find_help_files(module_dir):
+    """Find the merged Orbit.html in the program or sibling docs tree."""
+    module_dir = Path(module_dir)
+    directories = [module_dir]
     for ancestor in (module_dir, *module_dir.parents):
-        candidates.append(ancestor / "GFTGU-Documentation" / program_name)
-        if ancestor.name != program_name:
-            candidates.append(ancestor / program_name)
-    for directory in candidates:
-        files = (directory / help_filenames[0], directory / help_filenames[1])
-        if all(file.is_file() for file in files):
-            return files
-    raise FileNotFoundError(
-        "Could not find both Orbit-extended.html and Orbit-short.html together beside the program or in "
-        "GFTGU-Documentation/Orbit/."
-    )
+        directories.extend((ancestor / "GFTGU-Documentation" / "Orbit",
+                            ancestor / "Orbit-Documentation",
+                            ancestor / "Orbit-docs"))
+        if ancestor.name != "Orbit":
+            directories.append(ancestor / "Orbit")
+    for directory in directories:
+        candidate = directory / "Orbit.html"
+        if candidate.is_file():
+            return (candidate,)
+    raise FileNotFoundError("Could not find Orbit.html beside the program or in GFTGU-Documentation/Orbit/.")
 
 
-HELP_PATH, GROK_HELP_PATH = find_help_files(MODULE_DIR)
+HELP_PATH, = find_help_files(MODULE_DIR)
+GROK_HELP_PATH = HELP_PATH  # Existing scientific checks now read the same merged page.
 DOCUMENTATION_DIR = HELP_PATH.parent
 ORIGINAL_HELP_PATH = DOCUMENTATION_DIR / "Orbit-original.html"
 RELEASE_NOTES_PATH = DOCUMENTATION_DIR / "Orbit-ReleaseNotes.html"
@@ -174,7 +168,7 @@ class DiscoveryAndCompatibilityTests(unittest.TestCase):
 
     def test_find_module_dir_failure_names_required_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
-            with self.assertRaisesRegex(FileNotFoundError, "physics_orbit.py"):
+            with self.assertRaisesRegex(FileNotFoundError, r"physics_orbit.py"):
                 find_module_dir(temp_name)
 
     def test_all_core_modules_parse_with_python_310_grammar(self) -> None:
@@ -227,7 +221,7 @@ class BuildMetadataTests(unittest.TestCase):
             copied = Path(temp_name)
             for name in CORE_MODULE_FILES:
                 shutil.copy2(MODULE_DIR / name, copied / name)
-            (copied / "Orbit-extended.html").write_text("changed help", encoding="utf-8")
+            (copied / "Orbit.html").write_text("changed help", encoding="utf-8")
             (copied / "test_physics_orbit.py").write_text("changed tests", encoding="utf-8")
             self.assertEqual(expected_build_id(copied), physics.BUILD_ID)
 
@@ -1209,17 +1203,16 @@ class HelpStructureTests(unittest.TestCase):
 
 
 class PairedTutorialTests(unittest.TestCase):
-    def test_both_tutorials_are_required_in_the_same_directory(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            folder = Path(temporary)
-            (folder / "Orbit-extended.html").write_text("example", encoding="utf-8")
-            with self.assertRaisesRegex(FileNotFoundError, "both"):
+    def test_merged_help_is_required_and_archives_are_ignored(self):
+        with tempfile.TemporaryDirectory() as temp_name:
+            folder = Path(temp_name)
+            for suffix in ("short", "extended", "original", "java"):
+                (folder / "Orbit-{}.html".format(suffix)).write_text("archive", encoding="utf-8")
+            with self.assertRaisesRegex(FileNotFoundError, r"Orbit\.html"):
                 find_help_files(folder)
-            (folder / "Orbit-short.html").write_text("example", encoding="utf-8")
-            self.assertEqual(
-                tuple(path.name for path in find_help_files(folder)),
-                ("Orbit-extended.html", "Orbit-short.html"),
-            )
+            merged = folder / "Orbit.html"
+            merged.write_text("merged", encoding="utf-8")
+            self.assertEqual(find_help_files(folder), (merged,))
 
     def test_grok_guide_structure_version_and_commands(self) -> None:
         structure = HelpStructure(GROK_HTML)

@@ -35,7 +35,7 @@ CORE_MODULE_FILENAMES = (
 )
 # Both active tutorial formats are required in one documentation folder. The
 # original Reference Guide is retained for historical checks only.
-HELP_FILENAMES = ("MercPert-extended.html", "MercPert-short.html")
+HELP_FILENAMES = ("MercPert.html",)
 PROGRAM_NAME = "MercPert"
 
 
@@ -54,32 +54,27 @@ def find_module_dir(start: Path) -> Path:
     )
 
 
-def find_help_files(module_dir: Path) -> tuple[Path, Path]:
-    """Find both tutorials together in a flattened upload or documentation tree.
-
-    Documentation folders no longer use chapter-number prefixes, and the
-    Help files live under the sibling ``GFTGU-Documentation`` repository
-    rather than beside the program modules inside ``GFTGU-Programs``.
-    """
-    candidates = [module_dir / name for name in HELP_FILENAMES]
+def find_help_files(module_dir):
+    """Find the merged MercPert.html in the program or sibling docs tree."""
+    module_dir = Path(module_dir)
+    directories = [module_dir]
     for ancestor in (module_dir, *module_dir.parents):
-        for name in HELP_FILENAMES:
-            candidates.append(ancestor / "GFTGU-Documentation" / PROGRAM_NAME / name)
-            if ancestor.name != PROGRAM_NAME:
-                candidates.append(ancestor / PROGRAM_NAME / name)
-    for directory in dict.fromkeys(candidate.parent for candidate in candidates):
-        pair = tuple(directory / name for name in HELP_FILENAMES)
-        if all(path.is_file() for path in pair):
-            return pair
-    raise FileNotFoundError(
-        "Both MercPert-extended.html and MercPert-short.html must be in one folder "
-        f"beside the program or in GFTGU-Documentation/{PROGRAM_NAME}/."
-    )
+        directories.extend((ancestor / "GFTGU-Documentation" / "MercPert",
+                            ancestor / "MercPert-Documentation",
+                            ancestor / "MercPert-docs"))
+        if ancestor.name != "MercPert":
+            directories.append(ancestor / "MercPert")
+    for directory in directories:
+        candidate = directory / "MercPert.html"
+        if candidate.is_file():
+            return (candidate,)
+    raise FileNotFoundError("Could not find MercPert.html beside the program or in GFTGU-Documentation/MercPert/.")
 
 
 MODULE_DIR = find_module_dir(Path(__file__))
 HELP_FILES = find_help_files(MODULE_DIR)
-HELP_FILE, GROK_HELP_FILE = HELP_FILES
+HELP_FILE, = HELP_FILES
+GROK_HELP_FILE = HELP_FILE  # Existing scientific checks now read the same merged page.
 BEATS_HELP_FILE: Optional[Path] = HELP_FILE
 ORIGINAL_HELP_FILE = HELP_FILE.parent / "MercPert-original.html"
 
@@ -324,13 +319,16 @@ class MetadataAndCompatibilityTests(unittest.TestCase):
 class PairedTutorialTests(unittest.TestCase):
     """The short and long tutorials must describe the same executable build."""
 
-    def test_both_tutorials_are_required_together(self) -> None:
-        self.assertEqual(tuple(path.name for path in HELP_FILES), HELP_FILENAMES)
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            (root / HELP_FILENAMES[0]).write_text("only Claude", encoding="utf-8")
-            with self.assertRaisesRegex(FileNotFoundError, "Both MercPert"):
-                find_help_files(root)
+    def test_merged_help_is_required_and_archives_are_ignored(self):
+        with tempfile.TemporaryDirectory() as temp_name:
+            folder = Path(temp_name)
+            for suffix in ("short", "extended", "original", "java"):
+                (folder / "MercPert-{}.html".format(suffix)).write_text("archive", encoding="utf-8")
+            with self.assertRaisesRegex(FileNotFoundError, r"MercPert\.html"):
+                find_help_files(folder)
+            merged = folder / "MercPert.html"
+            merged.write_text("merged", encoding="utf-8")
+            self.assertEqual(find_help_files(folder), (merged,))
 
     def test_both_tutorials_share_version_cli_and_navigation(self) -> None:
         stamp = (re.escape(f"Version {physics.MODEL_VERSION}")

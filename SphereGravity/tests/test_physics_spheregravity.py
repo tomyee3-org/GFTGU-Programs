@@ -3,7 +3,7 @@
 The discovery logic deliberately supports both the repository layout
 (`tests/test_physics_spheregravity.py`) and a flattened upload in which this
 file is placed beside the four core modules. Both active Beats Help files,
-SphereGravity-extended.html and SphereGravity-short.html, are required together.
+SphereGravity.html and SphereGravity.html, are required together.
 The archived Reference Guide, SphereGravity-original.html, is optional.
 """
 
@@ -68,33 +68,28 @@ import plot_spheregravity as plotting
 
 
 # Active tutorials share one program. The archived Reference Guide is not an active Help.
-HELP_FILENAMES = ("SphereGravity-extended.html", "SphereGravity-short.html")
+HELP_FILENAMES = ("SphereGravity.html",)
 
 
 def find_help_files(module_dir):
-    """Find the paired tutorials in one flattened or sibling documentation folder.
-
-    Documentation folders no longer use chapter-number prefixes, and the
-    Help files live under the sibling ``GFTGU-Documentation`` repository
-    rather than beside the program modules inside ``GFTGU-Programs``.
-    """
-    program_name = "SphereGravity"
-    candidates = [module_dir]
+    """Find the merged SphereGravity.html in the program or sibling docs tree."""
+    module_dir = Path(module_dir)
+    directories = [module_dir]
     for ancestor in (module_dir, *module_dir.parents):
-        candidates.append(ancestor / "GFTGU-Documentation" / program_name)
-        if ancestor.name != program_name:
-            candidates.append(ancestor / program_name)
-    for folder in candidates:
-        pair = tuple(folder / name for name in HELP_FILENAMES)
-        if all(path.is_file() for path in pair):
-            return pair
-    raise FileNotFoundError(
-        "Both SphereGravity-extended.html and SphereGravity-short.html are required "
-        "beside the program or in GFTGU-Documentation/SphereGravity/."
-    )
+        directories.extend((ancestor / "GFTGU-Documentation" / "SphereGravity",
+                            ancestor / "SphereGravity-Documentation",
+                            ancestor / "SphereGravity-docs"))
+        if ancestor.name != "SphereGravity":
+            directories.append(ancestor / "SphereGravity")
+    for directory in directories:
+        candidate = directory / "SphereGravity.html"
+        if candidate.is_file():
+            return (candidate,)
+    raise FileNotFoundError("Could not find SphereGravity.html beside the program or in GFTGU-Documentation/SphereGravity/.")
 
 
-HELP_FILE, GROK_FILE = find_help_files(MODULE_DIR)
+HELP_FILE, = find_help_files(MODULE_DIR)
+GROK_FILE = HELP_FILE  # Existing scientific checks now read the same merged page.
 
 
 class HelpHTMLParser(HTMLParser):
@@ -173,7 +168,7 @@ class TestPortableDiscovery(unittest.TestCase):
 
     def test_missing_module_set_raises_clear_error(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
-            with self.assertRaisesRegex(FileNotFoundError, "SphereGravity modules"):
+            with self.assertRaisesRegex(FileNotFoundError, r"SphereGravity modules"):
                 find_module_dir(temporary_directory)
 
 
@@ -1799,16 +1794,16 @@ class TestPairedTutorials(unittest.TestCase):
         self.assertIn('class="nav-label"', block(grok, "nav"))
         self.assertIn("IntersectionObserver", grok)
 
-    def test_discovery_requires_both_tutorials_in_the_same_folder(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            folder = Path(temporary)
-            for name in CORE_MODULE_FILENAMES:
-                (folder / name).write_text("# fixture\n", encoding="utf-8")
-            (folder / HELP_FILENAMES[0]).write_text("Claude", encoding="utf-8")
-            with self.assertRaisesRegex(FileNotFoundError, "Both SphereGravity-extended.html and SphereGravity-short.html"):
+    def test_merged_help_is_required_and_archives_are_ignored(self):
+        with tempfile.TemporaryDirectory() as temp_name:
+            folder = Path(temp_name)
+            for suffix in ("short", "extended", "original", "java"):
+                (folder / "SphereGravity-{}.html".format(suffix)).write_text("archive", encoding="utf-8")
+            with self.assertRaisesRegex(FileNotFoundError, r"SphereGravity\.html"):
                 find_help_files(folder)
-            (folder / HELP_FILENAMES[1]).write_text("Grok", encoding="utf-8")
-            self.assertEqual(tuple(path.name for path in find_help_files(folder)), HELP_FILENAMES)
+            merged = folder / "SphereGravity.html"
+            merged.write_text("merged", encoding="utf-8")
+            self.assertEqual(find_help_files(folder), (merged,))
 
     def test_grok_structure_and_student_scope(self):
         source = GROK_FILE.read_text(encoding="utf-8")
@@ -1898,7 +1893,7 @@ class TestSharedSampleOutputs(unittest.TestCase):
     def test_instructor_guide_has_no_development_review_jargon(self):
         guide = SAMPLE_GUIDE.read_text(encoding="utf-8")
         visible = re.sub(r'data:image/png;base64,[A-Za-z0-9+/=]+', '', guide)
-        visible = visible.replace('SphereGravity-extended.html', '').replace('SphereGravity-short.html', '')
+        visible = visible.replace('SphereGravity.html', '').replace('SphereGravity.html', '')
         self.assertNotRegex(visible.lower(), r'\b(?:codex|audit\d*|kickoff|xedoc|anthropic)\b')
 
     def test_figures_have_executable_commands_in_both_tutorials(self):
@@ -1913,7 +1908,7 @@ class TestSharedSampleOutputs(unittest.TestCase):
                 self.assertIn(command, section_html(claude, beat))
                 self.assertIn(command, section_html(grok, beat))
                 self.assertIn(beat_run(command).exit_code, (None, 0))
-        self.assertIn("SphereGravity-short.html", guide)
+        self.assertIn("SphereGravity.html", guide)
         self.assertIn(physics.BUILD_ID, guide)
 
     def test_embedded_figures_are_valid_indexed_pngs(self):
