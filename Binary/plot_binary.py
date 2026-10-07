@@ -145,7 +145,7 @@ def plot_binary(result: BinaryResult, output_type: OutputType,
     else:
         raise ValueError(f"Unknown output_type: {output_type}")
 
-    if frame == "com":
-        ax.set_title(ax.get_title() + " (COM frame)")
+    frame_label = "COM" if frame == "com" else "USER"
+    ax.set_title(ax.get_title() + f" ({frame_label} frame)")
     plt.tight_layout()
     plt.show()

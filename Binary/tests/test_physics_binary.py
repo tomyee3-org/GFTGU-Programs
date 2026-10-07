@@ -1140,7 +1140,7 @@ class TestPlotting(unittest.TestCase):
                 self.assertEqual(tuple(axis.get_legend_handles_labels()[1]), labels)
                 self.assertEqual(axis.get_xlabel(), xlabel)
                 self.assertEqual(axis.get_ylabel(), ylabel)
-                self.assertEqual(axis.get_title(), title)
+                self.assertEqual(axis.get_title(), title + " (USER frame)")
 
     def test_equal_aspect_outputs(self):
         for output_type in ("orbit", "orbits", "velocity space"):
@@ -1918,7 +1918,7 @@ class TestCommandLineWiring(unittest.TestCase):
             with self.subTest(selector=selector), mock.patch.object(plotting.plt, "show"), \
                  redirect_stdout(io.StringIO()):
                 entry.main(["--max_steps", "3", "--output_type", selector])
-                self.assertEqual(plotting.plt.gcf().axes[0].get_title(), title)
+                self.assertEqual(plotting.plt.gcf().axes[0].get_title(), title + " (USER frame)")
                 plotting.plt.close("all")
 
     def test_the_summary_is_printed_before_the_plot_window_opens(self):
@@ -4910,6 +4910,16 @@ class TestCentreOfMassDisplay(unittest.TestCase):
                     self.assertEqual(list(line.get_ydata()), ys)
                 plotting.plt.close("all")
 
+    def test_explicit_and_default_user_views_identify_the_frame(self):
+        for output_type in entry.OUTPUT_TYPES.values():
+            for explicit in (False, True):
+                with self.subTest(output_type=output_type, explicit=explicit):
+                    with mock.patch.object(plotting.plt, "show"):
+                        options = {"frame": "user"} if explicit else {}
+                        plotting.plot_binary(self.result, output_type, **options)
+                    self.assertTrue(plotting.plt.gca().get_title().endswith(" (USER frame)"))
+                    plotting.plt.close("all")
+
     def test_frame_values_are_validated(self):
         self.assertEqual(entry.parse_args([]).frame, "user")
         self.assertEqual(entry.parse_args(["--frame", "com"]).frame, "com")
@@ -4943,10 +4953,15 @@ class TestCentreOfMassDisplay(unittest.TestCase):
         for path in (HELP_FILE, GROK_HELP_FILE):
             body = section_html(path.read_text(encoding="utf-8"), "beat2")
             commands = documented_commands(body)
-            self.assertIn(["--vInitA", "60000", "--vInitB", "60000"], commands)
-            self.assertIn(["--vInitA", "60000", "--vInitB", "60000", "--frame", "com"], commands)
-            self.assertIn(["--vInitA", "60000", "--vInitB", "60000", "--frame", "com",
-                           "--output_type", "energy_vs_time"], commands)
+            boosted = [entry.parse_args(command) for command in commands
+                       if entry.parse_args(command).vInitA == 60000
+                       and entry.parse_args(command).vInitB == 60000]
+            views = {(args.frame, args.output_type) for args in boosted}
+            self.assertTrue({("user", "orbits"), ("com", "orbits"),
+                             ("com", "energy_vs_time")} <= views)
+            for args in boosted:
+                self.assertEqual((args.xInitA, args.xInitB, args.yInitA, args.yInitB),
+                                 (4.6e10, -4.6e10, 0.0, 0.0))
             self.assertIn("Galilean", body)
             self.assertIn("input frame", body)
             self.assertIn("printed summary", body)

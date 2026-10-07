@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from math import frexp, fsum, hypot, isfinite, ldexp, pi, sqrt
 from numbers import Real
 
-MODEL_VERSION = "1.3.0"
+MODEL_VERSION = "1.3.1"
 
 
 #: The exact source files this build identifier covers: a documentation-only

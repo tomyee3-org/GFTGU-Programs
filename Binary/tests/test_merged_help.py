@@ -87,6 +87,15 @@ class MergedHelpTests(unittest.TestCase):
         missing = set(self.page.fragments) - set(self.page.ids) - {""}
         self.assertFalse(missing, "Missing anchors: " + str(sorted(missing)))
 
+    def test_solar_reflex_investigation_covers_b1(self):
+        experiment = re.search(r'<div class="scenario-card" id="exp6">(.*?)</div>',
+                               self.source, re.S)
+        self.assertIsNotNone(experiment)
+        text = " ".join(unescape(re.sub(r"<[^>]+>", " ", experiment.group(1))).split())
+        for topic in ("Sun", "Jupiter", "Saturn", "Earth", "Sun's own size",
+                      "--frame com", "Multiple"):
+            self.assertIn(topic, text)
+
     def test_main_commands_use_recognized_options(self):
         run = subprocess.run([sys.executable, "main.py", "--help"], cwd=MODULE_DIR,
                              capture_output=True, text=True, timeout=30)

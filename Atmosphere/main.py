@@ -23,6 +23,11 @@ profile. Every user-facing model input can be set at the command line:
 ``--no_show``
     Do not open a plot window. Useful with ``--save_plot`` or in batch runs.
 
+``--log`` and ``--no-log``
+    Use a logarithmic vertical axis for the selected pressure, density, or
+    temperature. Altitude stays linear. The default is ``--no-log``; only
+    the plot scale changes, not the integration or the checkpoint table.
+
 ``--p0 VALUE``
     Positive, finite pressure at altitude zero in pascals (default 101300).
 
@@ -249,6 +254,12 @@ def parse_args(argv=None):
         ),
     )
     parser.add_argument(
+        "--log",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="logarithmic vertical quantity axis; altitude stays linear",
+    )
+    parser.add_argument(
         "--save_plot",
         type=_nonempty_path,
         default=None,
@@ -335,6 +346,7 @@ def main(argv=None):
             extract_output(result),
             save_path=args.save_plot,
             show=not args.no_show,
+            log=args.log,
         )
     except (OSError, ValueError) as exc:
         raise SystemExit(f"Atmosphere plot error: {exc}") from exc

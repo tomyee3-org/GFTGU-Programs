@@ -9,7 +9,7 @@ import math
 from numbers import Real
 from typing import List, Optional, Tuple
 
-MODEL_VERSION = "1.6.0"
+MODEL_VERSION = "1.7.0"
 
 
 #: The exact source files this build identifier covers: a documentation-only
