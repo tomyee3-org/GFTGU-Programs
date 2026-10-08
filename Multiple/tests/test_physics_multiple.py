@@ -1981,10 +1981,9 @@ class TestTestParticles(unittest.TestCase):
                                           test_velocities_init=[[0, 0, 0], [0, 0, 0]]),
             "non-finite": dict(test_positions_init=[[np.nan, 0, 0]],
                                test_velocities_init=[[0, 0, 0]]),
-            "starts inside removal radius": dict(good, removal_radii=[4.0 * AU, 0.0]),
-            "starts beyond escape radius": dict(good, escape_radius=2.0 * AU),
-            "starts on a body": dict(test_positions_init=[[-7.4241e8, 0.0, 0.0]],
-                                     test_velocities_init=[[0, 0, 0]]),
+            "starts on a body with no removal radius": dict(
+                test_positions_init=[[-7.4241e8, 0.0, 0.0]],
+                test_velocities_init=[[0, 0, 0]]),
             "removal radii length": dict(good, removal_radii=[1.0]),
             "negative removal radius": dict(good, removal_radii=[-1.0, 0.0]),
             "zero escape radius": dict(good, escape_radius=0.0),
@@ -1998,6 +1997,155 @@ class TestTestParticles(unittest.TestCase):
         # The same storage request is fine when nothing is stored per step.
         driver._validate_params(sun_jupiter_params(
             output_type="survival", max_steps=driver.MAX_TEST_PARTICLE_STATES, **good))
+
+    def test_particles_starting_inside_a_removal_zone_are_removed_at_once(self):
+        # Inside the Sun's removal radius, inside Jupiter's Hill radius,
+        # beyond the escape radius, exactly on the Sun (radius > 0), and one
+        # ordinary particle that must be unaffected.
+        positions = [[0.5 * AU, 0.0, 0.0], [5.1 * AU, 0.0, 0.0],
+                     [0.0, 30.0 * AU, 0.0], [-7.4241e8, 0.0, 0.0],
+                     [3.0 * AU, 0.0, 0.0]]
+        velocities = [[0.0, 0.0, 0.0]] * 4 + [[0.0, 17200.0, 0.0]]
+        for output_type in ("trajectories", "survival", "animation"):
+            with self.subTest(output_type=output_type):
+                result = driver.run_simulation(sun_jupiter_params(
+                    output_type=output_type, max_steps=5, frame_time=1.5e6,
+                    test_positions_init=positions, test_velocities_init=velocities,
+                    removal_radii=[AU, 0.355 * AU], escape_radius=20.0 * AU))
+                info = result["test_particles"]
+                self.assertEqual(info["fate"],
+                                 ["encounter", "encounter", "escaped", "encounter", "survived"])
+                self.assertEqual(list(info["removal_body"]), [1, 2, 0, 1, 0])
+                np.testing.assert_array_equal(info["removal_time_s"][:4], 0.0)
+                self.assertEqual(info["phase_motion"][:4], ["-"] * 4)
+                key = {"trajectories": "test_positions", "animation": "test_frame_positions"}
+                if output_type in key:
+                    stored = result[key[output_type]]
+                    self.assertTrue(np.all(np.isnan(stored[:, :4])))
+                    self.assertTrue(np.all(np.isfinite(stored[:, 4])))
+
+    def test_phase_motion_classification(self):
+        classify = driver.classify_phase_motion
+        self.assertEqual(classify(25.0, 160.0), "tadpole L4")
+        self.assertEqual(classify(-160.0, -25.0), "tadpole L5")
+        self.assertEqual(classify(385.0, 520.0), "tadpole L4")      # one turn later
+        self.assertEqual(classify(20.0, 340.0), "horseshoe")
+        self.assertEqual(classify(-340.0, -20.0), "horseshoe")
+        self.assertEqual(classify(-10.0, 30.0), "circulating")    # passed the body
+        self.assertEqual(classify(0.0, 400.0), "circulating")
+        self.assertEqual(classify(float("nan"), 1.0), "-")
+
+    def test_co_orbital_particles_are_classified_by_their_angle_path(self):
+        # On Jupiter's own circle, starting 60 degrees ahead gives a tadpole
+        # about L4, 60 degrees behind a tadpole about L5, and 20 degrees ahead
+        # a horseshoe; a particle at 3 AU circulates.
+        radius = 5.2026 * AU
+        phases = np.radians([60.0, -60.0, 20.0, 0.0])
+        pos, vel = phys.ring_test_particle_states(
+            [radius, radius, radius, 3.0 * AU], 1.0 + 9.548e-4, phases_rad=phases)
+        result = driver.run_simulation(sun_jupiter_params(
+            output_type="survival", max_steps=8000, dt=1.5e6,
+            test_positions_init=pos.tolist(), test_velocities_init=vel.tolist(),
+            removal_radii=[6.96e8, 5.31e10], escape_radius=3e12))
+        info = result["test_particles"]
+        self.assertEqual(info["fate"], ["survived"] * 4)
+        self.assertEqual(info["phase_motion"],
+                         ["tadpole L4", "tadpole L5", "horseshoe", "circulating"])
+        self.assertEqual(info["phase_reference_body"], 2)
+        # Starting exactly at L4 or L5, the angle barely moves.
+        self.assertLess(info["phase_max_deg"][0] - info["phase_min_deg"][0], 10.0)
+        self.assertLess(info["phase_max_deg"][1] - info["phase_min_deg"][1], 10.0)
+        np.testing.assert_allclose(info["initial_phase_deg"], [60.0, -60.0, 20.0, 0.0],
+                                   atol=0.1)
+
+    def test_cli_random_phases_per_radius_and_seed(self):
+        base = ["--n_bodies", "2", "--masses_solar", "1,9.548e-4",
+                "--positions_init", "-7.4241e8,0,0;7.77555e11,0,0",
+                "--velocities_init", "0,-12.462,0;0,13051.96,0",
+                "--test_ring", "7.0e11,8.0e11,3", "--test_ring_per_radius", "4"]
+        golden = entry.test_particle_initial_states(entry.parse_args(base))[0]
+        first = entry.test_particle_initial_states(
+            entry.parse_args(base + ["--test_phases", "random", "--test_seed", "7"]))[0]
+        again = entry.test_particle_initial_states(
+            entry.parse_args(base + ["--test_phases", "random", "--test_seed", "7"]))[0]
+        other = entry.test_particle_initial_states(
+            entry.parse_args(base + ["--test_phases", "random", "--test_seed", "8"]))[0]
+        self.assertEqual(len(golden), 12)
+        self.assertEqual(first, again)
+        self.assertNotEqual(first, other)
+        com = phys.center_of_mass([[-7.4241e8, 0, 0], [7.77555e11, 0, 0]], [1, 9.548e-4])
+        radii = np.linalg.norm(np.array(first) - com, axis=1)
+        np.testing.assert_allclose(radii, np.repeat([7.0e11, 7.5e11, 8.0e11], 4), rtol=1e-12)
+        golden_angles = np.arctan2(np.array(golden)[:, 1] - com[1], np.array(golden)[:, 0] - com[0])
+        np.testing.assert_allclose(np.mod(np.diff(golden_angles), 2 * np.pi),
+                                   phys.GOLDEN_ANGLE, rtol=1e-9)
+        for extra in (["--test_ring_per_radius", "0"], ["--test_phases", "uniform"],
+                      ["--test_seed", "-1"]):
+            with self.subTest(extra=extra), contextlib.redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit):
+                entry.parse_args(base + extra)
+        for extra in (["--test_ring_per_radius", "2"], ["--test_phases", "random"]):
+            with self.subTest(extra=extra), contextlib.redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit):
+                entry.parse_args(extra)
+
+    def test_end_positions_of_survivors_are_recorded_and_plotted(self):
+        radius = 5.2026 * AU
+        pos, vel = phys.ring_test_particle_states(
+            [radius, radius, 3.0 * AU, 5.1 * AU], 1.0 + 9.548e-4,
+            phases_rad=np.radians([60.0, 20.0, 0.0, 0.0]))
+        params = dict(max_steps=8000, dt=1.5e6, test_positions_init=pos.tolist(),
+                      test_velocities_init=vel.tolist(), removal_radii=[6.96e8, 5.31e10],
+                      escape_radius=3e12)
+        survival = driver.run_simulation(sun_jupiter_params(output_type="survival", **params))
+        info = survival["test_particles"]
+        self.assertEqual(info["phase_motion"], ["tadpole L4", "horseshoe", "circulating", "-"])
+        self.assertTrue(0.0 < info["final_phase_deg"][0] < 180.0)
+        self.assertTrue(np.isnan(info["final_phase_deg"][3]))
+        self.assertTrue(np.isnan(info["final_distance_m"][3]))
+        self.assertAlmostEqual(info["final_distance_m"][2] / AU, 3.0, delta=0.1)
+        # Jupiter's distance from the centre of mass is a / (1 + m_J / M_sun).
+        self.assertAlmostEqual(info["reference_final_distance_m"] / AU,
+                               5.2026 / (1.0 + 9.548e-4), delta=1e-3)
+        trajectories = driver.run_simulation(sun_jupiter_params(
+            output_type="trajectories", **dict(params, max_steps=50)))
+        np.testing.assert_array_equal(trajectories["final_massive_positions"],
+                                      trajectories["positions"][-1])
+        np.testing.assert_array_equal(trajectories["final_massive_velocities"],
+                                      trajectories["velocities"][-1])
+        with mock.patch.object(plotting.plt, "show"):
+            plotting.plot_survivor_positions(survival)
+            plotting.plt.close("all")
+        none_secure = dict(survival, test_particles=dict(
+            info, phase_motion=["horseshoe", "horseshoe", "horseshoe", "-"]))
+        with self.assertRaises(ValueError):
+            plotting.plot_survivor_positions(none_secure)
+        with self.assertRaises(ValueError):
+            plotting.plot_survivor_positions({"type": "survival"})
+
+    def test_survival_command_opens_the_end_position_window_second(self):
+        command = ["--n_bodies", "2", "--masses_solar", "1,9.548e-4",
+                   "--positions_init", "-7.4241e8,0,0;7.77555e11,0,0",
+                   "--velocities_init", "0,-12.462,0;0,13051.96,0",
+                   "--dt", "1.5e6", "--eps1", "0.05", "--output_type", "survival",
+                   "--removal_radii", "6.96e8,5.31e10", "--escape_radius", "3e12"]
+        calls = []
+        with mock.patch.object(entry, "plot_survival", lambda r: calls.append("survival")), \
+                mock.patch.object(entry, "plot_survivor_positions",
+                                  lambda r: calls.append("positions")), \
+                contextlib.redirect_stdout(io.StringIO()):
+            entry.main(command + ["--max_steps", "20", "--test_ring", "4.5e11,4.6e11,2"])
+        self.assertEqual(calls, ["survival", "positions"])
+        calls.clear()
+        output = io.StringIO()
+        with mock.patch.object(entry, "plot_survival", lambda r: calls.append("survival")), \
+                mock.patch.object(entry, "plot_survivor_positions",
+                                  lambda r: calls.append("positions")), \
+                contextlib.redirect_stdout(output):
+            # A single particle starting inside the Sun's removal radius.
+            entry.main(command + ["--max_steps", "2", "--test_ring", "5e8,5e8,1"])
+        self.assertEqual(calls, ["survival"])
+        self.assertIn("end-position plot is skipped", output.getvalue())
 
     def test_plots_accept_test_particles_and_reject_bad_survival_results(self):
         result = driver.run_simulation(sun_jupiter_params(
@@ -2104,6 +2252,38 @@ class TestBeat9Help(unittest.TestCase):
             output_type=args.output_type, test_positions_init=test_positions,
             test_velocities_init=test_velocities, removal_radii=args.removal_radii,
             escape_radius=args.escape_radius, test_center=args.test_center))
+
+    def test_beat9_trojan_numbers(self):
+        args = self.command("beat9", 1)
+        self.assertEqual((args.test_ring_per_radius, args.test_phases, args.test_seed),
+                         (24, "random", 1))
+        result = self.run_command(args)
+        info = result["test_particles"]
+        survivors = [p for p, f in zip(info["phase_motion"], info["fate"]) if f == "survived"]
+        self.assertEqual(result["n_test_particles"], 216)
+        self.assertEqual(int(np.sum(info["removal_time_s"] == 0.0)), 4)
+        self.assertEqual(len(survivors), 189)
+        self.assertEqual([survivors.count(name) for name in
+                          ("tadpole L4", "tadpole L5", "horseshoe", "circulating")],
+                         [72, 72, 44, 1])
+        tadpoles = np.array([p.startswith("tadpole") for p in info["phase_motion"]])
+        self.assertGreaterEqual(np.min(np.abs(info["initial_phase_deg"][tadpoles])), 26.0)
+        self.assertLess(np.min(np.abs(info["initial_phase_deg"][tadpoles])), 27.0)
+        self.assertAlmostEqual(result["final_time"] / YEAR, 950.6, places=1)
+        motion = np.array(info["phase_motion"])
+        ends = info["final_phase_deg"]
+        l4, l5 = motion == "tadpole L4", motion == "tadpole L5"
+        self.assertEqual((round(np.min(ends[l4])), round(np.max(ends[l4]))), (27, 162))
+        self.assertEqual((round(-np.max(ends[l5])), round(-np.min(ends[l5]))), (29, 156))
+        tadpole_distance = info["final_distance_m"][l4 | l5] / AU
+        self.assertEqual((round(np.min(tadpole_distance), 2), round(np.max(tadpole_distance), 2)),
+                         (4.96, 5.46))
+        text = " ".join(self.section("beat9").split())
+        for claim in ("between 27° and 162° ahead", "between 29° and 156° behind",
+                      "between 4.96 and 5.46 AU", "Of the 216 particles, 4 start", "After 951 years, 189 survive",
+                      "72 are tadpoles at L4 and 72 at L5, 44 are horseshoes and 1 circulates",
+                      "at least 26°"):
+            self.assertIn(claim, text)
 
     def test_beat9_jupiter_clearing_numbers(self):
         args = self.command("beat9")

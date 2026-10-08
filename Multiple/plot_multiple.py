@@ -12,6 +12,12 @@ from physics_multiple import center_of_mass, positions_in_display_frame
 
 _COLORS = ["red", "green", "blue", "orange", "purple", "brown"]
 _TEST_COLOR = "0.45"   # grey for massless test particles
+# Survival plots: survivors in blues and greens, horseshoes in gold (they
+# survived the run but are not secure), removed particles in reds.
+_TADPOLE_COLOR = "#1f3fbf"
+_HORSESHOE_COLOR = "#e6b800"
+_CIRCULATING_COLOR = "#2ca02c"
+_EDGE = {_HORSESHOE_COLOR: "#b38f00"}
 AU_M = 1.495978707e11
 YEAR_S = 365.25 * 86400.0
 
@@ -622,11 +628,20 @@ def animate_multiple(result: Dict[str, Any]):
 
 
 def plot_survival(result: Dict[str, Any]) -> None:
-    """Plot each test particle's survival time against its starting distance.
+    """Plot test-particle survival against starting distance and angle.
 
-    Removed particles are plotted at their removal time; survivors are drawn
-    at the end of the run with an upward triangle, since they would have
-    lasted at least that long.
+    Left panel: survival time against starting distance. Removed particles
+    are plotted at their removal time; survivors at the end of the run with
+    an upward triangle, since they lasted at least that long; particles
+    removed at the start sit on the bottom edge with a cross.
+
+    Survivors are drawn in greens and blues, removed particles in reds.
+
+    Right panel: starting angle, measured from the reference body, against
+    starting distance, marked by fate. Bands of survivors at particular
+    angles (such as near +60 and -60 degrees at a planet's own distance)
+    show where position along the orbit, not just distance, decides
+    survival.
     """
     _require_result_mapping(result, "plot_survival")
     info = result.get("test_particles")
@@ -645,30 +660,173 @@ def plot_survival(result: Dict[str, Any]) -> None:
     if distance.ndim != 1 or distance.size == 0 or removal.shape != distance.shape \
             or len(fates) != distance.size:
         raise ValueError("test-particle arrays must be one-dimensional and matching.")
+    phase = info.get("initial_phase_deg")
+    if phase is not None:
+        phase = np.asarray(phase, dtype=float)
+        if phase.shape != distance.shape:
+            raise ValueError("initial_phase_deg must match the other test-particle arrays.")
 
+    fate_array = np.array(fates)
+    at_start = (removal == 0.0) & (fate_array != "survived")
     styles = {
-        "escaped": ("tab:red", "o", "escaped"),
-        "encounter": ("tab:blue", "s", "encounter"),
-        "numerical": ("tab:purple", "x", "numerical failure"),
-        "survived": ("tab:green", "^", "survived the whole run"),
+        "escaped": ("#ff7f0e", "o", "escaped"),
+        "encounter": ("#d62728", "s", "encounter"),
+        "numerical": ("#8b0000", "x", "numerical failure"),
+        "survived": ("#2ca02c", "^", "survived the whole run"),
     }
-    fig, ax = plt.subplots()
+    marker_size = 6 if distance.size <= 100 else 3
+    if phase is None:
+        fig, ax = plt.subplots()
+        axes = (ax,)
+    else:
+        fig, axes = plt.subplots(1, 2, figsize=(13, 4.8))
+    ax = axes[0]
     for fate, (color, marker, label) in styles.items():
-        chosen = np.array([f == fate for f in fates])
+        chosen = (fate_array == fate) & ~at_start
         if not np.any(chosen):
             continue
         times = np.full(int(np.sum(chosen)), final_time) if fate == "survived" \
             else removal[chosen]
         ax.plot(distance[chosen], times, linestyle="none", marker=marker,
-                color=color, label=label)
+                markersize=marker_size, color=color, label=label)
     ax.set_yscale("log")
+    if np.any(at_start):
+        bottom = ax.get_ylim()[0]
+        ax.plot(distance[at_start], np.full(int(np.sum(at_start)), bottom),
+                linestyle="none", marker="x", markersize=marker_size,
+                color="#ff9896", label="removed at the start", clip_on=False)
+        ax.set_ylim(bottom=bottom)
     center = info.get("center", "the centre")
     if center == "com":
         center = "the centre of mass"
     ax.set_xlabel(f"starting distance from {center} (AU)")
     ax.set_ylabel("survival time (years)")
-    ax.set_title(f"Multiple test-particle survival ({final_time:.4g}-year run)")
+    ax.set_title(f"Survival time ({final_time:.4g}-year run)")
     ax.grid(True, which="both", alpha=0.3)
-    ax.legend()
+    ax.legend(fontsize="small")
+
+    if phase is not None:
+        ax = axes[1]
+        motion = np.array(info.get("phase_motion", ["-"] * distance.size))
+        if motion.shape != distance.shape:
+            raise ValueError("phase_motion must match the other test-particle arrays.")
+        for fate, (color, marker, label) in styles.items():
+            if fate == "survived":
+                continue
+            chosen = (fate_array == fate) & ~at_start
+            if np.any(chosen):
+                ax.plot(distance[chosen], phase[chosen], linestyle="none",
+                        marker=marker, markersize=marker_size, color=color,
+                        label=label)
+        survivor_styles = (
+            (("tadpole L4", "tadpole L5"), _TADPOLE_COLOR, "D", "survived: tadpole"),
+            (("horseshoe",), _HORSESHOE_COLOR, "v", "survived: horseshoe"),
+            (("circulating", "-"), _CIRCULATING_COLOR, "^", "survived: circulating"),
+        )
+        for names, color, marker, label in survivor_styles:
+            chosen = (fate_array == "survived") & np.isin(motion, names)
+            if np.any(chosen):
+                ax.plot(distance[chosen], phase[chosen], linestyle="none",
+                        marker=marker, markersize=marker_size, color=color,
+                        markeredgecolor=_EDGE.get(color, color),
+                        markeredgewidth=0.5, label=label)
+        if np.any(at_start):
+            ax.plot(distance[at_start], phase[at_start], linestyle="none",
+                    marker="x", markersize=marker_size, color="#ff9896",
+                    label="removed at the start")
+        reference = info.get("phase_reference_body", "?")
+        ax.set_xlabel(f"starting distance from {center} (AU)")
+        ax.set_ylabel(f"starting angle from body {reference} (degrees)")
+        ax.set_ylim(-180.0, 180.0)
+        ax.set_yticks(np.arange(-180, 181, 60))
+        ax.set_title("Fate by starting position")
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize="small", loc="upper left", bbox_to_anchor=(1.02, 1.0))
+    fig.suptitle("Multiple test-particle survival")
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_survivor_positions(result: Dict[str, Any]) -> None:
+    """Show where the secure survivors are at the end of a run.
+
+    Only survivors whose angle path is a tadpole (blue) or circulating
+    (green) are drawn; removed particles and every horseshoe are left out.
+    Angles are measured from the reference body, so both panels are views
+    in the frame that turns with it.
+
+    Left: ending angle against ending distance, on the same axes as the
+    starting-angle panel of plot_survival. Right: the same points seen from
+    above, with the centre in the middle, the reference body fixed on the
+    right, and its L4 and L5 points 60 degrees ahead and behind.
+    """
+    _require_result_mapping(result, "plot_survivor_positions")
+    info = result.get("test_particles")
+    if not isinstance(info, dict):
+        raise ValueError("plot_survivor_positions requires a result with test particles.")
+    try:
+        angle = np.asarray(info["final_phase_deg"], dtype=float)
+        distance = np.asarray(info["final_distance_m"], dtype=float) / AU_M
+        motion = np.asarray(info["phase_motion"])
+        fates = np.asarray(info["fate"])
+        reference_distance = float(info["reference_final_distance_m"]) / AU_M
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "test_particles must contain final_phase_deg, final_distance_m, "
+            "phase_motion, fate and reference_final_distance_m."
+        ) from exc
+    if not (angle.shape == distance.shape == motion.shape == fates.shape) \
+            or angle.ndim != 1:
+        raise ValueError("test-particle arrays must be one-dimensional and matching.")
+    tadpole = (fates == "survived") & np.isin(motion, ("tadpole L4", "tadpole L5"))
+    circulating = (fates == "survived") & (motion == "circulating")
+    if not np.any(tadpole | circulating):
+        raise ValueError("No tadpole or circulating survivors to show.")
+
+    reference = info.get("phase_reference_body", "?")
+    center = info.get("center", "the centre")
+    if center == "com":
+        center = "the centre of mass"
+    size = 6 if np.sum(tadpole | circulating) <= 100 else 3
+    groups = ((tadpole, _TADPOLE_COLOR, "D", "tadpole (Trojan)"),
+              (circulating, _CIRCULATING_COLOR, "^", "circulating"))
+
+    fig = plt.figure(figsize=(13, 5.6))
+    flat = fig.add_subplot(1, 2, 1)
+    polar = fig.add_subplot(1, 2, 2, projection="polar")
+    for chosen, color, marker, label in groups:
+        if not np.any(chosen):
+            continue
+        flat.plot(distance[chosen], angle[chosen], linestyle="none", marker=marker,
+                  markersize=size, color=color, label=label)
+        polar.plot(np.radians(angle[chosen]), distance[chosen], linestyle="none",
+                   marker=marker, markersize=size, color=color, label=label)
+    for lagrange, name in ((60.0, "L4"), (-60.0, "L5")):
+        flat.axhline(lagrange, color="0.5", linewidth=0.8, linestyle="--")
+        flat.annotate(name, (1.0, lagrange), xycoords=("axes fraction", "data"),
+                      xytext=(4, 0), textcoords="offset points", va="center",
+                      color="0.35")
+        polar.plot([np.radians(lagrange)], [reference_distance], marker="o",
+                   markersize=9, markerfacecolor="none", markeredgecolor="0.35",
+                   linestyle="none")
+        polar.annotate(name, (np.radians(lagrange), 1.12 * reference_distance),
+                       ha="center", va="center", color="0.25", fontweight="bold")
+    polar.plot([0.0], [reference_distance], marker="*", markersize=14, color="black",
+               linestyle="none", label=f"body {reference}")
+    polar.plot([0.0], [0.0], marker="+", markersize=10, color="black", linestyle="none")
+    flat.set_xlabel(f"ending distance from {center} (AU)")
+    flat.set_ylabel(f"ending angle from body {reference} (degrees)")
+    flat.set_ylim(-180.0, 180.0)
+    flat.set_yticks(np.arange(-180, 181, 60))
+    flat.grid(True, alpha=0.3)
+    flat.set_title("Ending angle against ending distance")
+    flat.legend(fontsize="small", loc="lower left")
+    polar.set_rlim(0.0, 1.1 * max(float(np.nanmax(distance)), reference_distance))
+    polar.set_title(f"Seen from above, turning with body {reference} (distances in AU)",
+                    pad=18)
+    polar.legend(fontsize="small", loc="upper left", bbox_to_anchor=(1.05, 1.0))
+    final_time = float(result.get("final_time", np.nan)) / YEAR_S
+    fig.suptitle(f"Secure survivors at the end of the {final_time:.4g}-year run "
+                 "(horseshoes and removed particles not shown)")
     plt.tight_layout()
     plt.show()

@@ -7,7 +7,7 @@ import numpy as np
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.7.0"
+MODEL_VERSION = "1.8.0"
 BUILD_ID_COVERS = (
     "physics_multiple.py",
     "driver_multiple.py",

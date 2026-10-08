@@ -24,12 +24,16 @@ Run ``python main.py --help`` for defaults and examples. Inputs:
   --test_positions_init, --test_velocities_init: optional massless test
       particles (x,y,z triples, as for the massive bodies). Test particles
       feel the massive bodies but pull on nothing.
-  --test_ring: "R_MIN,R_MAX,N" places N test particles on circular orbits
-      with radii evenly spaced from R_MIN to R_MAX metres in the x-y plane.
+  --test_ring: "R_MIN,R_MAX,N" places test particles on circular orbits at N
+      radii evenly spaced from R_MIN to R_MAX metres in the x-y plane.
+  --test_ring_per_radius: particles at each ring radius (default 1).
+  --test_phases: golden (each particle 137.5 degrees round from the last) or
+      random (uniform starting angles from --test_seed, reproducible).
   --test_center: com or a body number; the centre of --test_ring and the
       reference for each test particle's starting distance, a and e.
   --removal_radii: one radius per massive body [m]; a test particle that
-      comes this close is removed as an encounter.
+      comes this close is removed as an encounter (at t = 0 if it starts
+      that close).
   --escape_radius: a test particle farther than this from the massive
       bodies' centre of mass is removed as escaped [m].
   --output_type survival: no plot of paths; record when each test particle
@@ -46,10 +50,12 @@ import csv
 import math
 import sys
 
+import numpy as np
+
 import physics_multiple as phys
 from driver_multiple import SimulationParams, run_simulation
 from plot_multiple import (animate_multiple, plot_energy_drift, plot_survival,
-                           plot_trajectories)
+                           plot_survivor_positions, plot_trajectories)
 
 AU_M = 1.495978707e11          # astronomical unit [m]
 YEAR_S = 365.25 * 86400.0      # Julian year [s]
@@ -65,7 +71,8 @@ DEFAULTS = {
     "axis_mode": "fixed", "display_frame": "com",
     "show_energy_diagnostic": False,
     "test_positions_init": None, "test_velocities_init": None,
-    "test_ring": None, "test_center": "com", "removal_radii": None,
+    "test_ring": None, "test_ring_per_radius": 1, "test_phases": "golden",
+    "test_seed": 0, "test_center": "com", "removal_radii": None,
     "escape_radius": None, "test_csv": None,
 }
 
@@ -130,6 +137,16 @@ def triples(text):
     if any(len(row) != 3 for row in result):
         raise argparse.ArgumentTypeError("each body needs exactly three x,y,z components")
     return result
+
+
+def nonnegative_int(text):
+    try:
+        value = int(text)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("enter a non-negative integer") from error
+    if value < 0:
+        raise argparse.ArgumentTypeError("enter a non-negative integer")
+    return value
 
 
 def nonnegative_list(text):
@@ -208,7 +225,14 @@ def parse_args(argv=None):
     p.add_argument("--test_velocities_init", type=triples, default=DEFAULTS["test_velocities_init"],
                    metavar='"VX,VY,VZ;VX,VY,VZ;..."', help="matching test-particle velocities [m/s]")
     p.add_argument("--test_ring", type=ring, default=DEFAULTS["test_ring"], metavar="R_MIN,R_MAX,N",
-                   help="N test particles on circular x-y orbits, radii R_MIN..R_MAX [m] about --test_center")
+                   help="circular x-y test-particle orbits at N radii from R_MIN to R_MAX [m] about --test_center")
+    p.add_argument("--test_ring_per_radius", type=positive_int,
+                   default=DEFAULTS["test_ring_per_radius"],
+                   help="number of test particles at each --test_ring radius")
+    p.add_argument("--test_phases", choices=("golden", "random"), default=DEFAULTS["test_phases"],
+                   help="starting angles round the ring: golden (137.5 degrees apart) or random")
+    p.add_argument("--test_seed", type=nonnegative_int, default=DEFAULTS["test_seed"],
+                   help="seed for --test_phases random; the same seed gives the same angles")
     p.add_argument("--test_center", type=center, default=DEFAULTS["test_center"], metavar="com|BODY",
                    help="centre of --test_ring and reference for each test particle's starting orbit")
     p.add_argument("--removal_radii", type=nonnegative_list, default=DEFAULTS["removal_radii"],
@@ -216,7 +240,7 @@ def parse_args(argv=None):
     p.add_argument("--escape_radius", type=positive_float, default=DEFAULTS["escape_radius"],
                    help="remove a test particle this far from the massive bodies' centre of mass [m]")
     p.add_argument("--test_csv", default=DEFAULTS["test_csv"], metavar="PATH",
-                   help="write each test particle's starting orbit and fate to this CSV file")
+                   help="write each test particle's starting orbit, angle path and fate to this CSV file")
     # Bind negative exponent-form scalars and vectors with a negative first
     # component so argparse validates values rather than treating them as flags.
     numeric = {"n_bodies", "dt", "max_steps", "eps1", "eps2", "frame_time",
@@ -264,6 +288,9 @@ def parse_args(argv=None):
         p.error("--test_velocities_init needs one triple per test particle")
     if explicit[0] is not None and args.test_ring is not None:
         p.error("use either --test_ring or --test_positions_init, not both")
+    if args.test_ring is None and (args.test_ring_per_radius != 1
+                                   or args.test_phases != "golden"):
+        p.error("--test_ring_per_radius and --test_phases need --test_ring")
     if args.test_center != "com" and args.test_center > args.n_bodies:
         p.error("--test_center must be com or a body number from 1 to --n_bodies")
     if args.removal_radii is not None and len(args.removal_radii) != args.n_bodies:
@@ -278,8 +305,14 @@ def test_particle_initial_states(args):
     if args.test_ring is None:
         return args.test_positions_init, args.test_velocities_init
     r_min, r_max, count = args.test_ring
+    per_radius = args.test_ring_per_radius
     radii = [r_min + (r_max - r_min) * k / (count - 1) if count > 1 else r_min
-             for k in range(count)]
+             for k in range(count) for _ in range(per_radius)]
+    if args.test_phases == "random":
+        rng = np.random.default_rng(args.test_seed)
+        phases = rng.uniform(0.0, 2.0 * math.pi, size=len(radii))
+    else:
+        phases = None   # k times the golden angle
     if args.test_center == "com":
         position = phys.center_of_mass(args.positions_init, args.masses_solar)
         velocity = phys.center_of_mass_velocity(args.velocities_init, args.masses_solar)
@@ -289,7 +322,8 @@ def test_particle_initial_states(args):
         position = args.positions_init[body]
         velocity = args.velocities_init[body]
         mass = args.masses_solar[body]
-    positions, velocities = phys.ring_test_particle_states(radii, mass, position, velocity)
+    positions, velocities = phys.ring_test_particle_states(
+        radii, mass, position, velocity, phases_rad=phases)
     return positions.tolist(), velocities.tolist()
 
 
@@ -303,8 +337,10 @@ def fewest_steps_per_orbit(result, dt):
     """Return the smallest starting orbital period divided by dt, or None."""
     info = result["test_particles"]
     mu = phys.GM_SUN * info["center_mass_solar"]
+    # Particles removed at the start are never integrated, so they do not count.
     periods = [2.0 * math.pi * math.sqrt(a ** 3 / mu)
-               for a in info["initial_semi_major_axis_m"] if math.isfinite(a)]
+               for a, t in zip(info["initial_semi_major_axis_m"], info["removal_time_s"])
+               if math.isfinite(a) and t != 0.0]
     return min(periods) / dt if periods else None
 
 
@@ -313,13 +349,21 @@ def print_test_particle_table(result, dt=None):
     info = result["test_particles"]
     fates = info["fate"]
     counts = {name: fates.count(name) for name in ("survived", "escaped", "encounter", "numerical")}
+    at_start = sum(1 for t in info["removal_time_s"] if t == 0.0)
+    paths = [p for p, f in zip(info["phase_motion"], fates) if f == "survived"]
     print(f"Test particles: {result['n_test_particles']}; survived {counts['survived']}; "
           f"escaped {counts['escaped']}; encounter {counts['encounter']}"
-          + (f"; numerical {counts['numerical']}" if counts["numerical"] else ""))
+          + (f"; numerical {counts['numerical']}" if counts["numerical"] else "")
+          + (f" (removed at the start: {at_start})" if at_start else ""))
+    print("Angle paths of the survivors: " + "; ".join(
+        f"{name} {paths.count(name)}" for name in
+        ("tadpole L4", "tadpole L5", "horseshoe", "circulating") if paths.count(name)))
     center = "the massive bodies' centre of mass" if info["center"] == "com" else info["center"]
     print(f"Starting orbits are measured from {center} "
-          f"(point mass {info['center_mass_solar']:.6g} solar masses).")
-    print("   #   r0 [AU]   a0 [AU]       e0  fate                 t_removed [yr]")
+          f"(point mass {info['center_mass_solar']:.6g} solar masses); "
+          f"phi0 is the starting angle from body {info['phase_reference_body']}.")
+    print("   #   r0 [AU]   a0 [AU]       e0  phi0 [deg]  phi range [deg]  angle path   "
+          "fate                 t_removed [yr]")
     for index in range(result["n_test_particles"]):
         a0 = info["initial_semi_major_axis_m"][index]
         a_text = f"{a0 / AU_M:9.4f}" if math.isfinite(a0) else "  unbound"
@@ -327,6 +371,9 @@ def print_test_particle_table(result, dt=None):
         t_text = f"{time / YEAR_S:.4e}" if math.isfinite(time) else "-"
         print(f"{index + 1:4d} {info['initial_distance_m'][index] / AU_M:9.4f} {a_text} "
               f"{info['initial_eccentricity'][index]:8.5f}  "
+              f"{info['initial_phase_deg'][index]:10.2f}  "
+              f"{info['phase_min_deg'][index]:7.1f}..{info['phase_max_deg'][index]:<7.1f} "
+              f"{info['phase_motion'][index]:12s} "
               f"{_fate_text(fates[index], info['removal_body'][index]):20s} {t_text}")
     if dt is not None:
         steps = fewest_steps_per_orbit(result, dt)
@@ -343,7 +390,9 @@ def write_test_particle_csv(result, path):
     with open(path, "w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow(["particle", "x0_m", "y0_m", "z0_m", "vx0_m_s", "vy0_m_s", "vz0_m_s",
-                         "r0_m", "a0_m", "e0", "fate", "removal_body", "removal_time_s"])
+                         "r0_m", "a0_m", "e0", "phi0_deg", "phi_min_deg", "phi_max_deg",
+                         "angle_path", "fate", "removal_body",
+                         "removal_time_s"])
         for index in range(result["n_test_particles"]):
             time = info["removal_time_s"][index]
             writer.writerow([index + 1,
@@ -352,6 +401,10 @@ def write_test_particle_csv(result, path):
                              repr(float(info["initial_distance_m"][index])),
                              repr(float(info["initial_semi_major_axis_m"][index])),
                              repr(float(info["initial_eccentricity"][index])),
+                             repr(float(info["initial_phase_deg"][index])),
+                             repr(float(info["phase_min_deg"][index])),
+                             repr(float(info["phase_max_deg"][index])),
+                             info["phase_motion"][index],
                              info["fate"][index], int(info["removal_body"][index]),
                              repr(float(time)) if math.isfinite(time) else ""])
 
@@ -468,6 +521,13 @@ def main(argv=None):
     try:
         if result["type"] == "survival":
             plot_survival(result)
+            info = result["test_particles"]
+            secure = [p for p, f in zip(info["phase_motion"], info["fate"])
+                      if f == "survived" and p in ("tadpole L4", "tadpole L5", "circulating")]
+            if secure:
+                plot_survivor_positions(result)
+            else:
+                print("No tadpole or circulating survivors: the end-position plot is skipped.")
         elif result["type"] == "trajectories":
             plot_trajectories(result, projection=params.projection)
             if args.show_energy_diagnostic:

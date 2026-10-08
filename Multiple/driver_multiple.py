@@ -266,22 +266,13 @@ def _validate_test_particle_params(params, positions, velocities, masses) -> Non
             raise ValueError("escape_radius must be a positive finite number.")
 
     if n_test:
-        # A particle already removed at t = 0 is an input mistake.
+        # A particle that starts inside a removal radius or beyond the escape
+        # radius is removed at t = 0 by run_simulation. Only a particle exactly
+        # on a body with no removal radius is singular and therefore an error.
         separation = positions[None, :, :] - test_pos[:, None, :]
         distance = np.hypot.reduce(separation, axis=2)
-        if np.any(distance == 0.0):
+        if np.any((distance == 0.0) & (radii[None, :] == 0.0)):
             raise ValueError("A test particle starts exactly on a massive body.")
-        if np.any(distance <= radii[None, :]):
-            raise ValueError(
-                "A test particle starts inside a massive body's removal radius."
-            )
-        if params.escape_radius is not None:
-            com = phys.center_of_mass(positions, masses)
-            if np.any(np.hypot.reduce(test_pos - com, axis=1)
-                      >= params.escape_radius):
-                raise ValueError(
-                    "A test particle starts at or beyond the escape radius."
-                )
 
         if output_type == "trajectories":
             stored = (int(params.max_steps) + 1) * n_test
@@ -572,10 +563,69 @@ def _remove_test_particles(
         removal_body[index] = body
 
 
+def _phase_reference(positions, masses, test_center) -> int:
+    """Return the 0-based massive body that angles are measured from.
+
+    It is the massive body farthest from the ring centre (Jupiter for a
+    Sun-Jupiter ring about the centre of mass; the companion star for a ring
+    about one star), excluding the centre body itself.
+    """
+    center = (np.sum(masses[:, None] * positions, axis=0) / float(np.sum(masses))
+              if test_center == "com" else positions[test_center])
+    offsets = np.hypot.reduce(positions - center, axis=1)
+    if test_center != "com":
+        offsets[test_center] = -1.0
+    return int(np.argmax(offsets))
+
+
+def _phase_angles(test_pos, positions, masses, test_center, reference):
+    """Angle [rad] of each test particle about the centre, from the reference body."""
+    if test_center == "com":
+        center = np.sum(masses[:, None] * positions, axis=0) / float(np.sum(masses))
+    else:
+        center = positions[test_center]
+    ref_vec = positions[reference] - center
+    rel = test_pos - center
+    with np.errstate(invalid="ignore"):
+        return np.arctan2(rel[:, 1], rel[:, 0]) - np.arctan2(ref_vec[1], ref_vec[0])
+
+
+def _wrapped(angle):
+    """Wrap radians to [-pi, pi)."""
+    return (angle + np.pi) % (2.0 * np.pi) - np.pi
+
+
+def classify_phase_motion(phase_min_deg: float, phase_max_deg: float) -> str:
+    """Name the path traced by a particle's angle from the reference body.
+
+    "circulating": the angle went all the way round (a range of 360 degrees
+    or more). "tadpole L4" / "tadpole L5": it stayed strictly ahead of
+    (0 to 180 degrees) or behind (-180 to 0 degrees) the reference body.
+    "horseshoe": it passed the point opposite the body (180 degrees) but
+    never the body itself. A run shorter than one full swing can make a
+    horseshoe look like a tadpole.
+    """
+    span = phase_max_deg - phase_min_deg
+    if not np.isfinite(span):
+        return "-"
+    if span >= 360.0:
+        return "circulating"
+    shift = 360.0 * np.floor((phase_min_deg + 180.0) / 360.0)
+    low, high = phase_min_deg - shift, phase_max_deg - shift   # low in [-180, 180)
+    if 0.0 < low and high < 180.0:
+        return "tadpole L4"
+    if -180.0 < low and high < 0.0:
+        return "tadpole L5"
+    if (0.0 < low and high < 360.0) or (-360.0 < low and high < 0.0):
+        return "horseshoe"
+    return "circulating"
+
+
 def _test_particle_summary(
     positions0, velocities0, masses, test_center, initial_pos, initial_vel,
     final_pos, final_vel, removal_time, removal_reason, removal_body,
-    removal_radii, escape_radius,
+    removal_radii, escape_radius, reference, phase_min, phase_max,
+    final_massive,
 ) -> Dict[str, Any]:
     """Collect each particle's starting orbit and fate."""
     if test_center == "com":
@@ -591,6 +641,24 @@ def _test_particle_summary(
     rel_p = initial_pos - center_p
     rel_v = initial_vel - center_v
     semi_major, ecc = phys.osculating_elements(rel_p, rel_v, center_mass)
+
+    # Starting angle in the x-y plane, measured from the reference body.
+    phase = np.degrees(_wrapped(
+        _phase_angles(initial_pos, positions0, masses, test_center, reference)))
+    # Ending angle and distance of each survivor, in the frame that turns with
+    # the reference body (NaN for removed particles).
+    survived = np.array([fate == "survived" for fate in removal_reason])
+    final_phase = np.degrees(_wrapped(
+        _phase_angles(final_pos, final_massive, masses, test_center, reference)))
+    if test_center == "com":
+        final_center = (np.sum(masses[:, None] * final_massive, axis=0)
+                        / float(np.sum(masses)))
+    else:
+        final_center = final_massive[test_center]
+    final_distance = np.hypot.reduce(final_pos - final_center, axis=1)
+    final_phase[~survived] = np.nan
+    final_distance[~survived] = np.nan
+    ref_final = final_massive[reference] - final_center
     return {
         "center": center_label,
         "center_mass_solar": center_mass,
@@ -599,6 +667,20 @@ def _test_particle_summary(
         "initial_distance_m": np.hypot.reduce(rel_p, axis=1),
         "initial_semi_major_axis_m": semi_major,
         "initial_eccentricity": ecc,
+        "initial_phase_deg": phase,
+        "phase_reference_body": reference + 1,
+        # Lowest and highest angle from the reference body reached during
+        # the run, followed continuously (not wrapped), in degrees.
+        "phase_min_deg": np.degrees(phase_min),
+        "phase_max_deg": np.degrees(phase_max),
+        "final_phase_deg": final_phase,
+        "final_distance_m": final_distance,
+        "reference_final_distance_m": float(np.hypot.reduce(ref_final)),
+        # Only a particle followed for the whole run has a meaningful path.
+        "phase_motion": [classify_phase_motion(lo, hi) if fate == "survived" else "-"
+                         for lo, hi, fate in zip(np.degrees(phase_min),
+                                                 np.degrees(phase_max),
+                                                 removal_reason)],
         "final_positions": final_pos.copy(),
         "final_velocities": final_vel.copy(),
         "removal_time_s": removal_time.copy(),
@@ -708,6 +790,20 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
     removal_body = np.zeros(n_test, dtype=int)
     test_initial_pos = test_pos.copy()
     test_initial_vel = test_vel.copy()
+    if has_tests:
+        phase_reference = _phase_reference(positions, masses, test_center)
+        phase_last = _wrapped(_phase_angles(
+            test_pos, positions, masses, test_center, phase_reference))
+        phase_unwrapped = phase_last.copy()
+        phase_min = phase_last.copy()
+        phase_max = phase_last.copy()
+        # Particles that start inside a removal radius or beyond the escape
+        # radius are removed at t = 0, so a dense ring never fails to start.
+        _remove_test_particles(
+            test_pos, test_vel, test_pos.copy(), test_vel.copy(),
+            np.arange(n_test), active, positions, masses, removal_radii,
+            escape_radius, 0.0, removal_time, removal_reason, removal_body,
+        )
 
     def _masked(array):
         shown = array.copy()
@@ -716,10 +812,10 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
 
     if has_tests:
         if output_type == "trajectories":
-            test_out_positions = [test_pos.copy()]
-            test_out_velocities = [test_vel.copy()]
+            test_out_positions = [_masked(test_pos)]
+            test_out_velocities = [_masked(test_vel)]
         elif output_type == "animation":
-            test_frame_positions = [test_pos.copy()]
+            test_frame_positions = [_masked(test_pos)]
 
     accepted_steps = 0
 
@@ -860,6 +956,17 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
                     escape_radius, time, removal_time, removal_reason,
                     removal_body,
                 )
+                # Follow each surviving particle's angle from the reference
+                # body continuously, to tell tadpole, horseshoe and
+                # circulating orbits apart.
+                live = np.flatnonzero(active)
+                if live.size:
+                    now = _phase_angles(test_pos[live], positions, masses,
+                                        test_center, phase_reference)
+                    phase_unwrapped[live] += _wrapped(now - phase_last[live])
+                    phase_last[live] = now
+                    phase_min[live] = np.minimum(phase_min[live], phase_unwrapped[live])
+                    phase_max[live] = np.maximum(phase_max[live], phase_unwrapped[live])
 
         if not (
             np.all(np.isfinite(positions))
@@ -1032,6 +1139,9 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
         "max_fractional_momentum_drift": max_momentum_drift,
         "max_fractional_angular_momentum_drift": max_angular_momentum_drift,
         "n_test_particles": n_test,
+        # Massive-body state at the end of the run, in every output mode.
+        "final_massive_positions": positions.copy(),
+        "final_massive_velocities": velocities.copy(),
     }
 
     if has_tests:
@@ -1040,7 +1150,8 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
             np.asarray(params.velocities_init, dtype=float),
             masses, test_center, test_initial_pos, test_initial_vel,
             test_pos, test_vel, removal_time, removal_reason, removal_body,
-            removal_radii, escape_radius,
+            removal_radii, escape_radius, phase_reference, phase_min, phase_max,
+            positions,
         )
 
     if output_type == "survival":
