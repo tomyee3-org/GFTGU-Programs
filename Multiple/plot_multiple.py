@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from physics_multiple import (ROUTH_MASS_FRACTION, center_of_mass,
-                              positions_in_display_frame)
+                              positions_in_display_frame, two_body_pair_orbit)
 
 
 _COLORS = ["red", "green", "blue", "orange", "purple", "brown"]
@@ -18,7 +18,6 @@ _TEST_COLOR = "0.45"   # grey for massless test particles
 _TADPOLE_COLOR = "#1f3fbf"
 _HORSESHOE_COLOR = "#e6b800"
 _CIRCULATING_COLOR = "#2ca02c"
-_LIBRATING_COLOR = "#4fa3e0"     # full swing, but no co-orbital names apply
 _PASSED_COLOR = "#8fd18f"        # survived, but crossed the reference body
 _UNFINISHED_COLOR = "#9fb0c8"    # survived, but no full swing yet
 _EDGE = {_HORSESHOE_COLOR: "#b38f00"}
@@ -729,7 +728,6 @@ def plot_survival(result: Dict[str, Any]) -> None:
                         label=label)
         survivor_styles = (
             (("tadpole L4", "tadpole L5"), _TADPOLE_COLOR, "D", "survived: tadpole"),
-            (("librating",), _LIBRATING_COLOR, "D", "survived: librating"),
             (("horseshoe",), _HORSESHOE_COLOR, "v", "survived: horseshoe"),
             (("circulating", "-"), _CIRCULATING_COLOR, "^", "survived: circulating"),
             (("passed body",), _PASSED_COLOR, ">", "survived: passed body"),
@@ -759,6 +757,15 @@ def plot_survival(result: Dict[str, Any]) -> None:
     plt.show()
 
 
+def _xy_angle_distance(points_xy, center_xy, reference_xy):
+    """Angle [deg] from the reference direction and distance, in the x-y plane."""
+    ref_vec = np.asarray(reference_xy) - np.asarray(center_xy)
+    ref_angle = np.arctan2(ref_vec[1], ref_vec[0])
+    offsets = np.atleast_2d(points_xy) - np.asarray(center_xy)
+    angles = np.degrees(np.arctan2(offsets[:, 1], offsets[:, 0]) - ref_angle)
+    return (angles + 180.0) % 360.0 - 180.0, np.hypot(offsets[:, 0], offsets[:, 1])
+
+
 def equilateral_points(
     massive_positions,
     massive_velocities,
@@ -768,40 +775,45 @@ def equilateral_points(
 ):
     """Return the triangular (equilateral) points of a pair of bodies.
 
-    Only defined for exactly two massive bodies. Each point forms an
-    equilateral triangle with the two bodies in the x-y plane; L4 is the
-    one leading the reference body in its orbital direction. Each point is
-    returned as (name, angle_deg, distance_m), measured in the x-y plane
-    about the plot centre ("com" or a 0-based body index) from the
-    direction of the reference body (1-based), the same way as the
-    test-particle angles. Returns None for any other number of bodies.
+    Defined only for exactly two massive bodies whose relative orbit fits
+    the planar, nearly circular two-primary model
+    (physics_multiple.two_body_pair_orbit); otherwise returns None, because
+    an x-y view would misplace the points or they would have no L4/L5
+    meaning. L4 leads the lighter body in its orbital direction, whichever
+    way the pair turns. Each point is returned as (name, angle_deg,
+    distance_m) in the x-y plane about the plot centre ("com" or a 0-based
+    body index), measured from the direction of the reference body
+    (1-based), the same way as the test-particle angles.
     """
     positions = np.asarray(massive_positions, dtype=float)
     velocities = np.asarray(massive_velocities, dtype=float)
     masses = np.asarray(masses_solar, dtype=float)
-    if positions.shape != (2, 3) or velocities.shape != (2, 3):
+    pair = two_body_pair_orbit(positions, velocities, masses)
+    if pair is None or not pair["circular_planar"]:
         return None
-    ref = int(reference_body) - 1
-    other = 1 - ref
-    r_rel = positions[ref, :2] - positions[other, :2]
-    v_rel = velocities[ref, :2] - velocities[other, :2]
-    sense = 1.0 if r_rel[0] * v_rel[1] - r_rel[1] * v_rel[0] >= 0.0 else -1.0
+    light = int(np.argmin(masses)) if masses[0] != masses[1] else int(reference_body) - 1
+    heavy = 1 - light
+    r_rel = positions[light, :2] - positions[heavy, :2]
     if test_center == "com":
         center = np.sum(masses[:, None] * positions, axis=0)[:2] / float(np.sum(masses))
     else:
         center = positions[int(test_center), :2]
-    ref_vec = positions[ref, :2] - center
-    ref_angle = np.arctan2(ref_vec[1], ref_vec[0])
+    reference = positions[int(reference_body) - 1, :2]
     points = []
-    for name, turn in (("L4", sense * np.pi / 3.0), ("L5", -sense * np.pi / 3.0)):
+    for name, turn in (("L4", pair["sense"] * np.pi / 3.0),
+                       ("L5", -pair["sense"] * np.pi / 3.0)):
         c, s = np.cos(turn), np.sin(turn)
-        vertex = positions[other, :2] + np.array((c * r_rel[0] - s * r_rel[1],
+        vertex = positions[heavy, :2] + np.array((c * r_rel[0] - s * r_rel[1],
                                                   s * r_rel[0] + c * r_rel[1]))
-        offset = vertex - center
-        angle = np.degrees(np.arctan2(offset[1], offset[0]) - ref_angle)
-        angle = (angle + 180.0) % 360.0 - 180.0
-        points.append((name, float(angle), float(np.hypot(*offset))))
+        angle, distance = _xy_angle_distance(vertex, center, reference)
+        points.append((name, float(angle[0]), float(distance[0])))
     return points
+
+
+def triangular_points_stable(masses_solar) -> bool:
+    """Routh's condition for two primaries: the lighter one's mass fraction."""
+    masses = np.asarray(masses_solar, dtype=float)
+    return masses.shape == (2,) and float(np.min(masses) / np.sum(masses)) < ROUTH_MASS_FRACTION
 
 
 def plot_survivor_positions(result: Dict[str, Any]) -> None:
@@ -817,9 +829,12 @@ def plot_survivor_positions(result: Dict[str, Any]) -> None:
     Left: ending angle against ending distance, on the same axes as the
     starting-angle panel of plot_survival. Right: the same points seen from
     above, with the centre in the middle and the reference body fixed on the
-    right. For two massive bodies their equilateral points are marked: as L4
-    and L5 when the reference body has under ROUTH_MASS_FRACTION of the
-    total mass, otherwise as equilateral points that are not stable.
+    right; the other massive bodies are drawn too. When the two massive
+    bodies fit the planar, nearly circular two-primary model, their
+    equilateral points are marked: as L4 and L5 when the lighter body has
+    under ROUTH_MASS_FRACTION of the total mass (whichever body is the
+    centre or reference), otherwise as equilateral points that are not
+    stable. Outside that model no points are marked.
     """
     _require_result_mapping(result, "plot_survivor_positions")
     info = result.get("test_particles")
@@ -857,10 +872,7 @@ def plot_survivor_positions(result: Dict[str, Any]) -> None:
         points = equilateral_points(
             result["final_massive_positions"], result["final_massive_velocities"],
             result["masses_solar"], plot_center, int(reference))
-    stable = False
-    if points is not None:
-        masses = np.asarray(result["masses_solar"], dtype=float)
-        stable = float(masses[int(reference) - 1]) / float(np.sum(masses)) < ROUTH_MASS_FRACTION
+    stable = points is not None and triangular_points_stable(result["masses_solar"])
 
     fig = plt.figure(figsize=(13, 5.6))
     flat = fig.add_subplot(1, 2, 1)
@@ -890,6 +902,20 @@ def plot_survivor_positions(result: Dict[str, Any]) -> None:
                                ha="center", va="center", color="0.25", fontweight="bold")
     polar.plot([0.0], [reference_distance], marker="*", markersize=14, color="black",
                linestyle="none", label=f"body {reference}")
+    if "final_massive_positions" in result and isinstance(reference, (int, np.integer)):
+        massive = np.asarray(result["final_massive_positions"], dtype=float)
+        masses = np.asarray(result["masses_solar"], dtype=float)
+        if center == "com":
+            center_xy = np.sum(masses[:, None] * massive, axis=0)[:2] / float(np.sum(masses))
+        else:
+            center_xy = massive[int(str(center).split()[-1]) - 1, :2]
+        others = [k for k in range(massive.shape[0]) if k != int(reference) - 1]
+        if others:
+            angles, distances = _xy_angle_distance(massive[others, :2], center_xy,
+                                                   massive[int(reference) - 1, :2])
+            polar.plot(np.radians(angles), distances / AU_M, marker="*", markersize=11,
+                       color="0.45", linestyle="none",
+                       label="other " + ("body" if len(others) == 1 else "bodies"))
     polar.plot([0.0], [0.0], marker="+", markersize=10, color="black", linestyle="none")
     flat.set_xlabel(f"ending distance from {center_label} in the x-y plane (AU)")
     flat.set_ylabel(f"ending angle from body {reference} (degrees)")

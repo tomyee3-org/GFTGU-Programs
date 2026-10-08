@@ -7,7 +7,7 @@ import numpy as np
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.9.0"
+MODEL_VERSION = "1.10.0"
 BUILD_ID_COVERS = (
     "physics_multiple.py",
     "driver_multiple.py",
@@ -639,3 +639,54 @@ def osculating_elements(
         semi_major = np.where(energy < 0.0, -mu / (2.0 * energy), np.inf)
         ecc = np.sqrt(np.maximum(0.0, 1.0 + 2.0 * energy * h2 / (mu * mu)))
     return semi_major, ecc
+
+
+# A pair of bodies is treated as the planar, circular two-primary problem
+# (in which L4, L5, tadpoles and horseshoes are defined) only if their
+# relative orbit is nearly circular and lies nearly in the x-y plane.
+PAIR_MAX_ECCENTRICITY = 0.1
+PAIR_MAX_TILT_DEG = 5.0
+
+
+def two_body_pair_orbit(positions, velocities, masses_solar):
+    """Describe the relative orbit of exactly two massive bodies.
+
+    Returns None unless there are exactly two bodies. Otherwise a dict with
+    the relative orbit's semi-major axis [m] (inf if unbound), eccentricity,
+    tilt of its orbital plane from the x-y plane [degrees], sense
+    (+1 counterclockwise seen from +z, -1 clockwise), the smaller body's
+    fraction of the total mass, and "circular_planar": whether the pair fits
+    the planar circular two-primary model within PAIR_MAX_ECCENTRICITY and
+    PAIR_MAX_TILT_DEG.
+    """
+    pos = _as_finite_float_array(positions, "positions")
+    vel = _as_finite_float_array(velocities, "velocities")
+    masses = _as_finite_float_array(masses_solar, "masses_solar")
+    if pos.shape != (2, 3) or vel.shape != (2, 3) or masses.shape != (2,):
+        return None
+    r = pos[1] - pos[0]
+    v = vel[1] - vel[0]
+    mu = GM_SUN * float(np.sum(masses))
+    distance = float(np.hypot.reduce(r))
+    h = np.cross(r, v)
+    h_norm = float(np.hypot.reduce(h))
+    if distance == 0.0 or h_norm == 0.0:
+        return {"semi_major_axis_m": np.nan, "eccentricity": np.nan,
+                "tilt_deg": np.nan, "sense": 1.0,
+                "minor_mass_fraction": float(np.min(masses) / np.sum(masses)),
+                "circular_planar": False}
+    energy = 0.5 * float(np.dot(v, v)) - mu / distance
+    semi_major = -mu / (2.0 * energy) if energy < 0.0 else np.inf
+    e_vec = np.cross(v, h) / mu - r / distance
+    eccentricity = float(np.hypot.reduce(e_vec))
+    tilt = float(np.degrees(np.arccos(min(1.0, abs(h[2]) / h_norm))))
+    return {
+        "semi_major_axis_m": semi_major,
+        "eccentricity": eccentricity,
+        "tilt_deg": tilt,
+        "sense": 1.0 if h[2] >= 0.0 else -1.0,
+        "minor_mass_fraction": float(np.min(masses) / np.sum(masses)),
+        "circular_planar": bool(np.isfinite(semi_major)
+                                and eccentricity <= PAIR_MAX_ECCENTRICITY
+                                and tilt <= PAIR_MAX_TILT_DEG),
+    }

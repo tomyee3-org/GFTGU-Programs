@@ -580,6 +580,7 @@ def _advance_test_particles(
     test_pos, test_vel, act, test_acc0, t0, massive0, massive_v0, t1,
     massive1, massive_v1, masses, eps1, eps2, max_iterations, removal_radii,
     escape_radius, active, removal_time, removal_reason, removal_body,
+    on_commit=None,
 ) -> None:
     """Advance the active test particles in place across one accepted step.
 
@@ -593,9 +594,15 @@ def _advance_test_particles(
     halved, with the massive bodies' positions inside the step taken from
     the same cubic-Hermite interpolation used for animation frames, down to
     1/2**MAX_TEST_SUBSTEP_DEPTH of the step. Removal is checked at the end of
-    every particle (sub)step. A particle that still cannot be followed is
-    removed with fate "numerical" at the start of the failing substep,
-    keeping its last trustworthy state. The massive bodies are not affected.
+    every particle (sub)step. At the smallest substep (or when floating-point
+    time cannot be halved further) all three tests must still pass; a
+    particle that fails any of them there is removed with fate "numerical"
+    at the start of that substep, keeping its last trustworthy state. The one
+    exception is a straight-line crossing of a removal radius by an
+    otherwise accepted substep, which is recorded as an encounter at the
+    crossing point. on_commit(indices, positions, velocities, time,
+    massive_positions) is called for every accepted (sub)step state, in time
+    order for each particle. The massive bodies are not affected.
     """
     def massive_at(t):
         if t == t0:
@@ -629,11 +636,13 @@ def _advance_test_particles(
             crossed = (closest <= removal_radii[None, :]) & ~inside
         crossing = np.any(crossed, axis=1) & ~np.any(inside, axis=1)
         last_level = depth >= MAX_TEST_SUBSTEP_DEPTH or not (ta < ta + 0.5 * h < tb)
-        good = finite & converged & ~crossing & (steady | last_level)
+        good = finite & converged & steady & ~crossing
 
         commit = idx[good]
         test_pos[commit] = p[good]
         test_vel[commit] = v[good]
+        if on_commit is not None and commit.size:
+            on_commit(commit, p[good], v[good], tb, pb)
         any_inside = np.any(inside, axis=1)
         escaped = np.zeros_like(good)
         if escape_radius is not None:
@@ -655,12 +664,17 @@ def _advance_test_particles(
         if last_level:
             for local in bad:
                 index = idx[local]
-                if finite[local] and converged[local] and crossing[local]:
+                if (finite[local] and converged[local] and steady[local]
+                        and crossing[local]):
                     hits = np.flatnonzero(crossed[local])
                     body = int(hits[np.argmin(closest[local, hits])])
-                    time = ta + frac[local, body] * h
-                    test_pos[index] = p0[local] + frac[local, body] * (p[local] - p0[local])
-                    test_vel[index] = v0[local] + frac[local, body] * (v[local] - v0[local])
+                    f = frac[local, body]
+                    time = ta + f * h
+                    test_pos[index] = p0[local] + f * (p[local] - p0[local])
+                    test_vel[index] = v0[local] + f * (v[local] - v0[local])
+                    if on_commit is not None:
+                        on_commit(np.array([index]), test_pos[index][None, :],
+                                  test_vel[index][None, :], time, massive_at(time))
                     remove(index, time, "encounter", body + 1)
                 else:
                     remove(index, ta, "numerical", 0)
@@ -713,6 +727,33 @@ def _remove_test_particles(
         removal_body[index] = body
 
 
+def _test_frame_positions(frame_time, n_test, history, removal_time):
+    """Test-particle positions at one animation frame time.
+
+    Each particle is interpolated (cubic Hermite) inside the bracket of its
+    own accepted substep states that contains frame_time, so a refined path
+    is drawn as computed. A particle is NaN at and after its removal time,
+    and when it has no bracket (removed earlier, or never active).
+    """
+    frame = np.full((n_test, 3), np.nan)
+    for index, states in history.items():
+        removed_at = removal_time[index]
+        if np.isfinite(removed_at) and frame_time >= removed_at:
+            continue
+        times = [state[0] for state in states]
+        k = int(np.searchsorted(times, frame_time, side="left"))
+        if k == 0:
+            if times and times[0] == frame_time:
+                frame[index] = states[0][1]
+            continue
+        if k >= len(states):
+            continue
+        t_a, p_a, v_a = states[k - 1]
+        t_b, p_b, v_b = states[k]
+        frame[index], _ = _hermite_state(t_a, p_a, v_a, t_b, p_b, v_b, frame_time)
+    return frame
+
+
 def _phase_reference(positions, masses, test_center) -> int:
     """Return the 0-based massive body that angles are measured from.
 
@@ -748,32 +789,88 @@ def _wrapped(angle):
 ROUTH_MASS_FRACTION = phys.ROUTH_MASS_FRACTION
 
 
+# Phase-path evidence: a turning point counts only when the angle has come
+# back by at least this much from its most recent extreme, and the swing is
+# judged against the whole range finally reached, within the same margin.
+TURN_THRESHOLD_DEG = 1.0
+# A particle is treated as co-orbital with the reference body only if its
+# starting semi-major axis is within this many of the body's Hill radii of
+# the body's own semi-major axis.
+CO_ORBITAL_HILL_RADII = 2.0
+
+
+def _track_turns(u, start, heading, extreme, turn_max, turn_min, threshold):
+    """Advance the turning-point detector by one new angle per particle.
+
+    heading is 0 until the angle has moved threshold from its start, then
+    +1 (rising) or -1 (falling); extreme is the running extreme in that
+    direction. A turning maximum (minimum) is recorded only when the angle
+    has come back threshold from an extreme reached while rising (falling),
+    so the start of the run is never counted as a turning point. Returns the
+    updated (heading, extreme, turn_max, turn_min).
+    """
+    d = np.asarray(heading)
+    ext = np.asarray(extreme, dtype=float)
+    start_up = (d == 0) & (u - start >= threshold)
+    start_down = (d == 0) & (start - u >= threshold)
+    rising, falling = d == 1, d == -1
+    top = rising & (ext - u >= threshold)
+    bottom = falling & (u - ext >= threshold)
+    turn_max = np.where(top, np.maximum(turn_max, ext), turn_max)
+    turn_min = np.where(bottom, np.minimum(turn_min, ext), turn_min)
+    new_d = d.copy()
+    new_d[start_up | bottom] = 1
+    new_d[start_down | top] = -1
+    new_ext = np.where(start_up | start_down | top | bottom, u,
+                       np.where(rising, np.maximum(ext, u),
+                                np.where(falling, np.minimum(ext, u), ext)))
+    return new_d, new_ext, turn_max, turn_min
+
+
+def swing_complete_for(angles_deg, threshold_deg: float = TURN_THRESHOLD_DEG) -> bool:
+    """Replay one particle's sequence of unwrapped angles [deg] through the
+    turning-point detector and report whether both ends of the final range
+    were reached at observed turning points (within threshold_deg)."""
+    angles = np.radians(np.asarray(angles_deg, dtype=float))
+    turn = np.radians(threshold_deg)
+    start = angles[:1]
+    heading, extreme = np.zeros(1, dtype=int), start.copy()
+    turn_max, turn_min = np.full(1, -np.inf), np.full(1, np.inf)
+    for value in angles[1:]:
+        heading, extreme, turn_max, turn_min = _track_turns(
+            np.array([value]), start, heading, extreme, turn_max, turn_min, turn)
+    low, high = float(np.min(angles)), float(np.max(angles))
+    return bool(np.isfinite(turn_max[0]) and np.isfinite(turn_min[0])
+                and turn_max[0] >= high - turn and turn_min[0] <= low + turn)
+
+
 def classify_phase_motion(
     phase_min_deg: float,
     phase_max_deg: float,
     swing_complete: bool = True,
-    co_orbital_names: bool = True,
+    co_orbital: bool = True,
+    sense: float = 1.0,
 ) -> str:
     """Describe the path traced by a survivor's angle from the reference body.
 
-    The angle is followed continuously, so its lowest and highest values
-    show where it went; swing_complete says whether, at some point in the
-    run, it had turned back from both its highest and its lowest value so
-    far by at least half its range so far (one full swing seen).
+    phase_min_deg and phase_max_deg are the lowest and highest values of the
+    angle, followed continuously. swing_complete says whether both ends of
+    that final range were reached at observed turning points (the angle came
+    back from each by at least TURN_THRESHOLD_DEG), not at the start or end
+    of the run. co_orbital says whether co-orbital names may be used at all
+    (planar, nearly circular pair; the reference body light enough for
+    stable L4/L5; the particle starting near the body's semi-major axis).
+    sense is the pair's orbital direction (+1 counterclockwise from +z).
 
     "circulating": the angle went all the way round (360 degrees or more).
     "passed body": it crossed the reference body's direction without going
     all the way round.
-    "unfinished": it stayed on one side of the body but has not made one
-    full swing, so this run cannot tell libration from slow drift; a longer
-    run is needed.
-    With co_orbital_names (two massive bodies, ring about their centre of
-    mass, reference body light enough for stable triangular points), a full
-    swing that stayed ahead of the body is "tadpole L4", behind it "tadpole
-    L5", and one that passed the far side but never the body "horseshoe".
-    These describe this run only: a longer run can turn a tadpole into a
-    horseshoe or remove a horseshoe. Without co_orbital_names, any full
-    swing that never passed the body is "librating".
+    "tadpole L4" / "tadpole L5": co-orbital, a full swing that stayed ahead of
+    / behind the body in its orbital direction.
+    "horseshoe": co-orbital, a full swing that passed the far side of the
+    orbit but never the body.
+    "unfinished": anything else; this run cannot name the path.
+    These describe this run only: a longer run can change them.
     """
     span = phase_max_deg - phase_min_deg
     if not np.isfinite(span):
@@ -784,14 +881,13 @@ def classify_phase_motion(
     low, high = phase_min_deg - shift, phase_max_deg - shift   # low in [-180, 180)
     if low <= 0.0 <= high or high >= 360.0:
         return "passed body"
-    if not swing_complete:
+    if not (swing_complete and co_orbital):
         return "unfinished"
-    if not co_orbital_names:
-        return "librating"
+    ahead, behind = ("tadpole L4", "tadpole L5") if sense >= 0.0 else ("tadpole L5", "tadpole L4")
     if 0.0 < low and high < 180.0:
-        return "tadpole L4"
+        return ahead
     if high < 0.0 and low > -180.0:
-        return "tadpole L5"
+        return behind
     return "horseshoe"
 
 
@@ -843,10 +939,23 @@ def _test_particle_summary(
     final_phase[~survived] = np.nan
     final_distance[~survived] = np.nan
     ref_final = (final_massive[reference] - final_center)[:2]
-    co_orbital_names = (
-        final_massive.shape[0] == 2 and test_center == "com"
-        and float(masses[reference]) / float(np.sum(masses)) < ROUTH_MASS_FRACTION
+    # Co-orbital names need the planar circular two-primary model, a ring
+    # about the pair's centre of mass, the reference body as the light
+    # primary below Routh's limit, and each particle starting with a
+    # semi-major axis within CO_ORBITAL_HILL_RADII Hill radii of the body's.
+    pair = phys.two_body_pair_orbit(positions0, velocities0, masses)
+    sense = 1.0 if pair is None else pair["sense"]
+    co_orbital_names = bool(
+        pair is not None and pair["circular_planar"] and test_center == "com"
+        and float(masses[reference]) == float(np.min(masses))
+        and pair["minor_mass_fraction"] < ROUTH_MASS_FRACTION
     )
+    co_orbital = np.zeros(semi_major.shape[0], dtype=bool)
+    if co_orbital_names:
+        a_ref = pair["semi_major_axis_m"]
+        hill = a_ref * (pair["minor_mass_fraction"] / 3.0) ** (1.0 / 3.0)
+        with np.errstate(invalid="ignore"):
+            co_orbital = np.abs(semi_major - a_ref) <= CO_ORBITAL_HILL_RADII * hill
     return {
         "center": center_label,
         "center_mass_solar": center_mass,
@@ -867,12 +976,15 @@ def _test_particle_summary(
         # Only a particle followed for the whole run has a meaningful path.
         "phase_swing_complete": swing_complete.copy(),
         "co_orbital_names": bool(co_orbital_names),
+        "co_orbital_start": co_orbital,
+        "orbital_sense": sense,
         "phase_motion": [
-            classify_phase_motion(lo, hi, bool(swing), co_orbital_names)
+            classify_phase_motion(lo, hi, bool(swing), bool(coorb), sense)
             if fate == "survived" else "-"
-            for lo, hi, swing, fate in zip(np.degrees(phase_min),
-                                           np.degrees(phase_max),
-                                           swing_complete, removal_reason)],
+            for lo, hi, swing, coorb, fate in zip(np.degrees(phase_min),
+                                                  np.degrees(phase_max),
+                                                  swing_complete, co_orbital,
+                                                  removal_reason)],
         "final_positions": final_pos.copy(),
         "final_velocities": final_vel.copy(),
         "removal_time_s": removal_time.copy(),
@@ -989,13 +1101,35 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
         phase_unwrapped = phase_last.copy()
         phase_min = phase_last.copy()
         phase_max = phase_last.copy()
-        # How far the angle has come back from its highest value since that
-        # value was set, and gone up from its lowest value since that was set.
-        retreat_from_max = np.zeros(n_test)
-        advance_from_min = np.zeros(n_test)
-        # Set once the angle has turned back from both its highest and its
-        # lowest value by at least half its range: one full swing seen.
-        swing_seen = np.zeros(n_test, dtype=bool)
+        # Turning-point detector for each particle's angle: direction of
+        # travel (0 until the angle has moved TURN_THRESHOLD_DEG from its
+        # start), the running extreme in that direction, and the highest
+        # turning maximum and lowest turning minimum observed.
+        turn = np.radians(TURN_THRESHOLD_DEG)
+        phase_start = phase_last.copy()
+        heading = np.zeros(n_test, dtype=int)
+        running_extreme = phase_last.copy()
+        turn_max = np.full(n_test, -np.inf)
+        turn_min = np.full(n_test, np.inf)
+        frame_history = {} if output_type == "animation" else None
+
+        def on_commit(indices, positions_now, velocities_now, time_now, massive_now):
+            """Follow angles (and animation history) at every accepted substep."""
+            now = _phase_angles(positions_now, massive_now, masses, test_center,
+                                phase_reference)
+            phase_unwrapped[indices] += _wrapped(now - phase_last[indices])
+            phase_last[indices] = now
+            u = phase_unwrapped[indices]
+            phase_max[indices] = np.maximum(phase_max[indices], u)
+            phase_min[indices] = np.minimum(phase_min[indices], u)
+            (heading[indices], running_extreme[indices], turn_max[indices],
+             turn_min[indices]) = _track_turns(
+                u, phase_start[indices], heading[indices], running_extreme[indices],
+                turn_max[indices], turn_min[indices], turn)
+            if frame_history is not None:
+                for k, index in enumerate(indices):
+                    frame_history.setdefault(int(index), []).append(
+                        (time_now, positions_now[k].copy(), velocities_now[k].copy()))
         # Particles that start inside a removal radius or beyond the escape
         # radius are removed at t = 0, so a dense ring never fails to start.
         _remove_test_particles(
@@ -1149,6 +1283,12 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
             previous_test_pos = test_pos.copy()
             previous_test_vel = test_vel.copy()
             active_before = active.copy()
+            if frame_history is not None:
+                frame_history.clear()
+                for index in act:
+                    frame_history[int(index)] = [
+                        (previous_time, previous_test_pos[index].copy(),
+                         previous_test_vel[index].copy())]
             if act.size:
                 _advance_test_particles(
                     test_pos, test_vel, act, test_acc0,
@@ -1156,29 +1296,8 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
                     time, positions, velocities, masses, params.eps1, params.eps2,
                     max_corrector_iterations, removal_radii, escape_radius,
                     active, removal_time, removal_reason, removal_body,
+                    on_commit,
                 )
-                # Follow each surviving particle's angle from the reference
-                # body continuously, to tell tadpole, horseshoe and
-                # circulating orbits apart.
-                live = np.flatnonzero(active)
-                if live.size:
-                    now = _phase_angles(test_pos[live], positions, masses,
-                                        test_center, phase_reference)
-                    phase_unwrapped[live] += _wrapped(now - phase_last[live])
-                    phase_last[live] = now
-                    u = phase_unwrapped[live]
-                    new_max = u > phase_max[live]
-                    new_min = u < phase_min[live]
-                    phase_max[live] = np.maximum(phase_max[live], u)
-                    phase_min[live] = np.minimum(phase_min[live], u)
-                    retreat = np.where(new_max, 0.0, retreat_from_max[live])
-                    advance = np.where(new_min, 0.0, advance_from_min[live])
-                    retreat_from_max[live] = np.maximum(retreat, phase_max[live] - u)
-                    advance_from_min[live] = np.maximum(advance, u - phase_min[live])
-                    half_range = 0.5 * (phase_max[live] - phase_min[live])
-                    swing_seen[live] |= ((half_range > 0.0)
-                                         & (retreat_from_max[live] >= half_range)
-                                         & (advance_from_min[live] >= half_range))
 
         if not (
             np.all(np.isfinite(positions))
@@ -1263,12 +1382,9 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
                 frame_velocities.append(v_frame)
                 frame_times.append(next_frame_time)
                 if has_tests:
-                    t_frame, _ = _hermite_state(
-                        previous_time, previous_test_pos, previous_test_vel,
-                        time, test_pos, test_vel, next_frame_time,
-                    )
-                    t_frame[~active_before] = np.nan
-                    test_frame_positions.append(t_frame)
+                    test_frame_positions.append(_test_frame_positions(
+                        next_frame_time, n_test, frame_history,
+                        removal_time))
                 if len(frame_times) > MAX_ANIMATION_FRAMES:
                     raise RuntimeError(
                         "The animation exceeded the stored-frame safety limit. "
@@ -1359,7 +1475,9 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
             masses, test_center, test_initial_pos, test_initial_vel,
             test_pos, test_vel, removal_time, removal_reason, removal_body,
             removal_radii, escape_radius, phase_reference, phase_min, phase_max,
-            positions, swing_seen,
+            positions,
+            np.isfinite(turn_max) & np.isfinite(turn_min)
+            & (turn_max >= phase_max - turn) & (turn_min <= phase_min + turn),
         )
 
     if output_type == "survival":

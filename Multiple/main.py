@@ -357,7 +357,7 @@ def print_test_particle_table(result, dt=None):
           + (f" (removed at the start: {at_start})" if at_start else ""))
     print("Angle paths of the survivors: " + "; ".join(
         f"{name} {paths.count(name)}" for name in
-        ("tadpole L4", "tadpole L5", "horseshoe", "librating", "circulating",
+        ("tadpole L4", "tadpole L5", "horseshoe", "circulating",
          "passed body", "unfinished") if paths.count(name)))
     center = "the massive bodies' centre of mass" if info["center"] == "com" else info["center"]
     print(f"Starting orbits are measured from {center} "
@@ -387,8 +387,10 @@ def print_test_particle_table(result, dt=None):
             print(f"Fewest dt steps per starting test-particle orbit: {steps:.1f}")
             if steps < 100.0:
                 print("Warning: fewer than 100 dt steps in a starting test-particle orbit. "
-                      "Particles shorten their own steps only near close approaches, so "
-                      "their ordinary orbits may be inaccurate; reduce --dt.")
+                      "This counts the massive bodies' steps; particles take smaller steps "
+                      "of their own when their acceleration changes faster than eps1 allows, "
+                      "but a coarse dt slows that down and can end particles as "
+                      "'numerical'; consider reducing --dt.")
 
 
 def write_test_particle_csv(result, path):
