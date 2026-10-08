@@ -7,7 +7,7 @@ import numpy as np
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.11.0"
+MODEL_VERSION = "1.12.0"
 BUILD_ID_COVERS = (
     "physics_multiple.py",
     "driver_multiple.py",
@@ -711,15 +711,23 @@ def _test_force_scale_unchecked(
         return np.sum(magnitude, axis=1)
 
 
-def mean_longitudes(relative_positions, relative_velocities, gm) -> np.ndarray:
+def mean_longitudes(
+    relative_positions,
+    relative_velocities,
+    gm,
+    max_tilt_deg: float = PAIR_MAX_TILT_DEG,
+) -> np.ndarray:
     """Osculating mean longitude [rad] of planar orbits about a central mass.
 
     relative_positions/velocities: shape (n, 3), relative to the central
     body; gm: G times the mass that governs each orbit [m^3 s^-2] (scalar or
-    shape (n,)). The orbits are taken in the x-y plane, counterclockwise.
-    lambda = varpi + M (longitude of periapsis plus mean anomaly), which
-    stays well defined as the eccentricity goes to zero. NaN for an orbit
-    that is not bound or not finite.
+    shape (n,)). lambda = varpi + M (longitude of periapsis plus mean
+    anomaly), which stays well defined as the eccentricity goes to zero.
+    The formula is the planar one, so it is only valid for counterclockwise
+    orbits (seen from +z) whose plane is within max_tilt_deg of the x-y
+    plane. NaN for any other orbit (inclined, clockwise or polar), and for an
+    orbit that is not bound or not finite; it never returns a projected
+    value for an orbit outside that domain.
     """
     p = np.asarray(relative_positions, dtype=float)
     v = np.asarray(relative_velocities, dtype=float)
@@ -737,4 +745,8 @@ def mean_longitudes(relative_positions, relative_velocities, gm) -> np.ndarray:
                              np.sqrt(1.0 + e) * np.cos(0.5 * nu))
         lam = varpi + E - e * np.sin(E)
         bound = (0.5 * v2 - gm / r < 0.0) & (e < 1.0)
-    return np.where(bound & np.isfinite(lam), lam, np.nan)
+        h = np.cross(p, v)
+        h_norm = np.hypot.reduce(h, axis=1)
+        planar = (h[:, 2] > 0.0) & (
+            h[:, 2] >= h_norm * np.cos(np.radians(max_tilt_deg)))
+    return np.where(bound & planar & np.isfinite(lam), lam, np.nan)

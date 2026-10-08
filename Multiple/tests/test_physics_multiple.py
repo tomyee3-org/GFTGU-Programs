@@ -2875,5 +2875,79 @@ class TestAudit53Regressions(unittest.TestCase):
         self.assertTrue(0.0 < info["resonant_min_deg"][0] < info["resonant_max_deg"][0] < 180.0)
 
 
+class TestAudit54Regressions(unittest.TestCase):
+    """Counterexamples from the Audit54 reviews."""
+
+    inclined_position = [205702651566.00006, 357573335603.9969, 0.0]
+    inclined_velocity = [-9185.508932228293, 5290.794054665718, 18371.017864456582]
+
+    @staticmethod
+    def kepler_state(a, e, inclination_deg, node_deg, eccentric_anomaly_deg):
+        """Inertial state of a Kepler orbit about one solar mass (omega = 0)."""
+        mu = phys.GM_SUN
+        E = np.radians(eccentric_anomaly_deg)
+        x, y = a * (np.cos(E) - e), a * np.sqrt(1 - e * e) * np.sin(E)
+        rate = np.sqrt(mu / a ** 3) / (1 - e * np.cos(E))
+        vx, vy = -a * np.sin(E) * rate, a * np.sqrt(1 - e * e) * np.cos(E) * rate
+        i, node = np.radians(inclination_deg), np.radians(node_deg)
+
+        def rotate(px, py):
+            return [np.cos(node) * px - np.sin(node) * np.cos(i) * py,
+                    np.sin(node) * px + np.cos(node) * np.cos(i) * py,
+                    np.sin(i) * py]
+        return rotate(x, y), rotate(vx, vy)
+
+    def test_a54_01_mean_longitude_refuses_inclined_and_clockwise_orbits(self):
+        # Codex's analytic case: a = 4.6 AU, e = 0.4, i = 60 deg, node 30 deg,
+        # E = 90 deg; the true mean longitude is 97.081688 deg.
+        position, velocity = self.kepler_state(4.6 * AU, 0.4, 60.0, 30.0, 90.0)
+        self.assertTrue(np.isnan(phys.mean_longitudes([position], [velocity],
+                                                      phys.GM_SUN)[0]))
+        # The same orbit in the x-y plane gives the exact value.
+        position, velocity = self.kepler_state(4.6 * AU, 0.4, 0.0, 30.0, 90.0)
+        lam = np.degrees(phys.mean_longitudes([position], [velocity], phys.GM_SUN)[0])
+        self.assertAlmostEqual(lam, 97.081688, places=5)
+        # A small tilt is accepted; a clockwise orbit is not.
+        position, velocity = self.kepler_state(4.6 * AU, 0.4, 3.0, 30.0, 90.0)
+        self.assertTrue(np.isfinite(phys.mean_longitudes([position], [velocity],
+                                                         phys.GM_SUN)[0]))
+        position, velocity = self.kepler_state(4.6 * AU, 0.4, 180.0, 30.0, 90.0)
+        self.assertTrue(np.isnan(phys.mean_longitudes([position], [velocity],
+                                                      phys.GM_SUN)[0]))
+
+    def test_a54_01_inclined_particle_is_integrated_but_not_named(self):
+        for dt, steps in ((1e5, 3000), (5e4, 6000)):
+            with self.subTest(dt=dt):
+                result = driver.run_simulation(sun_jupiter_params(
+                    dt=dt, max_steps=steps, output_type="survival",
+                    test_positions_init=[self.inclined_position],
+                    test_velocities_init=[self.inclined_velocity]))
+                info = result["test_particles"]
+                self.assertEqual(info["fate"], ["survived"])
+                self.assertTrue(info["co_orbital_start"][0])
+                self.assertTrue(np.isnan(info["resonant_min_deg"][0]))
+                self.assertTrue(np.isnan(info["resonant_max_deg"][0]))
+                self.assertFalse(info["resonant_swing_complete"][0])
+                self.assertEqual(info["phase_motion"], ["unfinished"])
+
+    def test_a54_01_mixed_batch_keeps_the_planar_trojan(self):
+        pos, vel = phys.ring_test_particle_states([5.2026 * AU], 1 + 9.548e-4,
+                                                  phases_rad=[np.radians(60.0)])
+        common = dict(output_type="survival", max_steps=8000, dt=1.5e6,
+                      removal_radii=[6.96e8, 5.31e10], escape_radius=3e12)
+        alone = driver.run_simulation(sun_jupiter_params(
+            **common, test_positions_init=pos.tolist(), test_velocities_init=vel.tolist()))
+        mixed = driver.run_simulation(sun_jupiter_params(
+            **common, test_positions_init=pos.tolist() + [self.inclined_position],
+            test_velocities_init=vel.tolist() + [self.inclined_velocity]))
+        a, m = alone["test_particles"], mixed["test_particles"]
+        self.assertEqual(a["phase_motion"], ["tadpole L4"])
+        self.assertEqual(m["phase_motion"][0], "tadpole L4")
+        self.assertNotIn(m["phase_motion"][1], ("tadpole L4", "tadpole L5", "horseshoe"))
+        self.assertEqual(a["resonant_min_deg"][0], m["resonant_min_deg"][0])
+        self.assertEqual(a["resonant_max_deg"][0], m["resonant_max_deg"][0])
+        self.assertTrue(np.isnan(m["resonant_min_deg"][1]))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
