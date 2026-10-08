@@ -38,6 +38,12 @@ MAX_TEST_PARTICLE_STATES = 5_000_000
 # crosses a removal radius, down to 1/2**MAX_TEST_SUBSTEP_DEPTH of the
 # massive bodies' step.
 MAX_TEST_SUBSTEP_DEPTH = 16
+# Where the separate pulls on a particle nearly cancel (for example near the
+# centre of an equal-mass binary) the net acceleration is a poor yardstick for
+# its own change. The eps1 test then measures the change against this
+# fraction of the sum of the separate pulls instead, but only when that is
+# larger than the net acceleration itself.
+CANCELLATION_FRACTION = 0.1
 ENERGY_CANCELLATION_TOLERANCE = 128.0 * np.finfo(float).eps
 
 
@@ -523,6 +529,26 @@ def _row_relative_change(old: np.ndarray, new: np.ndarray) -> np.ndarray:
     return ratio
 
 
+def _acceleration_change(acc_a, acc_b, floor_scale) -> np.ndarray:
+    """Relative change of each particle's acceleration across a step.
+
+    The change is measured against the larger net acceleration, or against
+    floor_scale (a fraction of the sum of the separate pulls) where that is
+    larger, so a particle passing through a point where the pulls cancel is
+    not judged against a net acceleration near zero. inf where it cannot be
+    judged.
+    """
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        changes = np.hypot.reduce(acc_b - acc_a, axis=1)
+        scales = np.maximum(np.maximum(np.hypot.reduce(acc_a, axis=1),
+                                       np.hypot.reduce(acc_b, axis=1)),
+                            np.nan_to_num(floor_scale, nan=0.0))
+        ratio = np.where(scales > 0.0, changes / scales,
+                         np.where(changes > 0.0, np.inf, 0.0))
+    ratio[~np.isfinite(ratio)] = np.inf
+    return ratio
+
+
 def _test_particle_trial(p0, v0, acc_a, massive_end, masses, h, eps2,
                          max_iterations):
     """One predictor-corrector trial for each test particle, row by row.
@@ -587,7 +613,8 @@ def _advance_test_particles(
     A particle is first tried in one step, with the massive bodies' accepted
     start and end positions supplying the forces. The step is accepted for
     that particle only if its corrector converges (eps2), its acceleration
-    changes by no more than eps1 (the same tests the massive bodies pass),
+    changes by no more than eps1 (the same tests the massive bodies pass;
+    see _acceleration_change for the scale used where pulls cancel),
     and the straight path
     between its start and end points relative to each massive body does not
     pass through that body's removal radius. Otherwise the particle's step is
@@ -601,17 +628,16 @@ def _advance_test_particles(
     exception is a straight-line crossing of a removal radius by an
     otherwise accepted substep, which is recorded as an encounter at the
     crossing point. on_commit(indices, positions, velocities, time,
-    massive_positions) is called for every accepted (sub)step state, in time
+    massive_positions, massive_velocities) is called for every accepted (sub)step state, in time
     order for each particle. The massive bodies are not affected.
     """
     def massive_at(t):
+        """Massive-body positions and velocities at time t inside the step."""
         if t == t0:
-            return massive0
+            return massive0, massive_v0
         if t == t1:
-            return massive1
-        position, _ = _hermite_state(t0, massive0, massive_v0, t1, massive1,
-                                     massive_v1, t)
-        return position
+            return massive1, massive_v1
+        return _hermite_state(t0, massive0, massive_v0, t1, massive1, massive_v1, t)
 
     def remove(index, time, reason, body):
         active[index] = False
@@ -621,12 +647,16 @@ def _advance_test_particles(
 
     def advance(idx, ta, tb, acc_a, depth):
         h = tb - ta
-        pa, pb = massive_at(ta), massive_at(tb)
+        pa = massive_at(ta)[0]
+        pb, vb_massive = massive_at(tb)
         p0, v0 = test_pos[idx], test_vel[idx]
         p, v, acc_b, converged = _test_particle_trial(
             p0, v0, acc_a, pb, masses, h, eps2, max_iterations)
         finite = np.all(np.isfinite(p), axis=1) & np.all(np.isfinite(v), axis=1)
-        steady = _row_relative_change(acc_a, acc_b) <= eps1
+        pull_scale = CANCELLATION_FRACTION * np.maximum(
+            phys._test_force_scale_unchecked(p0, pa, masses),
+            phys._test_force_scale_unchecked(p, pb, masses))
+        steady = _acceleration_change(acc_a, acc_b, pull_scale) <= eps1
         with np.errstate(over="ignore", invalid="ignore"):
             ra = p0[:, None, :] - pa[None, :, :]
             rb = p[:, None, :] - pb[None, :, :]
@@ -642,7 +672,7 @@ def _advance_test_particles(
         test_pos[commit] = p[good]
         test_vel[commit] = v[good]
         if on_commit is not None and commit.size:
-            on_commit(commit, p[good], v[good], tb, pb)
+            on_commit(commit, p[good], v[good], tb, pb, vb_massive)
         any_inside = np.any(inside, axis=1)
         escaped = np.zeros_like(good)
         if escape_radius is not None:
@@ -673,8 +703,9 @@ def _advance_test_particles(
                     test_pos[index] = p0[local] + f * (p[local] - p0[local])
                     test_vel[index] = v0[local] + f * (v[local] - v0[local])
                     if on_commit is not None:
+                        massive_p, massive_v = massive_at(time)
                         on_commit(np.array([index]), test_pos[index][None, :],
-                                  test_vel[index][None, :], time, massive_at(time))
+                                  test_vel[index][None, :], time, massive_p, massive_v)
                     remove(index, time, "encounter", body + 1)
                 else:
                     remove(index, ta, "numerical", 0)
@@ -685,7 +716,7 @@ def _advance_test_particles(
         alive = retry[active[retry]]
         if alive.size:
             acc_mid = phys._test_accelerations_unchecked(
-                test_pos[alive], massive_at(mid), masses)
+                test_pos[alive], massive_at(mid)[0], masses)
             advance(alive, mid, tb, acc_mid, depth + 1)
 
     advance(np.asarray(act), t0, t1, test_acc0, 0)
@@ -779,6 +810,28 @@ def _phase_angles(test_pos, positions, masses, test_center, reference):
     rel = test_pos - center
     with np.errstate(invalid="ignore"):
         return np.arctan2(rel[:, 1], rel[:, 0]) - np.arctan2(ref_vec[1], ref_vec[0])
+
+
+def _relative_mean_longitude(test_pos, test_vel, positions, velocities, masses,
+                             primary, reference, mirror):
+    """Co-orbital resonant angle [rad]: particle minus reference mean longitude.
+
+    Mean longitudes are osculating, about the primary (the heavier body),
+    for the particle (governed by the primary's mass alone) and for the
+    reference body (governed by both masses). With mirror (a clockwise pair)
+    the y axis is reversed first, so the angle is always measured in the
+    orbital direction: positive means ahead of the reference body. Wrapped to
+    [-pi, pi); NaN where an orbit about the primary is not bound.
+    """
+    flip = np.array([1.0, -1.0, 1.0]) if mirror else np.ones(3)
+    rel_p = (test_pos - positions[primary]) * flip
+    rel_v = (test_vel - velocities[primary]) * flip
+    ref_p = ((positions[reference] - positions[primary]) * flip)[None, :]
+    ref_v = ((velocities[reference] - velocities[primary]) * flip)[None, :]
+    lam_p = phys.mean_longitudes(rel_p, rel_v, phys.GM_SUN * float(masses[primary]))
+    lam_ref = phys.mean_longitudes(
+        ref_p, ref_v, phys.GM_SUN * float(masses[primary] + masses[reference]))[0]
+    return _wrapped(lam_p - lam_ref)
 
 
 def _wrapped(angle):
@@ -891,11 +944,32 @@ def classify_phase_motion(
     return "horseshoe"
 
 
+def _path_label(phase_min_deg, phase_max_deg, resonant_min_deg, resonant_max_deg,
+                resonant_swing, co_orbital, fate) -> str:
+    """Label one particle's path for the console table and plots.
+
+    "circulating" and "passed body" come from the geometric angle. Tadpole
+    and horseshoe names need a co-orbital start and a completed swing of the
+    resonant angle (relative mean longitude), measured in the orbital
+    direction; everything else is "unfinished".
+    """
+    if fate != "survived":
+        return "-"
+    geometric = classify_phase_motion(phase_min_deg, phase_max_deg,
+                                      swing_complete=False, co_orbital=False)
+    if geometric != "unfinished":
+        return geometric
+    if not (co_orbital and resonant_swing):
+        return "unfinished"
+    label = classify_phase_motion(resonant_min_deg, resonant_max_deg, True, True, 1.0)
+    return label if label in ("tadpole L4", "tadpole L5", "horseshoe") else "unfinished"
+
+
 def _test_particle_summary(
     positions0, velocities0, masses, test_center, initial_pos, initial_vel,
     final_pos, final_vel, removal_time, removal_reason, removal_body,
     removal_radii, escape_radius, reference, phase_min, phase_max,
-    final_massive, swing_complete,
+    final_massive, swing_complete, resonant,
 ) -> Dict[str, Any]:
     """Collect each particle's starting orbit and fate."""
     if test_center == "com":
@@ -978,13 +1052,19 @@ def _test_particle_summary(
         "co_orbital_names": bool(co_orbital_names),
         "co_orbital_start": co_orbital,
         "orbital_sense": sense,
+        # The co-orbital resonant angle: particle minus reference-body mean
+        # longitude about the primary, positive ahead in the orbital
+        # direction (NaN where it is not followed).
+        "resonant_min_deg": np.where(resonant["valid"], np.degrees(resonant["min"]), np.nan),
+        "resonant_max_deg": np.where(resonant["valid"], np.degrees(resonant["max"]), np.nan),
+        "resonant_swing_complete": resonant["swing_complete"].copy(),
         "phase_motion": [
-            classify_phase_motion(lo, hi, bool(swing), bool(coorb), sense)
-            if fate == "survived" else "-"
-            for lo, hi, swing, coorb, fate in zip(np.degrees(phase_min),
-                                                  np.degrees(phase_max),
-                                                  swing_complete, co_orbital,
-                                                  removal_reason)],
+            _path_label(lo, hi, rlo, rhi, bool(rswing), bool(coorb), fate)
+            for lo, hi, rlo, rhi, rswing, coorb, fate in zip(
+                np.degrees(phase_min), np.degrees(phase_max),
+                np.degrees(resonant["min"]), np.degrees(resonant["max"]),
+                resonant["swing_complete"], co_orbital & resonant["valid"],
+                removal_reason)],
         "final_positions": final_pos.copy(),
         "final_velocities": final_vel.copy(),
         "removal_time_s": removal_time.copy(),
@@ -1113,7 +1193,30 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
         turn_min = np.full(n_test, np.inf)
         frame_history = {} if output_type == "animation" else None
 
-        def on_commit(indices, positions_now, velocities_now, time_now, massive_now):
+        # The co-orbital resonant angle (difference of mean longitudes about
+        # the primary) is followed only where co-orbital names can apply.
+        pair0 = phys.two_body_pair_orbit(positions, velocities, masses)
+        resonant_config = bool(
+            pair0 is not None and pair0["circular_planar"] and test_center == "com"
+            and float(masses[phase_reference]) == float(np.min(masses))
+            and pair0["minor_mass_fraction"] < ROUTH_MASS_FRACTION)
+        lam_last = np.full(n_test, np.nan)
+        if resonant_config:
+            lam_primary = 1 - phase_reference
+            lam_mirror = pair0["sense"] < 0.0
+            lam_last = _relative_mean_longitude(
+                test_pos, test_vel, positions, velocities, masses, lam_primary,
+                phase_reference, lam_mirror)
+        lam_valid = np.isfinite(lam_last)
+        lam_unwrapped = lam_last.copy()
+        lam_min, lam_max, lam_start = lam_last.copy(), lam_last.copy(), lam_last.copy()
+        lam_heading = np.zeros(n_test, dtype=int)
+        lam_extreme = lam_last.copy()
+        lam_turn_max = np.full(n_test, -np.inf)
+        lam_turn_min = np.full(n_test, np.inf)
+
+        def on_commit(indices, positions_now, velocities_now, time_now, massive_now,
+                      massive_v_now):
             """Follow angles (and animation history) at every accepted substep."""
             now = _phase_angles(positions_now, massive_now, masses, test_center,
                                 phase_reference)
@@ -1126,6 +1229,23 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
              turn_min[indices]) = _track_turns(
                 u, phase_start[indices], heading[indices], running_extreme[indices],
                 turn_max[indices], turn_min[indices], turn)
+            if resonant_config:
+                now_l = _relative_mean_longitude(
+                    positions_now, velocities_now, massive_now, massive_v_now, masses,
+                    lam_primary, phase_reference, lam_mirror)
+                lam_valid[indices] &= np.isfinite(now_l)
+                ok = lam_valid[indices]
+                sel, now_l = indices[ok], now_l[ok]
+                if sel.size:
+                    lam_unwrapped[sel] += _wrapped(now_l - lam_last[sel])
+                    lam_last[sel] = now_l
+                    ul = lam_unwrapped[sel]
+                    lam_max[sel] = np.maximum(lam_max[sel], ul)
+                    lam_min[sel] = np.minimum(lam_min[sel], ul)
+                    (lam_heading[sel], lam_extreme[sel], lam_turn_max[sel],
+                     lam_turn_min[sel]) = _track_turns(
+                        ul, lam_start[sel], lam_heading[sel], lam_extreme[sel],
+                        lam_turn_max[sel], lam_turn_min[sel], turn)
             if frame_history is not None:
                 for k, index in enumerate(indices):
                     frame_history.setdefault(int(index), []).append(
@@ -1478,6 +1598,12 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
             positions,
             np.isfinite(turn_max) & np.isfinite(turn_min)
             & (turn_max >= phase_max - turn) & (turn_min <= phase_min + turn),
+            {
+                "min": lam_min, "max": lam_max, "valid": lam_valid,
+                "swing_complete": lam_valid & np.isfinite(lam_turn_max)
+                & np.isfinite(lam_turn_min) & (lam_turn_max >= lam_max - turn)
+                & (lam_turn_min <= lam_min + turn),
+            },
         )
 
     if output_type == "survival":

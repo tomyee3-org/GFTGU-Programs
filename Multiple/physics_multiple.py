@@ -7,7 +7,7 @@ import numpy as np
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.10.0"
+MODEL_VERSION = "1.11.0"
 BUILD_ID_COVERS = (
     "physics_multiple.py",
     "driver_multiple.py",
@@ -690,3 +690,51 @@ def two_body_pair_orbit(positions, velocities, masses_solar):
                                 and eccentricity <= PAIR_MAX_ECCENTRICITY
                                 and tilt <= PAIR_MAX_TILT_DEG),
     }
+
+
+def _test_force_scale_unchecked(
+    test_positions: np.ndarray,
+    positions: np.ndarray,
+    masses_solar: np.ndarray,
+) -> np.ndarray:
+    """Sum of the magnitudes of the separate pulls on each test particle.
+
+    Unlike the net acceleration, this does not shrink where the pulls of
+    different bodies cancel (for example at the centre of an equal-mass
+    binary), so it gives a scale for judging changes in the acceleration.
+    """
+    with np.errstate(over="ignore", under="ignore", invalid="ignore",
+                     divide="ignore"):
+        separation = positions[None, :, :] - test_positions[:, None, :]
+        r = np.hypot.reduce(separation, axis=2)
+        magnitude = (GM_SUN / r) * (masses_solar[None, :] / r)
+        return np.sum(magnitude, axis=1)
+
+
+def mean_longitudes(relative_positions, relative_velocities, gm) -> np.ndarray:
+    """Osculating mean longitude [rad] of planar orbits about a central mass.
+
+    relative_positions/velocities: shape (n, 3), relative to the central
+    body; gm: G times the mass that governs each orbit [m^3 s^-2] (scalar or
+    shape (n,)). The orbits are taken in the x-y plane, counterclockwise.
+    lambda = varpi + M (longitude of periapsis plus mean anomaly), which
+    stays well defined as the eccentricity goes to zero. NaN for an orbit
+    that is not bound or not finite.
+    """
+    p = np.asarray(relative_positions, dtype=float)
+    v = np.asarray(relative_velocities, dtype=float)
+    gm = np.asarray(gm, dtype=float)
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        r = np.hypot.reduce(p, axis=1)
+        v2 = np.sum(v * v, axis=1)
+        rv = np.sum(p * v, axis=1)
+        e_vec = ((v2 - gm / r)[:, None] * p - rv[:, None] * v) / np.reshape(gm, (-1, 1))
+        e = np.hypot(e_vec[:, 0], e_vec[:, 1])
+        theta = np.arctan2(p[:, 1], p[:, 0])
+        varpi = np.arctan2(e_vec[:, 1], e_vec[:, 0])
+        nu = theta - varpi
+        E = 2.0 * np.arctan2(np.sqrt(np.maximum(0.0, 1.0 - e)) * np.sin(0.5 * nu),
+                             np.sqrt(1.0 + e) * np.cos(0.5 * nu))
+        lam = varpi + E - e * np.sin(E)
+        bound = (0.5 * v2 - gm / r < 0.0) & (e < 1.0)
+    return np.where(bound & np.isfinite(lam), lam, np.nan)

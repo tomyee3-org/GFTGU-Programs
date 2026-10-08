@@ -327,6 +327,13 @@ def test_particle_initial_states(args):
     return positions.tolist(), velocities.tolist()
 
 
+def _range_text(low, high):
+    """Fixed-width 'low..high' text for the resonant-angle column."""
+    if not (math.isfinite(low) and math.isfinite(high)):
+        return f"{'-':^19s}  "
+    return f"{low:8.1f}..{high:<9.1f}  "
+
+
 def _fate_text(fate, body):
     if fate == "encounter":
         return f"encounter (body {body})"
@@ -360,11 +367,18 @@ def print_test_particle_table(result, dt=None):
         ("tadpole L4", "tadpole L5", "horseshoe", "circulating",
          "passed body", "unfinished") if paths.count(name)))
     center = "the massive bodies' centre of mass" if info["center"] == "com" else info["center"]
+    if np.any(np.isfinite(info["resonant_min_deg"])):
+        print("dlambda is the particle's mean longitude minus that of body "
+              f"{info['phase_reference_body']}, about the heavier body, ahead positive; "
+              "tadpole and horseshoe names rest on it.")
     print(f"Starting orbits are measured from {center} "
           f"(point mass {info['center_mass_solar']:.6g} solar masses); "
           f"phi0 is the starting angle from body {info['phase_reference_body']}.")
-    print("   #   r0 [AU]   a0 [AU]       e0  phi0 [deg]  phi range [deg]  angle path   "
-          "fate                 t_removed [yr]")
+    resonant = info["resonant_min_deg"]
+    show_resonant = bool(np.any(np.isfinite(resonant)))
+    print("   #   r0 [AU]   a0 [AU]       e0  phi0 [deg]  phi range [deg]  "
+          + ("dlambda range [deg]  " if show_resonant else "")
+          + "angle path   fate                 t_removed [yr]")
     for index in range(result["n_test_particles"]):
         a0 = info["initial_semi_major_axis_m"][index]
         if math.isfinite(a0):
@@ -379,7 +393,9 @@ def print_test_particle_table(result, dt=None):
               f"{e_text}  "
               f"{info['initial_phase_deg'][index]:10.2f}  "
               f"{info['phase_min_deg'][index]:7.1f}..{info['phase_max_deg'][index]:<7.1f} "
-              f"{info['phase_motion'][index]:12s} "
+              + (_range_text(info['resonant_min_deg'][index], info['resonant_max_deg'][index])
+                 if show_resonant else "")
+              + f"{info['phase_motion'][index]:12s} "
               f"{_fate_text(fates[index], info['removal_body'][index]):20s} {t_text}")
     if dt is not None:
         steps = fewest_steps_per_orbit(result, dt)
@@ -400,6 +416,7 @@ def write_test_particle_csv(result, path):
         writer = csv.writer(handle)
         writer.writerow(["particle", "x0_m", "y0_m", "z0_m", "vx0_m_s", "vy0_m_s", "vz0_m_s",
                          "r0_m", "a0_m", "e0", "phi0_deg", "phi_min_deg", "phi_max_deg",
+                         "dlambda_min_deg", "dlambda_max_deg",
                          "angle_path", "fate", "removal_body",
                          "removal_time_s"])
         for index in range(result["n_test_particles"]):
@@ -413,6 +430,8 @@ def write_test_particle_csv(result, path):
                              repr(float(info["initial_phase_deg"][index])),
                              repr(float(info["phase_min_deg"][index])),
                              repr(float(info["phase_max_deg"][index])),
+                             repr(float(info["resonant_min_deg"][index])),
+                             repr(float(info["resonant_max_deg"][index])),
                              info["phase_motion"][index],
                              info["fate"][index], int(info["removal_body"][index]),
                              repr(float(time)) if math.isfinite(time) else ""])

@@ -2752,5 +2752,128 @@ class TestAudit52Regressions(unittest.TestCase):
         self.assertIsNotNone(plotting.equilateral_points(positions, circular, [1, 1], "com", 1))
 
 
+class TestAudit53Regressions(unittest.TestCase):
+    """Counterexamples from the Audit53 reviews."""
+
+    stars = dict(n_bodies=2, masses_solar=[1, 1],
+                 positions_init=[[7.48e10, 0, 0], [-7.48e10, 0, 0]],
+                 velocities_init=[[0, 21061, 0], [0, -21061, 0]], eps1=0.05, eps2=1e-7)
+    # Codex's independent DOP853 solution at 10000 s for a particle leaving
+    # the equal-mass binary's centre of mass at 1000 m/s along x.
+    reference_x, reference_y = 10000211.40575, 0.44643
+
+    def test_a53_01_motion_through_cancelling_pulls_is_followed(self):
+        for output_type in ("trajectories", "survival", "animation"):
+            with self.subTest(output_type=output_type):
+                result = driver.run_simulation(driver.SimulationParams(
+                    **self.stars, dt=10000, max_steps=1, output_type=output_type,
+                    frame_time=5000, test_positions_init=[[0, 0, 0]],
+                    test_velocities_init=[[1000, 0, 0]]))
+                self.assertEqual(result["test_particles"]["fate"], ["survived"])
+        # Second-order convergence to the independent solution.
+        errors = []
+        for dt, steps in ((10000, 1), (1000, 10), (100, 100)):
+            result = driver.run_simulation(driver.SimulationParams(
+                **self.stars, dt=dt, max_steps=steps, output_type="survival",
+                test_positions_init=[[0, 0, 0]], test_velocities_init=[[1000, 0, 0]]))
+            x, y, _ = result["test_particles"]["final_positions"][0]
+            errors.append(abs(x - self.reference_x) + abs(y - self.reference_y))
+        self.assertLess(errors[2], 0.1)
+        self.assertGreater(errors[0] / errors[1], 50.0)
+        self.assertGreater(errors[1] / errors[2], 50.0)
+
+    def test_a53_01_displaced_start_and_passage_through_the_centre(self):
+        # Slightly displaced start, and a fast passage through the point where
+        # the pulls cancel; a 16-times finer step agrees closely.
+        cases = ([[1e7, 1e6, 0]], [[1000, 0, 0]]), ([[-5e8, 1e7, 0]], [[1e5, 0, 0]])
+        for position, velocity in cases:
+            with self.subTest(position=position):
+                coarse = driver.run_simulation(driver.SimulationParams(
+                    **self.stars, dt=10000, max_steps=10, output_type="survival",
+                    test_positions_init=position, test_velocities_init=velocity))
+                fine = driver.run_simulation(driver.SimulationParams(
+                    **self.stars, dt=625, max_steps=160, output_type="survival",
+                    test_positions_init=position, test_velocities_init=velocity))
+                self.assertEqual(coarse["test_particles"]["fate"], ["survived"])
+                gap = np.linalg.norm(coarse["test_particles"]["final_positions"][0]
+                                     - fine["test_particles"]["final_positions"][0])
+                travelled = np.linalg.norm(np.array(velocity[0])) * 1e5
+                self.assertLess(gap / travelled, 1e-3)
+
+    def test_a53_01_massive_bodies_unchanged_and_floor_cases_kept(self):
+        plain = driver.run_simulation(driver.SimulationParams(
+            **self.stars, dt=10000, max_steps=10, output_type="trajectories"))
+        loaded = driver.run_simulation(driver.SimulationParams(
+            **self.stars, dt=10000, max_steps=10, output_type="trajectories",
+            test_positions_init=[[0, 0, 0]], test_velocities_init=[[1000, 0, 0]]))
+        self.assertTrue(np.array_equal(plain["positions"], loaded["positions"]))
+        # A single body cannot cancel itself: the tiny unresolved orbit is
+        # still numerical.
+        result = driver.run_simulation(driver.SimulationParams(
+            n_bodies=2, masses_solar=[1, 1e-12], positions_init=[[0, 0, 0], [1e16, 0, 0]],
+            velocities_init=[[0, 0, 0], [0, 0, 0]], dt=10000, max_steps=1, eps1=0.05,
+            eps2=1e-7, output_type="survival", test_positions_init=[[1e5, 0, 0]],
+            test_velocities_init=[[0, np.sqrt(phys.GM_SUN / 1e5), 0]]))
+        self.assertEqual(result["test_particles"]["fate"], ["numerical"])
+
+    def test_mean_longitude_helper(self):
+        pos, vel = phys.ring_test_particle_states([AU, 2 * AU], 1.0, phases_rad=[0.7, -2.0])
+        np.testing.assert_allclose(phys.mean_longitudes(pos, vel, phys.GM_SUN), [0.7, -2.0],
+                                   atol=1e-9)
+        # At periapsis and apoapsis the mean and true longitudes agree.
+        ra, rp = AU, 0.5 * AU
+        a = 0.5 * (ra + rp)
+        for distance, sign in ((rp, 1.0), (ra, -1.0)):
+            speed = np.sqrt(phys.GM_SUN * (2 / distance - 1 / a))
+            angle = np.radians(40.0) + (0.0 if sign > 0 else np.pi)
+            p = [[distance * np.cos(angle), distance * np.sin(angle), 0]]
+            v = [[-speed * np.sin(angle), speed * np.cos(angle), 0]]
+            lam = phys.mean_longitudes(p, v, phys.GM_SUN)[0]
+            self.assertAlmostEqual(np.cos(lam - angle), 1.0, places=9)
+        self.assertTrue(np.isnan(phys.mean_longitudes([[AU, 0, 0]], [[0, 1e6, 0]],
+                                                      phys.GM_SUN)[0]))
+
+    def eccentric(self, a_au, e, dt, steps):
+        params = sun_jupiter_params()
+        com = phys.center_of_mass(params.positions_init, params.masses_solar)
+        gm = phys.GM_SUN * (1 + 9.548e-4)
+        r0 = a_au * AU * (1 - e)
+        speed = np.sqrt(gm * (2 / r0 - 1 / (a_au * AU)))
+        angle = np.radians(60.0)
+        position = com + [r0 * np.cos(angle), r0 * np.sin(angle), 0.0]
+        velocity = [-speed * np.sin(angle), speed * np.cos(angle), 0.0]
+        return driver.run_simulation(sun_jupiter_params(
+            dt=dt, max_steps=steps, output_type="survival",
+            test_positions_init=[position.tolist()], test_velocities_init=[velocity]))
+
+    def test_a53_02_eccentric_geometric_swing_is_not_a_trojan(self):
+        # Codex: a0 = 4.6 AU, e0 = 0.4 at periapsis, 60 degrees ahead; the
+        # geometric angle swings but the mean-longitude difference only grows.
+        for dt, steps in ((1e5, 3000), (5e4, 6000)):
+            with self.subTest(dt=dt):
+                info = self.eccentric(4.6, 0.4, dt, steps)["test_particles"]
+                self.assertTrue(info["co_orbital_start"][0])
+                self.assertAlmostEqual(info["resonant_min_deg"][0], 60.04, delta=0.05)
+                self.assertAlmostEqual(info["resonant_max_deg"][0], 114.05, delta=0.05)
+                self.assertFalse(info["resonant_swing_complete"][0])
+                self.assertEqual(info["phase_motion"], ["unfinished"])
+        info = self.eccentric(4.9, 0.2, 1e5, 3000)["test_particles"]
+        self.assertAlmostEqual(info["resonant_max_deg"][0], 84.62, delta=0.05)
+        self.assertEqual(info["phase_motion"], ["unfinished"])
+
+    def test_a53_02_cold_ring_trojans_and_clockwise_still_named(self):
+        radius = 5.2026 * AU
+        pos, vel = phys.ring_test_particle_states(
+            [radius, radius, radius], 1.0 + 9.548e-4, phases_rad=np.radians([60, -60, 20]))
+        result = driver.run_simulation(sun_jupiter_params(
+            output_type="survival", max_steps=8000, dt=1.5e6,
+            test_positions_init=pos.tolist(), test_velocities_init=vel.tolist(),
+            removal_radii=[6.96e8, 5.31e10], escape_radius=3e12))
+        info = result["test_particles"]
+        self.assertEqual(info["phase_motion"], ["tadpole L4", "tadpole L5", "horseshoe"])
+        self.assertTrue(all(info["resonant_swing_complete"]))
+        self.assertTrue(0.0 < info["resonant_min_deg"][0] < info["resonant_max_deg"][0] < 180.0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
