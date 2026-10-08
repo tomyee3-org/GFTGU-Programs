@@ -7,8 +7,15 @@ so adaptive timestep changes do not distort movie playback speed.
 
 Optional massless test particles are advanced with the same predictor and
 corrector after each accepted step of the massive bodies. They feel the
-massive bodies, pull on nothing, and never influence the timestep, so the
-massive bodies' motion is identical with or without them.
+massive bodies, pull on nothing, and never influence the massive bodies'
+timestep, so the massive bodies' motion is identical with or without them.
+The trapezoidal corrector needs the force only at the two ends of a step,
+so a test particle's corrector uses the massive bodies' accepted end
+positions. A particle whose corrector does not converge, whose acceleration
+changes too much, or whose straight path crosses a removal radius has its
+own step halved, with the massive bodies' positions inside the step taken
+from cubic-Hermite interpolation, and removal is checked at the end of every
+such substep.
 """
 
 from dataclasses import dataclass
@@ -25,6 +32,12 @@ MAX_ANIMATION_FRAMES = 1_000_000
 # Ceiling on stored test-particle states (states times particles) in the
 # trajectories and animation modes. Survival mode stores no path history.
 MAX_TEST_PARTICLE_STATES = 5_000_000
+# Test-particle step refinement: a particle's step is halved while its
+# acceleration changes by more than eps1 across the step (the same test the
+# massive bodies pass), its corrector does not reach eps2, or its path
+# crosses a removal radius, down to 1/2**MAX_TEST_SUBSTEP_DEPTH of the
+# massive bodies' step.
+MAX_TEST_SUBSTEP_DEPTH = 16
 ENERGY_CANCELLATION_TOLERANCE = 128.0 * np.finfo(float).eps
 
 
@@ -498,33 +511,170 @@ def _checked_maximum_drift(
     return max(current_maximum, candidate)
 
 
-def _advance_test_particles(
-    test_pos, test_vel, act, test_acc0, new_positions, masses, h, eps2,
-    max_iterations,
-) -> None:
-    """Advance the active test particles in place over one accepted step.
+def _row_relative_change(old: np.ndarray, new: np.ndarray) -> np.ndarray:
+    """Relative change of each row vector; inf where it cannot be judged."""
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        changes = np.hypot.reduce(new - old, axis=1)
+        scales = np.maximum(np.hypot.reduce(old, axis=1),
+                            np.hypot.reduce(new, axis=1))
+        ratio = np.where(scales > 0.0, changes / scales,
+                         np.where(changes > 0.0, np.inf, 0.0))
+    ratio[~np.isfinite(ratio)] = np.inf
+    return ratio
 
-    The same predictor and iterated trapezoidal corrector used for the
-    massive bodies, with the massive bodies' accepted end positions supplying
-    the end-of-step force. The test particles never reject a step: a particle
-    whose corrector has not converged keeps its last iterate.
+
+def _test_particle_trial(p0, v0, acc_a, massive_end, masses, h, eps2,
+                         max_iterations):
+    """One predictor-corrector trial for each test particle, row by row.
+
+    Each row iterates the trapezoidal corrector until its own velocity
+    increment changes by less than eps2, and is then frozen, so one hard
+    particle never changes the result for the others. Returns the end
+    position, end velocity, the end acceleration used in the last
+    correction, and a per-row convergence flag.
     """
-    p0 = test_pos[act]
-    v0 = test_vel[act]
     with np.errstate(over="ignore", invalid="ignore"):
-        p_guess = p0 + v0 * h + 0.5 * test_acc0 * h * h
-        v_guess = v0 + test_acc0 * h
+        p_guess = p0 + v0 * h + 0.5 * acc_a * h * h
+        v_guess = v0 + acc_a * h
+    acc_end = phys._test_accelerations_unchecked(p_guess, massive_end, masses)
+    converged = np.zeros(p0.shape[0], dtype=bool)
+    open_rows = np.ones(p0.shape[0], dtype=bool)
     for _ in range(max_iterations):
-        acc_end = phys._test_accelerations_unchecked(p_guess, new_positions, masses)
-        with np.errstate(over="ignore", invalid="ignore"):
-            v_corr = v0 + 0.5 * (test_acc0 + acc_end) * h
-            p_corr = p0 + 0.5 * (v0 + v_corr) * h
-        change = _max_relative_vector_change(v_guess - v0, v_corr - v0)
-        p_guess, v_guess = p_corr, v_corr
-        if not np.isfinite(change) or change < eps2:
+        rows = np.flatnonzero(open_rows)
+        if rows.size == 0:
             break
-    test_pos[act] = p_guess
-    test_vel[act] = v_guess
+        with np.errstate(over="ignore", invalid="ignore"):
+            v_corr = v0[rows] + 0.5 * (acc_a[rows] + acc_end[rows]) * h
+            p_corr = p0[rows] + 0.5 * (v0[rows] + v_corr) * h
+        change = _row_relative_change(v_guess[rows] - v0[rows], v_corr - v0[rows])
+        p_guess[rows] = p_corr
+        v_guess[rows] = v_corr
+        done = change < eps2
+        converged[rows[done]] = True
+        failed = ~np.isfinite(change)
+        open_rows[rows[done | failed]] = False
+        still = rows[~(done | failed)]
+        if still.size:
+            acc_end[still] = phys._test_accelerations_unchecked(
+                p_guess[still], massive_end, masses)
+    return p_guess, v_guess, acc_end, converged
+
+
+def _segment_closest_approach(ra, rb):
+    """Closest approach of the straight segment ra -> rb to the origin.
+
+    ra, rb: shape (n, m, 3), particle positions relative to each massive
+    body at the start and end of a (sub)step. Returns (distance, fraction)
+    with shape (n, m); fraction is where along the step it occurs.
+    """
+    d = rb - ra
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        dd = np.sum(d * d, axis=2)
+        frac = np.where(dd > 0.0, -np.sum(ra * d, axis=2) / dd, 0.0)
+    frac = np.clip(np.nan_to_num(frac, nan=0.0), 0.0, 1.0)
+    closest = ra + frac[:, :, None] * d
+    return np.hypot.reduce(closest, axis=2), frac
+
+
+def _advance_test_particles(
+    test_pos, test_vel, act, test_acc0, t0, massive0, massive_v0, t1,
+    massive1, massive_v1, masses, eps1, eps2, max_iterations, removal_radii,
+    escape_radius, active, removal_time, removal_reason, removal_body,
+) -> None:
+    """Advance the active test particles in place across one accepted step.
+
+    A particle is first tried in one step, with the massive bodies' accepted
+    start and end positions supplying the forces. The step is accepted for
+    that particle only if its corrector converges (eps2), its acceleration
+    changes by no more than eps1 (the same tests the massive bodies pass),
+    and the straight path
+    between its start and end points relative to each massive body does not
+    pass through that body's removal radius. Otherwise the particle's step is
+    halved, with the massive bodies' positions inside the step taken from
+    the same cubic-Hermite interpolation used for animation frames, down to
+    1/2**MAX_TEST_SUBSTEP_DEPTH of the step. Removal is checked at the end of
+    every particle (sub)step. A particle that still cannot be followed is
+    removed with fate "numerical" at the start of the failing substep,
+    keeping its last trustworthy state. The massive bodies are not affected.
+    """
+    def massive_at(t):
+        if t == t0:
+            return massive0
+        if t == t1:
+            return massive1
+        position, _ = _hermite_state(t0, massive0, massive_v0, t1, massive1,
+                                     massive_v1, t)
+        return position
+
+    def remove(index, time, reason, body):
+        active[index] = False
+        removal_time[index] = time
+        removal_reason[index] = reason
+        removal_body[index] = body
+
+    def advance(idx, ta, tb, acc_a, depth):
+        h = tb - ta
+        pa, pb = massive_at(ta), massive_at(tb)
+        p0, v0 = test_pos[idx], test_vel[idx]
+        p, v, acc_b, converged = _test_particle_trial(
+            p0, v0, acc_a, pb, masses, h, eps2, max_iterations)
+        finite = np.all(np.isfinite(p), axis=1) & np.all(np.isfinite(v), axis=1)
+        steady = _row_relative_change(acc_a, acc_b) <= eps1
+        with np.errstate(over="ignore", invalid="ignore"):
+            ra = p0[:, None, :] - pa[None, :, :]
+            rb = p[:, None, :] - pb[None, :, :]
+            end_distance = np.hypot.reduce(rb, axis=2)
+            inside = end_distance <= removal_radii[None, :]
+            closest, frac = _segment_closest_approach(ra, rb)
+            crossed = (closest <= removal_radii[None, :]) & ~inside
+        crossing = np.any(crossed, axis=1) & ~np.any(inside, axis=1)
+        last_level = depth >= MAX_TEST_SUBSTEP_DEPTH or not (ta < ta + 0.5 * h < tb)
+        good = finite & converged & ~crossing & (steady | last_level)
+
+        commit = idx[good]
+        test_pos[commit] = p[good]
+        test_vel[commit] = v[good]
+        any_inside = np.any(inside, axis=1)
+        escaped = np.zeros_like(good)
+        if escape_radius is not None:
+            com_b = np.sum(masses[:, None] * pb, axis=0) / float(np.sum(masses))
+            with np.errstate(over="ignore", invalid="ignore"):
+                escaped = np.hypot.reduce(p - com_b, axis=1) > escape_radius
+        for local in np.flatnonzero(good & (any_inside | escaped)):
+            index = idx[local]
+            if any_inside[local]:
+                hits = np.flatnonzero(inside[local])
+                remove(index, tb, "encounter",
+                       int(hits[np.argmin(end_distance[local, hits])]) + 1)
+            else:
+                remove(index, tb, "escaped", 0)
+
+        bad = np.flatnonzero(~good)
+        if bad.size == 0:
+            return
+        if last_level:
+            for local in bad:
+                index = idx[local]
+                if finite[local] and converged[local] and crossing[local]:
+                    hits = np.flatnonzero(crossed[local])
+                    body = int(hits[np.argmin(closest[local, hits])])
+                    time = ta + frac[local, body] * h
+                    test_pos[index] = p0[local] + frac[local, body] * (p[local] - p0[local])
+                    test_vel[index] = v0[local] + frac[local, body] * (v[local] - v0[local])
+                    remove(index, time, "encounter", body + 1)
+                else:
+                    remove(index, ta, "numerical", 0)
+            return
+        mid = ta + 0.5 * h
+        retry = idx[bad]
+        advance(retry, ta, mid, acc_a[bad], depth + 1)
+        alive = retry[active[retry]]
+        if alive.size:
+            acc_mid = phys._test_accelerations_unchecked(
+                test_pos[alive], massive_at(mid), masses)
+            advance(alive, mid, tb, acc_mid, depth + 1)
+
+    advance(np.asarray(act), t0, t1, test_acc0, 0)
 
 
 def _remove_test_particles(
@@ -595,15 +745,35 @@ def _wrapped(angle):
     return (angle + np.pi) % (2.0 * np.pi) - np.pi
 
 
-def classify_phase_motion(phase_min_deg: float, phase_max_deg: float) -> str:
-    """Name the path traced by a particle's angle from the reference body.
+ROUTH_MASS_FRACTION = phys.ROUTH_MASS_FRACTION
 
-    "circulating": the angle went all the way round (a range of 360 degrees
-    or more). "tadpole L4" / "tadpole L5": it stayed strictly ahead of
-    (0 to 180 degrees) or behind (-180 to 0 degrees) the reference body.
-    "horseshoe": it passed the point opposite the body (180 degrees) but
-    never the body itself. A run shorter than one full swing can make a
-    horseshoe look like a tadpole.
+
+def classify_phase_motion(
+    phase_min_deg: float,
+    phase_max_deg: float,
+    swing_complete: bool = True,
+    co_orbital_names: bool = True,
+) -> str:
+    """Describe the path traced by a survivor's angle from the reference body.
+
+    The angle is followed continuously, so its lowest and highest values
+    show where it went; swing_complete says whether, at some point in the
+    run, it had turned back from both its highest and its lowest value so
+    far by at least half its range so far (one full swing seen).
+
+    "circulating": the angle went all the way round (360 degrees or more).
+    "passed body": it crossed the reference body's direction without going
+    all the way round.
+    "unfinished": it stayed on one side of the body but has not made one
+    full swing, so this run cannot tell libration from slow drift; a longer
+    run is needed.
+    With co_orbital_names (two massive bodies, ring about their centre of
+    mass, reference body light enough for stable triangular points), a full
+    swing that stayed ahead of the body is "tadpole L4", behind it "tadpole
+    L5", and one that passed the far side but never the body "horseshoe".
+    These describe this run only: a longer run can turn a tadpole into a
+    horseshoe or remove a horseshoe. Without co_orbital_names, any full
+    swing that never passed the body is "librating".
     """
     span = phase_max_deg - phase_min_deg
     if not np.isfinite(span):
@@ -612,20 +782,24 @@ def classify_phase_motion(phase_min_deg: float, phase_max_deg: float) -> str:
         return "circulating"
     shift = 360.0 * np.floor((phase_min_deg + 180.0) / 360.0)
     low, high = phase_min_deg - shift, phase_max_deg - shift   # low in [-180, 180)
+    if low <= 0.0 <= high or high >= 360.0:
+        return "passed body"
+    if not swing_complete:
+        return "unfinished"
+    if not co_orbital_names:
+        return "librating"
     if 0.0 < low and high < 180.0:
         return "tadpole L4"
-    if -180.0 < low and high < 0.0:
+    if high < 0.0 and low > -180.0:
         return "tadpole L5"
-    if (0.0 < low and high < 360.0) or (-360.0 < low and high < 0.0):
-        return "horseshoe"
-    return "circulating"
+    return "horseshoe"
 
 
 def _test_particle_summary(
     positions0, velocities0, masses, test_center, initial_pos, initial_vel,
     final_pos, final_vel, removal_time, removal_reason, removal_body,
     removal_radii, escape_radius, reference, phase_min, phase_max,
-    final_massive,
+    final_massive, swing_complete,
 ) -> Dict[str, Any]:
     """Collect each particle's starting orbit and fate."""
     if test_center == "com":
@@ -640,7 +814,15 @@ def _test_particle_summary(
         center_label = f"body {test_center + 1}"
     rel_p = initial_pos - center_p
     rel_v = initial_vel - center_v
-    semi_major, ecc = phys.osculating_elements(rel_p, rel_v, center_mass)
+    # Two-body elements are undefined for a particle exactly at the centre
+    # (possible for the centre of mass, or a particle removed at t = 0 on a
+    # body); those rows get NaN instead of losing the whole result.
+    semi_major = np.full(rel_p.shape[0], np.nan)
+    ecc = np.full(rel_p.shape[0], np.nan)
+    defined = np.hypot.reduce(rel_p, axis=1) > 0.0
+    if np.any(defined):
+        semi_major[defined], ecc[defined] = phys.osculating_elements(
+            rel_p[defined], rel_v[defined], center_mass)
 
     # Starting angle in the x-y plane, measured from the reference body.
     phase = np.degrees(_wrapped(
@@ -655,10 +837,16 @@ def _test_particle_summary(
                         / float(np.sum(masses)))
     else:
         final_center = final_massive[test_center]
-    final_distance = np.hypot.reduce(final_pos - final_center, axis=1)
+    # Distance in the x-y plane, matching the angle (a view from above).
+    final_distance = np.hypot(final_pos[:, 0] - final_center[0],
+                              final_pos[:, 1] - final_center[1])
     final_phase[~survived] = np.nan
     final_distance[~survived] = np.nan
-    ref_final = final_massive[reference] - final_center
+    ref_final = (final_massive[reference] - final_center)[:2]
+    co_orbital_names = (
+        final_massive.shape[0] == 2 and test_center == "com"
+        and float(masses[reference]) / float(np.sum(masses)) < ROUTH_MASS_FRACTION
+    )
     return {
         "center": center_label,
         "center_mass_solar": center_mass,
@@ -677,10 +865,14 @@ def _test_particle_summary(
         "final_distance_m": final_distance,
         "reference_final_distance_m": float(np.hypot.reduce(ref_final)),
         # Only a particle followed for the whole run has a meaningful path.
-        "phase_motion": [classify_phase_motion(lo, hi) if fate == "survived" else "-"
-                         for lo, hi, fate in zip(np.degrees(phase_min),
-                                                 np.degrees(phase_max),
-                                                 removal_reason)],
+        "phase_swing_complete": swing_complete.copy(),
+        "co_orbital_names": bool(co_orbital_names),
+        "phase_motion": [
+            classify_phase_motion(lo, hi, bool(swing), co_orbital_names)
+            if fate == "survived" else "-"
+            for lo, hi, swing, fate in zip(np.degrees(phase_min),
+                                           np.degrees(phase_max),
+                                           swing_complete, removal_reason)],
         "final_positions": final_pos.copy(),
         "final_velocities": final_vel.copy(),
         "removal_time_s": removal_time.copy(),
@@ -797,6 +989,13 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
         phase_unwrapped = phase_last.copy()
         phase_min = phase_last.copy()
         phase_max = phase_last.copy()
+        # How far the angle has come back from its highest value since that
+        # value was set, and gone up from its lowest value since that was set.
+        retreat_from_max = np.zeros(n_test)
+        advance_from_min = np.zeros(n_test)
+        # Set once the angle has turned back from both its highest and its
+        # lowest value by at least half its range: one full swing seen.
+        swing_seen = np.zeros(n_test, dtype=bool)
         # Particles that start inside a removal radius or beyond the escape
         # radius are removed at t = 0, so a dense ring never fails to start.
         _remove_test_particles(
@@ -818,8 +1017,13 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
             test_frame_positions = [_masked(test_pos)]
 
     accepted_steps = 0
+    current_cons = initial_cons
 
-    while accepted_steps < params.max_steps:
+    # A survival scan whose particles were all removed at t = 0 has nothing
+    # to follow: return the initial state with zero steps and zero time.
+    while accepted_steps < params.max_steps and not (
+        output_type == "survival" and not np.any(active)
+    ):
         acc0 = compute_accelerations(positions, masses)
         if has_tests:
             act = np.flatnonzero(active)
@@ -947,14 +1151,11 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
             active_before = active.copy()
             if act.size:
                 _advance_test_particles(
-                    test_pos, test_vel, act, test_acc0, positions, masses,
-                    dt_work, params.eps2, max_corrector_iterations,
-                )
-                _remove_test_particles(
-                    test_pos, test_vel, previous_test_pos, previous_test_vel,
-                    act, active, positions, masses, removal_radii,
-                    escape_radius, time, removal_time, removal_reason,
-                    removal_body,
+                    test_pos, test_vel, act, test_acc0,
+                    previous_time, previous_positions, previous_velocities,
+                    time, positions, velocities, masses, params.eps1, params.eps2,
+                    max_corrector_iterations, removal_radii, escape_radius,
+                    active, removal_time, removal_reason, removal_body,
                 )
                 # Follow each surviving particle's angle from the reference
                 # body continuously, to tell tadpole, horseshoe and
@@ -965,8 +1166,19 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
                                         test_center, phase_reference)
                     phase_unwrapped[live] += _wrapped(now - phase_last[live])
                     phase_last[live] = now
-                    phase_min[live] = np.minimum(phase_min[live], phase_unwrapped[live])
-                    phase_max[live] = np.maximum(phase_max[live], phase_unwrapped[live])
+                    u = phase_unwrapped[live]
+                    new_max = u > phase_max[live]
+                    new_min = u < phase_min[live]
+                    phase_max[live] = np.maximum(phase_max[live], u)
+                    phase_min[live] = np.minimum(phase_min[live], u)
+                    retreat = np.where(new_max, 0.0, retreat_from_max[live])
+                    advance = np.where(new_min, 0.0, advance_from_min[live])
+                    retreat_from_max[live] = np.maximum(retreat, phase_max[live] - u)
+                    advance_from_min[live] = np.maximum(advance, u - phase_min[live])
+                    half_range = 0.5 * (phase_max[live] - phase_min[live])
+                    swing_seen[live] |= ((half_range > 0.0)
+                                         & (retreat_from_max[live] >= half_range)
+                                         & (advance_from_min[live] >= half_range))
 
         if not (
             np.all(np.isfinite(positions))
@@ -1068,10 +1280,6 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
         # Gradually recover after close encounters, never exceeding user dt.
         dt_work = min(dt_work * 1.1, params.dt)
 
-        # A survival scan has nothing left to measure once every particle
-        # has been removed.
-        if output_type == "survival" and not np.any(active):
-            break
 
     history_times = np.asarray(conservation_times, dtype=float)
     history_values = np.stack(conservation_values)
@@ -1151,7 +1359,7 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
             masses, test_center, test_initial_pos, test_initial_vel,
             test_pos, test_vel, removal_time, removal_reason, removal_body,
             removal_radii, escape_radius, phase_reference, phase_min, phase_max,
-            positions,
+            positions, swing_seen,
         )
 
     if output_type == "survival":

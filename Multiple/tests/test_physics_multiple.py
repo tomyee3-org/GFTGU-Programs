@@ -1950,8 +1950,11 @@ class TestTestParticles(unittest.TestCase):
         self.assertEqual(list(info["removal_body"]), [1, 0])
         self.assertTrue(np.all(np.isfinite(info["removal_time_s"])))
         for k in range(2):
+            # Removal can happen inside a step (at a particle substep), so
+            # the stored path ends at the first accepted state after it.
             index = int(np.searchsorted(result["times"], info["removal_time_s"][k]))
-            self.assertEqual(result["times"][index], info["removal_time_s"][k])
+            self.assertGreater(info["removal_time_s"][k], result["times"][index - 1])
+            self.assertLessEqual(info["removal_time_s"][k], result["times"][index])
             self.assertTrue(np.all(np.isfinite(result["test_positions"][:index, k])))
             self.assertTrue(np.all(np.isnan(result["test_positions"][index:, k])))
         # Removal is detected at an accepted step, just past the boundary.
@@ -1966,7 +1969,9 @@ class TestTestParticles(unittest.TestCase):
             test_velocities_init=[[0.0, -2.0e5, 0.0]], escape_radius=5.0 * AU))
         self.assertEqual(result["type"], "survival")
         self.assertLess(result["accepted_steps"], 500)
-        self.assertEqual(result["final_time"], result["test_particles"]["removal_time_s"][0])
+        removed_at = result["test_particles"]["removal_time_s"][0]
+        self.assertLessEqual(removed_at, result["final_time"])
+        self.assertGreater(removed_at, result["final_time"] - 1.87e6)
         for key in ("positions", "test_positions", "frame_positions"):
             self.assertNotIn(key, result)
         self.assertEqual(len(result["conservation_samples"]), 11)
@@ -2031,9 +2036,17 @@ class TestTestParticles(unittest.TestCase):
         self.assertEqual(classify(385.0, 520.0), "tadpole L4")      # one turn later
         self.assertEqual(classify(20.0, 340.0), "horseshoe")
         self.assertEqual(classify(-340.0, -20.0), "horseshoe")
-        self.assertEqual(classify(-10.0, 30.0), "circulating")    # passed the body
+        self.assertEqual(classify(-10.0, 30.0), "passed body")   # crossed, never round
+        self.assertEqual(classify(330.0, 370.0), "passed body")  # crossed at 360
         self.assertEqual(classify(0.0, 400.0), "circulating")
         self.assertEqual(classify(float("nan"), 1.0), "-")
+        # Without one full swing nothing is called a tadpole or horseshoe.
+        for low, high in ((25.0, 160.0), (-160.0, -25.0), (20.0, 340.0), (60.0, 70.5)):
+            self.assertEqual(classify(low, high, swing_complete=False), "unfinished")
+        # Where co-orbital names do not apply, a full swing is "librating".
+        self.assertEqual(classify(25.0, 160.0, co_orbital_names=False), "librating")
+        self.assertEqual(classify(20.0, 340.0, co_orbital_names=False), "librating")
+        self.assertEqual(classify(0.0, 400.0, co_orbital_names=False), "circulating")
 
     def test_co_orbital_particles_are_classified_by_their_angle_path(self):
         # On Jupiter's own circle, starting 60 degrees ahead gives a tadpole
@@ -2134,7 +2147,9 @@ class TestTestParticles(unittest.TestCase):
                 mock.patch.object(entry, "plot_survivor_positions",
                                   lambda r: calls.append("positions")), \
                 contextlib.redirect_stdout(io.StringIO()):
-            entry.main(command + ["--max_steps", "20", "--test_ring", "4.5e11,4.6e11,2"])
+            # Two particles near 0.5 AU circulate past Jupiter within a year.
+            entry.main([arg if arg != "1.5e6" else "1e5" for arg in command]
+                       + ["--max_steps", "400", "--test_ring", "7.4e10,7.6e10,2"])
         self.assertEqual(calls, ["survival", "positions"])
         calls.clear()
         output = io.StringIO()
@@ -2142,10 +2157,12 @@ class TestTestParticles(unittest.TestCase):
                 mock.patch.object(entry, "plot_survivor_positions",
                                   lambda r: calls.append("positions")), \
                 contextlib.redirect_stdout(output):
-            # A single particle starting inside the Sun's removal radius.
-            entry.main(command + ["--max_steps", "2", "--test_ring", "5e8,5e8,1"])
+            # A single particle starting inside the Sun's (enlarged) removal radius.
+            entry.main([arg if arg != "6.96e8,5.31e10" else "2e9,5.31e10" for arg in command]
+                       + ["--max_steps", "2", "--test_ring", "5e8,5e8,1"])
         self.assertEqual(calls, ["survival"])
-        self.assertIn("end-position plot is skipped", output.getvalue())
+        self.assertIn("removed at the start: 1", output.getvalue())
+        self.assertIn("end-position window is skipped", output.getvalue())
 
     def test_plots_accept_test_particles_and_reject_bad_survival_results(self):
         result = driver.run_simulation(sun_jupiter_params(
@@ -2291,23 +2308,226 @@ class TestBeat9Help(unittest.TestCase):
         result = self.run_command(args)
         info = result["test_particles"]
         r0 = info["initial_distance_m"] / AU
-        removed = [f != "survived" for f in info["fate"]]
-        self.assertEqual(sum(removed), 12)
-        self.assertEqual(set(info["fate"]), {"survived", "encounter", "escaped"})
-        self.assertEqual(info["fate"].count("escaped"), 1)
-        kept = ~np.array(removed)
+        removed = np.array([f != "survived" for f in info["fate"]])
+        self.assertEqual(int(np.sum(removed)), 12)
+        self.assertEqual(set(info["fate"]), {"survived", "encounter"})
+        self.assertEqual(set(info["removal_body"][removed]), {2})
+        kept = ~removed
         # The ring radii are quoted to 0.01 AU in the Help.
         self.assertAlmostEqual(min(r0[removed]), 4.35, places=4)
         self.assertAlmostEqual(max(r0[removed]), 4.90, places=4)
         self.assertAlmostEqual(max(r0[kept][r0[kept] < 4.5]), 4.30, places=4)
         self.assertEqual([round(x, 2) for x in r0[kept][r0[kept] > 4.5]], [4.95, 5.0])
-        beat9 = " ".join(self.section("beat9").split())
-        for claim in ("4.35 AU", "4.30 AU", "1426 years", "12 of the 41", "1209 years"):
-            self.assertIn(claim, beat9)
+        motion = dict(zip(np.round(r0, 2), info["phase_motion"]))
+        self.assertEqual((motion[4.95], motion[5.0]), ("horseshoe", "tadpole L4"))
+        times = info["removal_time_s"][removed] / YEAR
+        self.assertAlmostEqual(float(np.min(times)), 1.6, delta=0.05)
+        last = int(np.argmax(np.where(removed, info["removal_time_s"], -1.0)))
+        self.assertAlmostEqual(r0[last], 4.85, places=4)
+        self.assertAlmostEqual(info["removal_time_s"][last] / YEAR, 552.0, delta=0.5)
         self.assertAlmostEqual(result["final_time"] / YEAR, 1426.0, places=1)
-        escaped = info["removal_time_s"][info["fate"].index("escaped")] / YEAR
-        self.assertAlmostEqual(escaped, 1209.0, delta=0.5)
-        self.assertAlmostEqual(r0[info["fate"].index("escaped")], 4.85, places=4)
+        beat9 = " ".join(self.section("beat9").split())
+        for claim in ("4.35 AU", "4.30 AU", "1426 years", "removes 12 of the 41",
+                      "after 1.6 years", "lasts 552 years", "about 131 steps per orbit",
+                      "calls 4.95 AU a <code>horseshoe</code> and 5.00 AU a <code>tadpole L4</code>"):
+            self.assertIn(claim, beat9)
+
+
+class TestAudit51Regressions(unittest.TestCase):
+    """Counterexamples from the Audit51 reviews."""
+
+    two_stars = dict(
+        n_bodies=2, masses_solar=[1.0, 1.0],
+        positions_init=[[7.48e10, 0.0, 0.0], [-7.48e10, 0.0, 0.0]],
+        velocities_init=[[0.0, 21061.0, 0.0], [0.0, -21061.0, 0.0]],
+        eps1=0.05, eps2=1e-7)
+
+    def test_a51_09_force_keeps_finite_values_at_huge_distances(self):
+        acc = phys.compute_test_particle_accelerations(
+            [[1e130, 0.0, 0.0]], [[0.0, 0.0, 0.0], [1e131, 0.0, 0.0]], [1.0, 1.0])
+        self.assertTrue(np.all(np.isfinite(acc)))
+        self.assertAlmostEqual(acc[0, 0] / -1.310740148e-240, 1.0, places=8)
+
+    def test_a51_02_crossing_a_removal_sphere_inside_one_step_is_caught(self):
+        common = dict(
+            n_bodies=2, masses_solar=[1, 1e-12],
+            positions_init=[[0, 0, 0], [1e16, 0, 0]],
+            velocities_init=[[0, 0, 0], [0, 0, 0]], eps1=0.05, eps2=1e-7,
+            test_positions_init=[[-2e9, 0, 0]], test_velocities_init=[[4e5, 0, 0]],
+            removal_radii=[7e8, 0])
+        for output_type in ("trajectories", "survival", "animation"):
+            for dt, steps in ((10000, 1), (1000, 10)):
+                with self.subTest(output_type=output_type, dt=dt):
+                    result = driver.run_simulation(driver.SimulationParams(
+                        **common, dt=dt, max_steps=steps, output_type=output_type,
+                        frame_time=1000.0))
+                    info = result["test_particles"]
+                    self.assertEqual(info["fate"], ["encounter"])
+                    self.assertEqual(list(info["removal_body"]), [1])
+                    # The particle reaches 7e8 m from the star after
+                    # (2e9 - 7e8) / 4e5 = 3250 s at constant speed; the
+                    # star's pull makes it a little sooner.
+                    self.assertTrue(2500.0 < info["removal_time_s"][0] <= 3250.0)
+
+    def test_a51_01_unresolved_particles_never_get_a_physical_fate(self):
+        common = dict(
+            n_bodies=2, masses_solar=[1, 1e-12],
+            positions_init=[[0, 0, 0], [1e16, 0, 0]],
+            velocities_init=[[0, 0, 0], [0, 0, 0]], eps1=0.05, eps2=1e-7,
+            dt=10000, max_steps=1, output_type="survival",
+            test_positions_init=[[-2e9, 1e8, 0]], test_velocities_init=[[4e5, 0, 0]])
+        with mock.patch.object(driver, "MAX_TEST_SUBSTEP_DEPTH", 0):
+            result = driver.run_simulation(driver.SimulationParams(**common))
+        info = result["test_particles"]
+        self.assertEqual(info["fate"], ["numerical"])
+        self.assertEqual(info["removal_time_s"][0], 0.0)
+        np.testing.assert_array_equal(info["final_positions"][0], [-2e9, 1e8, 0])
+        # With refinement allowed, the same particle is followed through its
+        # close pass instead.
+        result = driver.run_simulation(driver.SimulationParams(**common))
+        self.assertEqual(result["test_particles"]["fate"], ["survived"])
+
+    def test_a51_01_trial_reports_nonconvergence_row_by_row(self):
+        star = np.array([[0.0, 0.0, 0.0], [1e16, 0.0, 0.0]])
+        masses = np.array([1.0, 1e-12])
+        p0 = np.array([[-2e9, 1e8, 0.0], [1.5e11, 0.0, 0.0]])
+        v0 = np.array([[4e5, 0.0, 0.0], [0.0, 29780.0, 0.0]])
+        acc0 = phys.compute_test_particle_accelerations(p0, star, masses)
+        _, _, _, converged = driver._test_particle_trial(
+            p0, v0, acc0, star, masses, 10000.0, 1e-7, 10)
+        self.assertEqual(list(converged), [False, True])
+
+    def test_a51_01_a_hard_particle_does_not_change_the_others(self):
+        period = 2 * np.pi * np.sqrt(AU ** 3 / phys.GM_SUN)
+        quiet_p, quiet_v = phys.ring_test_particle_states([AU, 2 * AU], 1.0)
+        # An eccentric orbit whose perihelion pass (0.02 AU) is far shorter
+        # than one step, although its starting orbit has over 100 steps.
+        ra, rp = AU, 0.02 * AU
+        a = 0.5 * (ra + rp)
+        va = np.sqrt(phys.GM_SUN * (2 / ra - 1 / a))
+        hard_p, hard_v = [[-ra, 0.0, 0.0]], [[0.0, -va, 0.0]]
+        base = dict(n_bodies=2, masses_solar=[1, 1e-12],
+                    positions_init=[[0, 0, 0], [1e16, 0, 0]],
+                    velocities_init=[[0, 0, 0], [0, 0, 0]],
+                    dt=period / 400, max_steps=400, eps1=0.05, eps2=1e-10,
+                    output_type="trajectories")
+        quiet = driver.run_simulation(driver.SimulationParams(
+            **base, test_positions_init=quiet_p.tolist(),
+            test_velocities_init=quiet_v.tolist()))
+        mixed = driver.run_simulation(driver.SimulationParams(
+            **base, test_positions_init=quiet_p.tolist() + hard_p,
+            test_velocities_init=quiet_v.tolist() + hard_v))
+        np.testing.assert_array_equal(quiet["test_positions"], mixed["test_positions"][:, :2])
+        np.testing.assert_array_equal(quiet["positions"], mixed["positions"])
+        # The hard particle is followed through two perihelion passes and
+        # comes back close to where it started.
+        hard_period = 2 * np.pi * np.sqrt(a ** 3 / phys.GM_SUN)
+        self.assertEqual(mixed["test_particles"]["fate"][2], "survived")
+        self.assertGreater(400 * period / 400 / hard_period, 2.0)
+        index = int(round(2 * hard_period / (period / 400)))
+        gap = np.linalg.norm(mixed["test_positions"][index, 2] - hard_p[0]) / AU
+        self.assertLess(gap, 0.05)
+
+    def test_a51_03_undefined_elements_do_not_lose_the_result(self):
+        for output_type in ("survival", "trajectories", "animation"):
+            with self.subTest(output_type=output_type):
+                at_com = driver.run_simulation(driver.SimulationParams(
+                    **self.two_stars, dt=1000, max_steps=2, output_type=output_type,
+                    frame_time=1000.0,
+                    test_positions_init=[[0, 0, 0], [3e11, 0, 0]],
+                    test_velocities_init=[[0, 0, 0], [0, 20000, 0]]))
+                info = at_com["test_particles"]
+                self.assertTrue(np.isnan(info["initial_semi_major_axis_m"][0]))
+                self.assertTrue(np.isnan(info["initial_eccentricity"][0]))
+                self.assertTrue(np.isfinite(info["initial_semi_major_axis_m"][1]))
+        on_body = driver.run_simulation(driver.SimulationParams(
+            **self.two_stars, dt=1000, max_steps=2, output_type="survival",
+            test_positions_init=[[7.48e10, 0, 0]], test_velocities_init=[[0, 0, 0]],
+            test_center=1, removal_radii=[7.5e9, 7.5e9]))
+        self.assertEqual(on_body["test_particles"]["fate"], ["encounter"])
+        # Console table and CSV cope with the undefined row.
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "rows.csv"
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                entry.print_test_particle_table(at_com, 1000.0)
+                entry.write_test_particle_csv(at_com, path)
+            self.assertIn("       -", output.getvalue())
+            self.assertEqual(len(path.read_text(encoding="utf-8").splitlines()), 3)
+
+    def test_a51_08_scan_with_every_particle_removed_at_start_takes_no_steps(self):
+        cases = {
+            "encounter": dict(test_positions_init=[[7.5e10, 0, 0]],
+                              test_velocities_init=[[0, 21061, 0]],
+                              removal_radii=[7.5e9, 7.5e9]),
+            "escaped": dict(test_positions_init=[[4e12, 0, 0]],
+                            test_velocities_init=[[0, 0, 0]], escape_radius=3e12),
+        }
+        for fate, extra in cases.items():
+            with self.subTest(fate=fate):
+                result = driver.run_simulation(driver.SimulationParams(
+                    **self.two_stars, dt=1000, max_steps=5, output_type="survival", **extra))
+                self.assertEqual(result["accepted_steps"], 0)
+                self.assertEqual(result["final_time"], 0.0)
+                self.assertEqual(result["test_particles"]["fate"], [fate])
+                np.testing.assert_array_equal(result["final_massive_positions"],
+                                              self.two_stars["positions_init"])
+                with mock.patch.object(plotting.plt, "show"):
+                    plotting.plot_survival(result)
+                    plotting.plt.close("all")
+
+    def test_a51_04_angle_paths_need_a_full_swing_and_the_right_configuration(self):
+        # Codex's counterexample: an ordinary 1-AU orbit starting 60 degrees
+        # ahead of Jupiter drifts for 0.03 years; that is not a Trojan.
+        pos, vel = phys.ring_test_particle_states(
+            [AU], 1.0 + 9.548e-4, phases_rad=[np.radians(60.0)])
+        result = driver.run_simulation(sun_jupiter_params(
+            dt=10000, max_steps=100, output_type="survival",
+            test_positions_init=pos.tolist(), test_velocities_init=vel.tolist()))
+        info = result["test_particles"]
+        self.assertTrue(60.0 < info["phase_max_deg"][0] < 75.0)
+        self.assertEqual(info["phase_motion"], ["unfinished"])
+        # The same particle, followed for long enough, circulates.
+        result = driver.run_simulation(sun_jupiter_params(
+            dt=1e5, max_steps=400, output_type="survival",
+            test_positions_init=pos.tolist(), test_velocities_init=vel.tolist()))
+        self.assertEqual(result["test_particles"]["phase_motion"], ["circulating"])
+        # An equal-mass pair has no co-orbital names: a completed swing
+        # would be "librating", and circumbinary orbits circulate.
+        pos, vel = phys.ring_test_particle_states([3.0 * AU], 2.0)
+        result = driver.run_simulation(driver.SimulationParams(
+            **self.two_stars, dt=1.1e5, max_steps=2000, output_type="survival",
+            test_positions_init=pos.tolist(), test_velocities_init=vel.tolist()))
+        self.assertFalse(result["test_particles"]["co_orbital_names"])
+        self.assertEqual(result["test_particles"]["phase_motion"], ["circulating"])
+
+    def test_a51_05_equilateral_points_use_both_bodies(self):
+        separation = 1.496e11
+        positions = [[0.5 * separation, 0, 0], [-0.5 * separation, 0, 0]]
+        velocities = [[0, 21061, 0], [0, -21061, 0]]
+        points = dict((name, (angle, distance)) for name, angle, distance in
+                      plotting.equilateral_points(positions, velocities, [1, 1], "com", 1))
+        self.assertAlmostEqual(points["L4"][0], 90.0, places=6)
+        self.assertAlmostEqual(points["L5"][0], -90.0, places=6)
+        for name in ("L4", "L5"):
+            self.assertAlmostEqual(points[name][1] / separation, np.sqrt(3) / 2, places=9)
+        # Seen from body 2 (the centre), measured from body 1: 60 degrees,
+        # at the separation.
+        points = dict((name, (angle, distance)) for name, angle, distance in
+                      plotting.equilateral_points(positions, velocities, [1, 1], 1, 1))
+        self.assertAlmostEqual(abs(points["L4"][0]), 60.0, places=6)
+        self.assertAlmostEqual(points["L4"][1] / separation, 1.0, places=9)
+        # Sun-Jupiter about the centre of mass: close to +/-60 degrees.
+        params = sun_jupiter_params()
+        points = dict((name, (angle, distance)) for name, angle, distance in
+                      plotting.equilateral_points(params.positions_init,
+                                                  params.velocities_init,
+                                                  params.masses_solar, "com", 2))
+        self.assertAlmostEqual(points["L4"][0], 60.0, delta=0.1)
+        self.assertAlmostEqual(points["L5"][0], -60.0, delta=0.1)
+        # Not defined for three bodies.
+        self.assertIsNone(plotting.equilateral_points(
+            [[0, 0, 0], [1, 0, 0], [0, 1, 0]], [[0, 0, 0]] * 3, [1, 1, 1], "com", 2))
 
 
 if __name__ == "__main__":

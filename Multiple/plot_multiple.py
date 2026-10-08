@@ -7,7 +7,8 @@ from typing import Dict, Any
 import matplotlib.pyplot as plt
 import numpy as np
 
-from physics_multiple import center_of_mass, positions_in_display_frame
+from physics_multiple import (ROUTH_MASS_FRACTION, center_of_mass,
+                              positions_in_display_frame)
 
 
 _COLORS = ["red", "green", "blue", "orange", "purple", "brown"]
@@ -17,6 +18,9 @@ _TEST_COLOR = "0.45"   # grey for massless test particles
 _TADPOLE_COLOR = "#1f3fbf"
 _HORSESHOE_COLOR = "#e6b800"
 _CIRCULATING_COLOR = "#2ca02c"
+_LIBRATING_COLOR = "#4fa3e0"     # full swing, but no co-orbital names apply
+_PASSED_COLOR = "#8fd18f"        # survived, but crossed the reference body
+_UNFINISHED_COLOR = "#9fb0c8"    # survived, but no full swing yet
 _EDGE = {_HORSESHOE_COLOR: "#b38f00"}
 AU_M = 1.495978707e11
 YEAR_S = 365.25 * 86400.0
@@ -689,7 +693,12 @@ def plot_survival(result: Dict[str, Any]) -> None:
             else removal[chosen]
         ax.plot(distance[chosen], times, linestyle="none", marker=marker,
                 markersize=marker_size, color=color, label=label)
-    ax.set_yscale("log")
+    if final_time > 0.0:
+        ax.set_yscale("log")
+    else:
+        # Every particle was removed at the start: nothing has a positive
+        # time to put on a logarithmic axis.
+        ax.set_ylim(-0.5, 1.0)
     if np.any(at_start):
         bottom = ax.get_ylim()[0]
         ax.plot(distance[at_start], np.full(int(np.sum(at_start)), bottom),
@@ -720,8 +729,11 @@ def plot_survival(result: Dict[str, Any]) -> None:
                         label=label)
         survivor_styles = (
             (("tadpole L4", "tadpole L5"), _TADPOLE_COLOR, "D", "survived: tadpole"),
+            (("librating",), _LIBRATING_COLOR, "D", "survived: librating"),
             (("horseshoe",), _HORSESHOE_COLOR, "v", "survived: horseshoe"),
             (("circulating", "-"), _CIRCULATING_COLOR, "^", "survived: circulating"),
+            (("passed body",), _PASSED_COLOR, ">", "survived: passed body"),
+            (("unfinished",), _UNFINISHED_COLOR, "o", "survived: unfinished"),
         )
         for names, color, marker, label in survivor_styles:
             chosen = (fate_array == "survived") & np.isin(motion, names)
@@ -747,18 +759,67 @@ def plot_survival(result: Dict[str, Any]) -> None:
     plt.show()
 
 
-def plot_survivor_positions(result: Dict[str, Any]) -> None:
-    """Show where the secure survivors are at the end of a run.
+def equilateral_points(
+    massive_positions,
+    massive_velocities,
+    masses_solar,
+    test_center,
+    reference_body: int,
+):
+    """Return the triangular (equilateral) points of a pair of bodies.
 
-    Only survivors whose angle path is a tadpole (blue) or circulating
-    (green) are drawn; removed particles and every horseshoe are left out.
-    Angles are measured from the reference body, so both panels are views
-    in the frame that turns with it.
+    Only defined for exactly two massive bodies. Each point forms an
+    equilateral triangle with the two bodies in the x-y plane; L4 is the
+    one leading the reference body in its orbital direction. Each point is
+    returned as (name, angle_deg, distance_m), measured in the x-y plane
+    about the plot centre ("com" or a 0-based body index) from the
+    direction of the reference body (1-based), the same way as the
+    test-particle angles. Returns None for any other number of bodies.
+    """
+    positions = np.asarray(massive_positions, dtype=float)
+    velocities = np.asarray(massive_velocities, dtype=float)
+    masses = np.asarray(masses_solar, dtype=float)
+    if positions.shape != (2, 3) or velocities.shape != (2, 3):
+        return None
+    ref = int(reference_body) - 1
+    other = 1 - ref
+    r_rel = positions[ref, :2] - positions[other, :2]
+    v_rel = velocities[ref, :2] - velocities[other, :2]
+    sense = 1.0 if r_rel[0] * v_rel[1] - r_rel[1] * v_rel[0] >= 0.0 else -1.0
+    if test_center == "com":
+        center = np.sum(masses[:, None] * positions, axis=0)[:2] / float(np.sum(masses))
+    else:
+        center = positions[int(test_center), :2]
+    ref_vec = positions[ref, :2] - center
+    ref_angle = np.arctan2(ref_vec[1], ref_vec[0])
+    points = []
+    for name, turn in (("L4", sense * np.pi / 3.0), ("L5", -sense * np.pi / 3.0)):
+        c, s = np.cos(turn), np.sin(turn)
+        vertex = positions[other, :2] + np.array((c * r_rel[0] - s * r_rel[1],
+                                                  s * r_rel[0] + c * r_rel[1]))
+        offset = vertex - center
+        angle = np.degrees(np.arctan2(offset[1], offset[0]) - ref_angle)
+        angle = (angle + 180.0) % 360.0 - 180.0
+        points.append((name, float(angle), float(np.hypot(*offset))))
+    return points
+
+
+def plot_survivor_positions(result: Dict[str, Any]) -> None:
+    """Show where the tadpole and circulating survivors are at the end.
+
+    Only survivors whose angle path is "tadpole L4", "tadpole L5" or
+    "circulating" are drawn. Removed particles, horseshoes and every other
+    survivor are left out; that is a display choice, not a claim that the
+    particles shown are stable beyond this run. Angles are measured from the
+    reference body in the x-y plane, so both panels are views in the frame
+    that turns with it.
 
     Left: ending angle against ending distance, on the same axes as the
     starting-angle panel of plot_survival. Right: the same points seen from
-    above, with the centre in the middle, the reference body fixed on the
-    right, and its L4 and L5 points 60 degrees ahead and behind.
+    above, with the centre in the middle and the reference body fixed on the
+    right. For two massive bodies their equilateral points are marked: as L4
+    and L5 when the reference body has under ROUTH_MASS_FRACTION of the
+    total mass, otherwise as equilateral points that are not stable.
     """
     _require_result_mapping(result, "plot_survivor_positions")
     info = result.get("test_particles")
@@ -785,11 +846,21 @@ def plot_survivor_positions(result: Dict[str, Any]) -> None:
 
     reference = info.get("phase_reference_body", "?")
     center = info.get("center", "the centre")
-    if center == "com":
-        center = "the centre of mass"
+    center_label = "the centre of mass" if center == "com" else center
     size = 6 if np.sum(tadpole | circulating) <= 100 else 3
-    groups = ((tadpole, _TADPOLE_COLOR, "D", "tadpole (Trojan)"),
+    groups = ((tadpole, _TADPOLE_COLOR, "D", "tadpole"),
               (circulating, _CIRCULATING_COLOR, "^", "circulating"))
+
+    points = None
+    if "final_massive_positions" in result and isinstance(reference, (int, np.integer)):
+        plot_center = "com" if center == "com" else int(str(center).split()[-1]) - 1
+        points = equilateral_points(
+            result["final_massive_positions"], result["final_massive_velocities"],
+            result["masses_solar"], plot_center, int(reference))
+    stable = False
+    if points is not None:
+        masses = np.asarray(result["masses_solar"], dtype=float)
+        stable = float(masses[int(reference) - 1]) / float(np.sum(masses)) < ROUTH_MASS_FRACTION
 
     fig = plt.figure(figsize=(13, 5.6))
     flat = fig.add_subplot(1, 2, 1)
@@ -801,20 +872,26 @@ def plot_survivor_positions(result: Dict[str, Any]) -> None:
                   markersize=size, color=color, label=label)
         polar.plot(np.radians(angle[chosen]), distance[chosen], linestyle="none",
                    marker=marker, markersize=size, color=color, label=label)
-    for lagrange, name in ((60.0, "L4"), (-60.0, "L5")):
-        flat.axhline(lagrange, color="0.5", linewidth=0.8, linestyle="--")
-        flat.annotate(name, (1.0, lagrange), xycoords=("axes fraction", "data"),
-                      xytext=(4, 0), textcoords="offset points", va="center",
-                      color="0.35")
-        polar.plot([np.radians(lagrange)], [reference_distance], marker="o",
-                   markersize=9, markerfacecolor="none", markeredgecolor="0.35",
-                   linestyle="none")
-        polar.annotate(name, (np.radians(lagrange), 1.12 * reference_distance),
-                       ha="center", va="center", color="0.25", fontweight="bold")
+    if points is not None:
+        point_label = ("L4 and L5" if stable
+                       else "equilateral points (not stable for this mass ratio)")
+        for k, (name, point_angle, point_distance) in enumerate(points):
+            text = name if stable else ""
+            flat.axhline(point_angle, color="0.5", linewidth=0.8, linestyle="--")
+            if text:
+                flat.annotate(text, (1.0, point_angle), xycoords=("axes fraction", "data"),
+                              xytext=(4, 0), textcoords="offset points", va="center",
+                              color="0.35")
+            polar.plot([np.radians(point_angle)], [point_distance / AU_M], marker="o",
+                       markersize=9, markerfacecolor="none", markeredgecolor="0.35",
+                       linestyle="none", label=point_label if k == 0 else None)
+            if text:
+                polar.annotate(text, (np.radians(point_angle), 1.12 * point_distance / AU_M),
+                               ha="center", va="center", color="0.25", fontweight="bold")
     polar.plot([0.0], [reference_distance], marker="*", markersize=14, color="black",
                linestyle="none", label=f"body {reference}")
     polar.plot([0.0], [0.0], marker="+", markersize=10, color="black", linestyle="none")
-    flat.set_xlabel(f"ending distance from {center} (AU)")
+    flat.set_xlabel(f"ending distance from {center_label} in the x-y plane (AU)")
     flat.set_ylabel(f"ending angle from body {reference} (degrees)")
     flat.set_ylim(-180.0, 180.0)
     flat.set_yticks(np.arange(-180, 181, 60))
@@ -826,7 +903,7 @@ def plot_survivor_positions(result: Dict[str, Any]) -> None:
                     pad=18)
     polar.legend(fontsize="small", loc="upper left", bbox_to_anchor=(1.05, 1.0))
     final_time = float(result.get("final_time", np.nan)) / YEAR_S
-    fig.suptitle(f"Secure survivors at the end of the {final_time:.4g}-year run "
-                 "(horseshoes and removed particles not shown)")
+    fig.suptitle(f"Tadpole and circulating survivors at the end of this {final_time:.4g}-year "
+                 "run (other survivors and removed particles not shown)")
     plt.tight_layout()
     plt.show()

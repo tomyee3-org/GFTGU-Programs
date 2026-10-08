@@ -7,7 +7,7 @@ import numpy as np
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.8.0"
+MODEL_VERSION = "1.9.0"
 BUILD_ID_COVERS = (
     "physics_multiple.py",
     "driver_multiple.py",
@@ -498,6 +498,11 @@ def positions_in_display_frame(
 # Massless test particles
 # ---------------------------------------------------------------------------
 
+# Routh's criterion: the triangular (L4, L5) points of two primaries are
+# linearly stable only if the smaller mass is less than about 3.85% of the
+# total (primary-to-secondary mass ratio above about 24.96).
+ROUTH_MASS_FRACTION = 0.0385
+
 # Golden angle in radians: successive ring particles are spread around the
 # circle without lining up with one another or with the massive bodies.
 GOLDEN_ANGLE = float(np.pi * (3.0 - np.sqrt(5.0)))
@@ -527,8 +532,11 @@ def _test_accelerations_unchecked(
                      divide="ignore"):
         separation = positions[None, :, :] - test_positions[:, None, :]
         r = np.hypot.reduce(separation, axis=2)
-        scale = (GM_SUN / r) * (masses_solar[None, :] / r)
-        acc = np.sum((scale / r)[:, :, None] * separation, axis=1)
+        # Unit direction times inverse-square magnitude, as in
+        # compute_accelerations, avoids needless underflow at huge distances.
+        direction = separation / r[:, :, None]
+        magnitude = (GM_SUN / r) * (masses_solar[None, :] / r)
+        acc = np.sum(magnitude[:, :, None] * direction, axis=1)
     return acc
 
 

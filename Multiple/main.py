@@ -357,7 +357,8 @@ def print_test_particle_table(result, dt=None):
           + (f" (removed at the start: {at_start})" if at_start else ""))
     print("Angle paths of the survivors: " + "; ".join(
         f"{name} {paths.count(name)}" for name in
-        ("tadpole L4", "tadpole L5", "horseshoe", "circulating") if paths.count(name)))
+        ("tadpole L4", "tadpole L5", "horseshoe", "librating", "circulating",
+         "passed body", "unfinished") if paths.count(name)))
     center = "the massive bodies' centre of mass" if info["center"] == "com" else info["center"]
     print(f"Starting orbits are measured from {center} "
           f"(point mass {info['center_mass_solar']:.6g} solar masses); "
@@ -366,11 +367,16 @@ def print_test_particle_table(result, dt=None):
           "fate                 t_removed [yr]")
     for index in range(result["n_test_particles"]):
         a0 = info["initial_semi_major_axis_m"][index]
-        a_text = f"{a0 / AU_M:9.4f}" if math.isfinite(a0) else "  unbound"
+        if math.isfinite(a0):
+            a_text = f"{a0 / AU_M:9.4f}"
+        else:   # inf: unbound; NaN: undefined (particle exactly at the centre)
+            a_text = "  unbound" if a0 == math.inf else "        -"
+        e0 = info["initial_eccentricity"][index]
         time = info["removal_time_s"][index]
         t_text = f"{time / YEAR_S:.4e}" if math.isfinite(time) else "-"
+        e_text = f"{e0:8.5f}" if math.isfinite(e0) else "       -"
         print(f"{index + 1:4d} {info['initial_distance_m'][index] / AU_M:9.4f} {a_text} "
-              f"{info['initial_eccentricity'][index]:8.5f}  "
+              f"{e_text}  "
               f"{info['initial_phase_deg'][index]:10.2f}  "
               f"{info['phase_min_deg'][index]:7.1f}..{info['phase_max_deg'][index]:<7.1f} "
               f"{info['phase_motion'][index]:12s} "
@@ -380,8 +386,9 @@ def print_test_particle_table(result, dt=None):
         if steps is not None:
             print(f"Fewest dt steps per starting test-particle orbit: {steps:.1f}")
             if steps < 100.0:
-                print("Warning: the test particles do not control the timestep. Fewer than "
-                      "100 steps per orbit can give them inaccurate paths; reduce --dt.")
+                print("Warning: fewer than 100 dt steps in a starting test-particle orbit. "
+                      "Particles shorten their own steps only near close approaches, so "
+                      "their ordinary orbits may be inaccurate; reduce --dt.")
 
 
 def write_test_particle_csv(result, path):
@@ -527,7 +534,7 @@ def main(argv=None):
             if secure:
                 plot_survivor_positions(result)
             else:
-                print("No tadpole or circulating survivors: the end-position plot is skipped.")
+                print("No tadpole or circulating survivors: the end-position window is skipped.")
         elif result["type"] == "trajectories":
             plot_trajectories(result, projection=params.projection)
             if args.show_energy_diagnostic:
