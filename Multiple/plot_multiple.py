@@ -7,10 +7,40 @@ from typing import Dict, Any
 import matplotlib.pyplot as plt
 import numpy as np
 
-from physics_multiple import positions_in_display_frame
+from physics_multiple import center_of_mass, positions_in_display_frame
 
 
 _COLORS = ["red", "green", "blue", "orange", "purple", "brown"]
+_TEST_COLOR = "0.45"   # grey for massless test particles
+AU_M = 1.495978707e11
+YEAR_S = 365.25 * 86400.0
+
+
+def _test_positions_for_display(result, key, massive_positions, frame):
+    """Return test-particle positions (NaN once removed) in the display frame.
+
+    Returns None when the result has no test particles. In the COM frame the
+    massive bodies' centre of mass is subtracted, since test particles have
+    no mass of their own.
+    """
+    if key not in result:
+        return None
+    try:
+        test = np.asarray(result[key], dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} must be a numeric array.") from exc
+    if (test.ndim != 3 or test.shape[0] != massive_positions.shape[0]
+            or test.shape[2] != 3):
+        raise ValueError(
+            f"{key} must have shape (number of states, number of test "
+            "particles, 3) matching the massive bodies' states."
+        )
+    if test.shape[1] == 0:
+        return None
+    if frame == "com":
+        com = center_of_mass(massive_positions, result["masses_solar"])
+        test = test - com[:, None, :]
+    return test
 
 
 def _projection_indices(projection: str):
@@ -140,7 +170,14 @@ def plot_trajectories(
     _, n_bodies, _ = positions.shape
     i1, i2, label1, label2 = _projection_indices(projection)
 
+    test = _test_positions_for_display(result, "test_positions", raw_positions, frame)
+
     fig, ax = plt.subplots()
+    if test is not None:
+        for k in range(test.shape[1]):
+            ax.plot(test[:, k, i1], test[:, k, i2], color=_TEST_COLOR,
+                    linewidth=0.5, alpha=0.6,
+                    label="Test particles" if k == 0 else None)
     for i in range(n_bodies):
         ax.plot(
             positions[:, i, i1],
@@ -353,7 +390,17 @@ def animate_multiple(result: Dict[str, Any]):
     i1, i2, label1, label2 = _projection_indices(projection)
     n_frames, n_bodies, _ = source_positions.shape
 
+    has_test = _test_positions_for_display(
+        result, "test_frame_positions", source_positions, "user"
+    ) is not None
+
     fig, ax = plt.subplots()
+
+    test_marker = None
+    if has_test:
+        test_marker, = ax.plot([], [], marker=".", linestyle="none",
+                               color=_TEST_COLOR, markersize=3,
+                               label="Test particles")
 
     lines = []
     markers = []
@@ -392,22 +439,39 @@ def animate_multiple(result: Dict[str, Any]):
         "finished": False,
         "display_frame": display_frame,
         "projected": None,
+        "projected_tests": None,
     }
 
     def _projected_for_frame(frame_name):
         displayed = _positions_for_display(result, source_positions, frame_name)
         return displayed[:, :, [i1, i2]]
 
+    def _projected_tests(frame_name):
+        if not has_test:
+            return None
+        shown = _test_positions_for_display(
+            result, "test_frame_positions", source_positions, frame_name
+        )
+        return shown[:, :, [i1, i2]]
+
     def _apply_fixed_limits():
         if axis_mode != "fixed":
             return
-        xlim, ylim = _fixed_limits(state["projected"])
+        extent = state["projected"]
+        if state.get("projected_tests") is not None:
+            # Frame the massive bodies and the test particles' starting places;
+            # escaping particles are allowed to leave the view.
+            first = state["projected_tests"][0]
+            first = first[np.all(np.isfinite(first), axis=1)]
+            extent = np.concatenate((extent.reshape(-1, 2), first), axis=0)
+        xlim, ylim = _fixed_limits(extent)
         ax.set_xlim(*xlim)
         ax.set_ylim(*ylim)
 
     def _set_frame(frame_name):
         state["display_frame"] = frame_name
         state["projected"] = _projected_for_frame(frame_name)
+        state["projected_tests"] = _projected_tests(frame_name)
         ax.set_title(
             f"Multiple animation ({projection} projection, "
             f"{_frame_label(frame_name)})"
@@ -459,12 +523,18 @@ def animate_multiple(result: Dict[str, Any]):
             else:
                 lines[body].set_data([], [])
 
+        if test_marker is not None:
+            tests = state["projected_tests"][i]
+            test_marker.set_data(tests[:, 0], tests[:, 1])
         _auto_limits(i)
         time_text.set_text(
             f"t = {frame_times[i]:.4e} s\n"
             f"frame {i + 1} / {n_frames}"
         )
-        return [*lines, *markers, time_text]
+        artists = [*lines, *markers, time_text]
+        if test_marker is not None:
+            artists.append(test_marker)
+        return artists
 
     # Persistent canvas timer: remains valid after the last displayed frame.
     timer = fig.canvas.new_timer(interval=interval_ms)
@@ -549,3 +619,56 @@ def animate_multiple(result: Dict[str, Any]):
         "figure": fig,
         "on_key": on_key,
     }
+
+
+def plot_survival(result: Dict[str, Any]) -> None:
+    """Plot each test particle's survival time against its starting distance.
+
+    Removed particles are plotted at their removal time; survivors are drawn
+    at the end of the run with an upward triangle, since they would have
+    lasted at least that long.
+    """
+    _require_result_mapping(result, "plot_survival")
+    info = result.get("test_particles")
+    if not isinstance(info, dict):
+        raise ValueError("plot_survival requires a result with test particles.")
+    try:
+        distance = np.asarray(info["initial_distance_m"], dtype=float) / AU_M
+        removal = np.asarray(info["removal_time_s"], dtype=float) / YEAR_S
+        fates = list(info["fate"])
+        final_time = float(result["final_time"]) / YEAR_S
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "test_particles must contain initial_distance_m, removal_time_s "
+            "and fate, and the result must contain final_time."
+        ) from exc
+    if distance.ndim != 1 or distance.size == 0 or removal.shape != distance.shape \
+            or len(fates) != distance.size:
+        raise ValueError("test-particle arrays must be one-dimensional and matching.")
+
+    styles = {
+        "escaped": ("tab:red", "o", "escaped"),
+        "encounter": ("tab:blue", "s", "encounter"),
+        "numerical": ("tab:purple", "x", "numerical failure"),
+        "survived": ("tab:green", "^", "survived the whole run"),
+    }
+    fig, ax = plt.subplots()
+    for fate, (color, marker, label) in styles.items():
+        chosen = np.array([f == fate for f in fates])
+        if not np.any(chosen):
+            continue
+        times = np.full(int(np.sum(chosen)), final_time) if fate == "survived" \
+            else removal[chosen]
+        ax.plot(distance[chosen], times, linestyle="none", marker=marker,
+                color=color, label=label)
+    ax.set_yscale("log")
+    center = info.get("center", "the centre")
+    if center == "com":
+        center = "the centre of mass"
+    ax.set_xlabel(f"starting distance from {center} (AU)")
+    ax.set_ylabel("survival time (years)")
+    ax.set_title(f"Multiple test-particle survival ({final_time:.4g}-year run)")
+    ax.grid(True, which="both", alpha=0.3)
+    ax.legend()
+    plt.tight_layout()
+    plt.show()

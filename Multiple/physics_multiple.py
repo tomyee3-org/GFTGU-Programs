@@ -7,7 +7,7 @@ import numpy as np
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.6.0"
+MODEL_VERSION = "1.7.0"
 BUILD_ID_COVERS = (
     "physics_multiple.py",
     "driver_multiple.py",
@@ -492,3 +492,142 @@ def positions_in_display_frame(
             "COM-frame positions are outside the floating-point range."
         )
     return shifted
+
+
+# ---------------------------------------------------------------------------
+# Massless test particles
+# ---------------------------------------------------------------------------
+
+# Golden angle in radians: successive ring particles are spread around the
+# circle without lining up with one another or with the massive bodies.
+GOLDEN_ANGLE = float(np.pi * (3.0 - np.sqrt(5.0)))
+
+
+def _validated_test_positions(test_positions) -> np.ndarray:
+    """Return a finite (n_test, 3) array; n_test may be zero."""
+    test = _as_finite_float_array(test_positions, "test_positions")
+    if test.ndim == 1 and test.size == 0:
+        test = test.reshape(0, 3)
+    if test.ndim != 2 or test.shape[1] != 3:
+        raise ValueError("test_positions must have shape (number of test particles, 3).")
+    return test
+
+
+def _test_accelerations_unchecked(
+    test_positions: np.ndarray,
+    positions: np.ndarray,
+    masses_solar: np.ndarray,
+) -> np.ndarray:
+    """Vectorized test-particle accelerations without validation.
+
+    A particle exactly on a massive body gets a non-finite acceleration
+    instead of an exception, so the integrator can treat it as removed.
+    """
+    with np.errstate(over="ignore", under="ignore", invalid="ignore",
+                     divide="ignore"):
+        separation = positions[None, :, :] - test_positions[:, None, :]
+        r = np.hypot.reduce(separation, axis=2)
+        scale = (GM_SUN / r) * (masses_solar[None, :] / r)
+        acc = np.sum((scale / r)[:, :, None] * separation, axis=1)
+    return acc
+
+
+def compute_test_particle_accelerations(
+    test_positions,
+    positions,
+    masses_solar,
+) -> np.ndarray:
+    """
+    Compute the Newtonian accelerations of massless test particles.
+
+    test_positions: shape (n_test, 3), metres (n_test may be zero)
+    positions:      shape (n_bodies, 3), metres, of the massive bodies
+    masses_solar:   shape (n_bodies,), masses in solar-mass units
+
+    Each test particle is pulled by every massive body but pulls on nothing:
+    it does not affect the massive bodies or the other test particles.
+    Returns an array of shape (n_test, 3), m/s^2. A test particle exactly on
+    a massive body raises ValueError.
+    """
+    positions, masses_solar = _validated_positions_masses(positions, masses_solar)
+    test = _validated_test_positions(test_positions)
+    acc = _test_accelerations_unchecked(test, positions, masses_solar)
+    if not np.all(np.isfinite(acc)):
+        raise ValueError(
+            "A test particle coincides with a massive body or its acceleration "
+            "is outside the floating-point range."
+        )
+    return acc
+
+
+def ring_test_particle_states(
+    radii_m,
+    central_mass_solar: float,
+    center_position=(0.0, 0.0, 0.0),
+    center_velocity=(0.0, 0.0, 0.0),
+    phases_rad=None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Place test particles on circular orbits in the x-y plane.
+
+    Particle k sits at distance radii_m[k] from center_position, at angle
+    phases_rad[k] (default k times the golden angle), moving counterclockwise
+    seen from +z at the circular speed sqrt(G M / r) for a point mass
+    central_mass_solar at the centre, plus the centre's own velocity.
+    Returns (positions, velocities), each of shape (n_test, 3).
+    """
+    radii = _as_finite_float_array(radii_m, "radii_m")
+    if radii.ndim != 1 or radii.size == 0:
+        raise ValueError("radii_m must be a non-empty one-dimensional list.")
+    if np.any(radii <= 0.0):
+        raise ValueError("All ring radii must be positive.")
+    mass = float(central_mass_solar)
+    if not np.isfinite(mass) or mass <= 0.0:
+        raise ValueError("central_mass_solar must be positive and finite.")
+    center = _as_finite_float_array(center_position, "center_position")
+    center_v = _as_finite_float_array(center_velocity, "center_velocity")
+    if center.shape != (3,) or center_v.shape != (3,):
+        raise ValueError("center_position and center_velocity must be x,y,z triples.")
+    if phases_rad is None:
+        phases = GOLDEN_ANGLE * np.arange(radii.size)
+    else:
+        phases = _as_finite_float_array(phases_rad, "phases_rad")
+        if phases.shape != radii.shape:
+            raise ValueError("phases_rad must have one angle per radius.")
+    speed = np.sqrt(GM_SUN * mass / radii)
+    cos_p, sin_p = np.cos(phases), np.sin(phases)
+    zeros = np.zeros_like(radii)
+    positions = center + np.column_stack((radii * cos_p, radii * sin_p, zeros))
+    velocities = center_v + np.column_stack((-speed * sin_p, speed * cos_p, zeros))
+    return positions, velocities
+
+
+def osculating_elements(
+    relative_positions,
+    relative_velocities,
+    central_mass_solar: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Return the two-body semi-major axis [m] and eccentricity of each state.
+
+    The states are taken relative to a point mass central_mass_solar. An
+    unbound state (non-negative energy) gets semi-major axis inf.
+    """
+    rel_p = _as_finite_float_array(relative_positions, "relative_positions")
+    rel_v = _as_finite_float_array(relative_velocities, "relative_velocities")
+    if rel_p.ndim != 2 or rel_p.shape[1] != 3 or rel_v.shape != rel_p.shape:
+        raise ValueError("relative states must have shape (n, 3).")
+    mu = GM_SUN * float(central_mass_solar)
+    if not np.isfinite(mu) or mu <= 0.0:
+        raise ValueError("central_mass_solar must be positive and finite.")
+    r = np.hypot.reduce(rel_p, axis=1)
+    if np.any(r == 0.0):
+        raise ValueError("A state lies exactly on the central mass.")
+    v2 = np.sum(rel_v * rel_v, axis=1)
+    energy = 0.5 * v2 - mu / r
+    h = np.cross(rel_p, rel_v)
+    h2 = np.sum(h * h, axis=1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        semi_major = np.where(energy < 0.0, -mu / (2.0 * energy), np.inf)
+        ecc = np.sqrt(np.maximum(0.0, 1.0 + 2.0 * energy * h2 / (mu * mu)))
+    return semi_major, ecc

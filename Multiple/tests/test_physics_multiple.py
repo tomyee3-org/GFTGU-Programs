@@ -1818,5 +1818,317 @@ class TestConservationTableFormatting(unittest.TestCase):
         self.assertIn("1.0000e-300", rows[1])
 
 
+
+AU = 1.495978707e11
+YEAR = 365.25 * 86400.0
+
+
+def sun_jupiter_params(**overrides):
+    """A circular Sun-Jupiter pair with its centre of mass at rest."""
+    values = dict(
+        n_bodies=2, masses_solar=[1.0, 9.548e-4],
+        positions_init=[[-7.4241e8, 0.0, 0.0], [7.77555e11, 0.0, 0.0]],
+        velocities_init=[[0.0, -12.462, 0.0], [0.0, 13051.96, 0.0]],
+        dt=1.87e6, max_steps=200, eps1=0.05, eps2=1e-7,
+        output_type="trajectories", display_frame="com",
+    )
+    values.update(overrides)
+    return driver.SimulationParams(**values)
+
+
+class TestTestParticles(unittest.TestCase):
+    """Massless test particles: physics, integration, removal and output."""
+
+    def test_acceleration_matches_a_negligible_mass_body(self):
+        massive = np.array([[0.0, 0.0, 0.0], [3.0e11, 1.0e11, -2.0e10]])
+        masses = np.array([1.0, 0.3])
+        test = np.array([[1.0e11, 2.0e10, 5.0e9], [-2.0e11, 0.0, 0.0]])
+        got = phys.compute_test_particle_accelerations(test, massive, masses)
+        for k, point in enumerate(test):
+            reference = phys.compute_accelerations(
+                np.vstack((massive, point)), np.append(masses, 1e-30))[-1]
+            np.testing.assert_allclose(got[k], reference, rtol=1e-12)
+        self.assertEqual(phys.compute_test_particle_accelerations(
+            np.zeros((0, 3)), massive, masses).shape, (0, 3))
+        with self.assertRaises(ValueError):
+            phys.compute_test_particle_accelerations([[0.0, 0.0, 0.0]], massive, masses)
+        with self.assertRaises(ValueError):
+            phys.compute_test_particle_accelerations([[1.0, 2.0]], massive, masses)
+
+    def test_ring_states_are_circular_and_spread_by_the_golden_angle(self):
+        radii = np.array([1.0, 2.0, 3.0]) * AU
+        center = np.array([1.0e10, -2.0e10, 0.0])
+        center_v = np.array([100.0, 200.0, 0.0])
+        pos, vel = phys.ring_test_particle_states(radii, 2.0, center, center_v)
+        rel_p, rel_v = pos - center, vel - center_v
+        np.testing.assert_allclose(np.linalg.norm(rel_p, axis=1), radii, rtol=1e-14)
+        np.testing.assert_allclose(np.sum(rel_p * rel_v, axis=1), 0.0, atol=1e-3 * AU)
+        a, e = phys.osculating_elements(rel_p, rel_v, 2.0)
+        np.testing.assert_allclose(a, radii, rtol=1e-12)
+        np.testing.assert_allclose(e, 0.0, atol=1e-7)
+        angles = np.arctan2(rel_p[:, 1], rel_p[:, 0])
+        np.testing.assert_allclose(np.mod(angles[1] - angles[0], 2 * np.pi),
+                                   phys.GOLDEN_ANGLE, rtol=1e-12)
+        self.assertTrue(np.all(np.cross(rel_p, rel_v)[:, 2] > 0.0))
+        with self.assertRaises(ValueError):
+            phys.ring_test_particle_states([0.0], 1.0)
+
+    def test_massive_bodies_are_bitwise_unchanged_by_test_particles(self):
+        test_p, test_v = phys.ring_test_particle_states(
+            np.array([2.0e10, 6.0e10, 1.5e11]), 3.0)
+        for output_type in ("trajectories", "animation"):
+            with self.subTest(output_type=output_type):
+                base = dict(
+                    n_bodies=3, masses_solar=[1.0, 1.0, 1.0],
+                    positions_init=entry.DEFAULTS["positions_init"],
+                    velocities_init=entry.DEFAULTS["velocities_init"],
+                    dt=2000.0, max_steps=600, eps1=0.005, eps2=1e-7,
+                    output_type=output_type, frame_time=2e4,
+                )
+                plain = driver.run_simulation(driver.SimulationParams(**base))
+                loaded = driver.run_simulation(driver.SimulationParams(
+                    **base, test_positions_init=test_p.tolist(),
+                    test_velocities_init=test_v.tolist(),
+                    removal_radii=[1e9, 1e9, 1e9], escape_radius=1e13))
+                self.assertEqual(plain["n_test_particles"], 0)
+                self.assertEqual(loaded["n_test_particles"], 3)
+                keys = (("times", "positions", "velocities", "energies", "dt_used")
+                        if output_type == "trajectories"
+                        else ("frame_times", "frame_positions", "frame_velocities"))
+                for key in keys:
+                    self.assertTrue(np.array_equal(plain[key], loaded[key]), key)
+                for key in ("accepted_steps", "final_time", "max_fractional_energy_drift",
+                            "max_momentum_drift", "max_angular_momentum_drift"):
+                    self.assertEqual(plain[key], loaded[key], key)
+
+    def test_test_particle_follows_a_kepler_orbit(self):
+        # A Sun-like body with a negligible, distant companion: a test
+        # particle on a circular 1-AU orbit must return to its start after
+        # one Kepler period.
+        period = 2 * np.pi * np.sqrt(AU ** 3 / phys.GM_SUN)
+        pos, vel = phys.ring_test_particle_states([AU], 1.0, phases_rad=[0.0])
+        result = driver.run_simulation(driver.SimulationParams(
+            n_bodies=2, masses_solar=[1.0, 1e-12],
+            positions_init=[[0.0, 0.0, 0.0], [1e16, 0.0, 0.0]],
+            velocities_init=[[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+            dt=period / 2000, max_steps=2000, eps1=0.5, eps2=1e-12,
+            output_type="trajectories", test_positions_init=pos.tolist(),
+            test_velocities_init=vel.tolist(), test_center=1))
+        self.assertAlmostEqual(result["final_time"] / period, 1.0, places=9)
+        path = result["test_positions"][:, 0, :]
+        radius = np.linalg.norm(path, axis=1)
+        self.assertLess(np.max(np.abs(radius / AU - 1.0)), 1e-6)
+        self.assertLess(np.linalg.norm(path[-1] - path[0]) / AU, 1e-4)
+        self.assertEqual(result["test_particles"]["fate"], ["survived"])
+        self.assertEqual(result["test_particles"]["center"], "body 1")
+
+    def test_test_particle_matches_a_tiny_mass_body(self):
+        pos, vel = phys.ring_test_particle_states([4.5 * AU], 1.0 + 9.548e-4)
+        massless = driver.run_simulation(sun_jupiter_params(
+            eps2=1e-12, test_positions_init=pos.tolist(),
+            test_velocities_init=vel.tolist()))
+        tiny = driver.run_simulation(sun_jupiter_params(
+            n_bodies=3, masses_solar=[1.0, 9.548e-4, 1e-15], eps2=1e-12,
+            positions_init=[*sun_jupiter_params().positions_init, pos[0].tolist()],
+            velocities_init=[*sun_jupiter_params().velocities_init, vel[0].tolist()]))
+        np.testing.assert_array_equal(massless["times"], tiny["times"])
+        difference = np.linalg.norm(
+            massless["test_positions"][:, 0, :] - tiny["positions"][:, 2, :], axis=1)
+        self.assertLess(np.max(difference) / AU, 1e-9)
+
+    def test_encounter_and_escape_are_recorded_and_paths_end(self):
+        # Particle 1 falls straight onto the Sun; particle 2 leaves fast.
+        # The 2000-s step resolves the fall: near the Sun a step moves the
+        # particle less than its 0.01-AU removal radius.
+        result = driver.run_simulation(sun_jupiter_params(
+            dt=2000.0, max_steps=300,
+            test_positions_init=[[0.1 * AU, 0.0, 0.0], [0.0, -4.5 * AU, 0.0]],
+            test_velocities_init=[[0.0, 0.0, 0.0], [0.0, -3.0e5, 0.0]],
+            removal_radii=[0.01 * AU, 0.355 * AU], escape_radius=5.0 * AU))
+        info = result["test_particles"]
+        self.assertEqual(info["fate"], ["encounter", "escaped"])
+        self.assertEqual(list(info["removal_body"]), [1, 0])
+        self.assertTrue(np.all(np.isfinite(info["removal_time_s"])))
+        for k in range(2):
+            index = int(np.searchsorted(result["times"], info["removal_time_s"][k]))
+            self.assertEqual(result["times"][index], info["removal_time_s"][k])
+            self.assertTrue(np.all(np.isfinite(result["test_positions"][:index, k])))
+            self.assertTrue(np.all(np.isnan(result["test_positions"][index:, k])))
+        # Removal is detected at an accepted step, just past the boundary.
+        last = info["final_positions"]
+        self.assertLessEqual(np.linalg.norm(last[0] - result["positions"][-1, 0]),
+                             0.01 * AU)
+
+    def test_survival_mode_stores_no_paths_and_stops_when_empty(self):
+        result = driver.run_simulation(sun_jupiter_params(
+            output_type="survival", max_steps=500,
+            test_positions_init=[[0.0, -2.0 * AU, 0.0]],
+            test_velocities_init=[[0.0, -2.0e5, 0.0]], escape_radius=5.0 * AU))
+        self.assertEqual(result["type"], "survival")
+        self.assertLess(result["accepted_steps"], 500)
+        self.assertEqual(result["final_time"], result["test_particles"]["removal_time_s"][0])
+        for key in ("positions", "test_positions", "frame_positions"):
+            self.assertNotIn(key, result)
+        self.assertEqual(len(result["conservation_samples"]), 11)
+
+    def test_invalid_test_particle_inputs_are_rejected(self):
+        ring_p, ring_v = phys.ring_test_particle_states([3.0 * AU], 1.0)
+        good = dict(test_positions_init=ring_p.tolist(), test_velocities_init=ring_v.tolist())
+        cases = {
+            "survival without particles": dict(output_type="survival"),
+            "positions without velocities": dict(test_positions_init=ring_p.tolist()),
+            "mismatched velocities": dict(test_positions_init=ring_p.tolist(),
+                                          test_velocities_init=[[0, 0, 0], [0, 0, 0]]),
+            "non-finite": dict(test_positions_init=[[np.nan, 0, 0]],
+                               test_velocities_init=[[0, 0, 0]]),
+            "starts inside removal radius": dict(good, removal_radii=[4.0 * AU, 0.0]),
+            "starts beyond escape radius": dict(good, escape_radius=2.0 * AU),
+            "starts on a body": dict(test_positions_init=[[-7.4241e8, 0.0, 0.0]],
+                                     test_velocities_init=[[0, 0, 0]]),
+            "removal radii length": dict(good, removal_radii=[1.0]),
+            "negative removal radius": dict(good, removal_radii=[-1.0, 0.0]),
+            "zero escape radius": dict(good, escape_radius=0.0),
+            "test_center too large": dict(good, test_center=3),
+            "test_center word": dict(good, test_center="sun"),
+            "too many stored states": dict(good, max_steps=driver.MAX_TEST_PARTICLE_STATES),
+        }
+        for label, overrides in cases.items():
+            with self.subTest(label), self.assertRaises(ValueError):
+                driver.run_simulation(sun_jupiter_params(**overrides))
+        # The same storage request is fine when nothing is stored per step.
+        driver._validate_params(sun_jupiter_params(
+            output_type="survival", max_steps=driver.MAX_TEST_PARTICLE_STATES, **good))
+
+    def test_plots_accept_test_particles_and_reject_bad_survival_results(self):
+        result = driver.run_simulation(sun_jupiter_params(
+            max_steps=30,
+            test_positions_init=[[3.0 * AU, 0.0, 0.0], [0.0, -2.0 * AU, 0.0]],
+            test_velocities_init=[[0.0, 17000.0, 0.0], [0.0, -2.0e5, 0.0]],
+            escape_radius=3.5 * AU))
+        survival = driver.run_simulation(sun_jupiter_params(
+            output_type="survival", max_steps=30,
+            test_positions_init=[[3.0 * AU, 0.0, 0.0]],
+            test_velocities_init=[[0.0, 17000.0, 0.0]]))
+        animation = driver.run_simulation(sun_jupiter_params(
+            output_type="animation", max_steps=30, frame_time=4e6,
+            test_positions_init=[[3.0 * AU, 0.0, 0.0], [0.0, -2.0 * AU, 0.0]],
+            test_velocities_init=[[0.0, 17000.0, 0.0], [0.0, -2.0e5, 0.0]],
+            escape_radius=3.5 * AU))
+        self.assertTrue(np.any(np.isnan(animation["test_frame_positions"][-1])))
+        with mock.patch.object(plotting.plt, "show"):
+            plotting.plot_trajectories(result)
+            plotting.plot_survival(survival)
+            handles = plotting.animate_multiple(animation)
+            handles["timer"].stop()
+            handles["on_key"](mock.Mock(key="f"))
+            plotting.plt.close("all")
+        with self.assertRaises(ValueError):
+            plotting.plot_survival({"type": "survival", "final_time": 1.0})
+        with self.assertRaises(ValueError):
+            plotting.plot_survival([])
+
+    def test_cli_ring_options_and_csv(self):
+        args = entry.parse_args([
+            "--n_bodies", "2", "--masses_solar", "1,1",
+            "--positions_init", "7.48e10,0,0;-7.48e10,0,0",
+            "--velocities_init", "0,21061,0;0,-21061,0",
+            "--test_ring", "1.5e10,3e10,4", "--test_center", "1",
+            "--removal_radii", "7e8,7e8", "--escape_radius", "3e12",
+            "--output_type", "survival"])
+        positions, velocities = entry.test_particle_initial_states(args)
+        radii = np.linalg.norm(np.array(positions) - [7.48e10, 0, 0], axis=1)
+        np.testing.assert_allclose(radii, [1.5e10, 2.0e10, 2.5e10, 3.0e10], rtol=1e-12)
+        self.assertEqual(args.test_center, 1)
+        bad = (
+            ["--output_type", "survival"],
+            ["--test_ring", "2e11,1e11,3"],
+            ["--test_ring", "1e11,2e11"],
+            ["--test_ring", "1e11,2e11,3", "--test_positions_init", "1e11,0,0",
+             "--test_velocities_init", "0,1,0"],
+            ["--test_positions_init", "1e11,0,0"],
+            ["--test_center", "4"],
+            ["--removal_radii", "1,2"],
+            ["--escape_radius", "-5"],
+        )
+        for extra in bad:
+            with self.subTest(extra=extra), contextlib.redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit):
+                entry.parse_args(extra)
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "fates.csv"
+            output = io.StringIO()
+            with mock.patch.object(entry, "plot_survival"), \
+                    contextlib.redirect_stdout(output):
+                entry.main([
+                    "--n_bodies", "2", "--masses_solar", "1,9.548e-4",
+                    "--positions_init", "-7.4241e8,0,0;7.77555e11,0,0",
+                    "--velocities_init", "0,-12.462,0;0,13051.96,0",
+                    "--dt", "1.87e6", "--eps1", "0.05", "--max_steps", "40",
+                    "--output_type", "survival", "--test_ring", "4.5e11,6e11,3",
+                    "--escape_radius", "3e12", "--test_csv", str(path)])
+            rows = path.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(rows), 4)
+        self.assertTrue(rows[0].startswith("particle,x0_m,"))
+        self.assertIn("Test particles: 3; survived 3", output.getvalue())
+        self.assertIn("Fewest dt steps per starting test-particle orbit", output.getvalue())
+
+
+class TestBeat9Help(unittest.TestCase):
+    """Beat 9 and the two binary-star experiments use the live program."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = HELP_PATH.read_text(encoding="utf-8")
+
+    def section(self, section_id):
+        match = re.search(rf'<section id="{section_id}">(.*?)</section>', self.text, re.S)
+        self.assertIsNotNone(match, section_id)
+        return match.group(1)
+
+    def command(self, section_id, index=0):
+        commands = tutorial_commands(self.section(section_id))
+        return entry.parse_args(shlex.split(commands[index])[2:])
+
+    def test_new_beat_and_experiments_are_linked(self):
+        for anchor in ("beat9", "exp11", "exp12"):
+            self.assertIn(f'id="{anchor}"', self.text)
+            self.assertIn(f'href="#{anchor}"', self.text)
+
+    def run_command(self, args):
+        test_positions, test_velocities = entry.test_particle_initial_states(args)
+        return driver.run_simulation(driver.SimulationParams(
+            n_bodies=args.n_bodies, masses_solar=args.masses_solar,
+            positions_init=args.positions_init, velocities_init=args.velocities_init,
+            dt=args.dt, max_steps=args.max_steps, eps1=args.eps1, eps2=args.eps2,
+            output_type=args.output_type, test_positions_init=test_positions,
+            test_velocities_init=test_velocities, removal_radii=args.removal_radii,
+            escape_radius=args.escape_radius, test_center=args.test_center))
+
+    def test_beat9_jupiter_clearing_numbers(self):
+        args = self.command("beat9")
+        self.assertEqual(args.output_type, "survival")
+        result = self.run_command(args)
+        info = result["test_particles"]
+        r0 = info["initial_distance_m"] / AU
+        removed = [f != "survived" for f in info["fate"]]
+        self.assertEqual(sum(removed), 12)
+        self.assertEqual(set(info["fate"]), {"survived", "encounter", "escaped"})
+        self.assertEqual(info["fate"].count("escaped"), 1)
+        kept = ~np.array(removed)
+        # The ring radii are quoted to 0.01 AU in the Help.
+        self.assertAlmostEqual(min(r0[removed]), 4.35, places=4)
+        self.assertAlmostEqual(max(r0[removed]), 4.90, places=4)
+        self.assertAlmostEqual(max(r0[kept][r0[kept] < 4.5]), 4.30, places=4)
+        self.assertEqual([round(x, 2) for x in r0[kept][r0[kept] > 4.5]], [4.95, 5.0])
+        beat9 = " ".join(self.section("beat9").split())
+        for claim in ("4.35 AU", "4.30 AU", "1426 years", "12 of the 41", "1209 years"):
+            self.assertIn(claim, beat9)
+        self.assertAlmostEqual(result["final_time"] / YEAR, 1426.0, places=1)
+        escaped = info["removal_time_s"][info["fate"].index("escaped")] / YEAR
+        self.assertAlmostEqual(escaped, 1209.0, delta=0.5)
+        self.assertAlmostEqual(r0[info["fate"].index("escaped")], 4.85, places=4)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

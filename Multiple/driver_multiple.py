@@ -4,11 +4,16 @@ Integration driver for Multiple.
 The numerical integration uses an adaptive predictor plus iterated trapezoidal
 corrector. Animation frames are sampled at uniform PHYSICAL simulation times,
 so adaptive timestep changes do not distort movie playback speed.
+
+Optional massless test particles are advanced with the same predictor and
+corrector after each accepted step of the massive bodies. They feel the
+massive bodies, pull on nothing, and never influence the timestep, so the
+massive bodies' motion is identical with or without them.
 """
 
 from dataclasses import dataclass
 from numbers import Integral, Real
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 
 import numpy as np
 
@@ -17,6 +22,9 @@ from physics_multiple import compute_accelerations, conservation_state
 
 
 MAX_ANIMATION_FRAMES = 1_000_000
+# Ceiling on stored test-particle states (states times particles) in the
+# trajectories and animation modes. Survival mode stores no path history.
+MAX_TEST_PARTICLE_STATES = 5_000_000
 ENERGY_CANCELLATION_TOLERANCE = 128.0 * np.finfo(float).eps
 
 
@@ -29,7 +37,7 @@ class SimulationParams:
 
     dt: float
     max_steps: int
-    output_type: str                   # "trajectories" or "animation"
+    output_type: str                   # "trajectories", "animation" or "survival"
     eps1: float
     eps2: float
 
@@ -40,6 +48,19 @@ class SimulationParams:
     projection: str = "xy"             # "xy", "xz", or "yz"
     axis_mode: str = "fixed"           # "fixed" or "auto"
     display_frame: str = "com"         # "com" or "user"
+
+    # Optional massless test particles. They feel the massive bodies but
+    # exert no force, so they never change the massive bodies' motion.
+    test_positions_init: Optional[List[List[float]]] = None
+    test_velocities_init: Optional[List[List[float]]] = None
+    # Removal criteria checked after every accepted step. A particle within
+    # removal_radii[k] of body k is removed as an "encounter" (use a star's
+    # radius for a collision, or a planet's Hill radius for a close approach).
+    removal_radii: Optional[List[float]] = None   # [m], one per massive body
+    escape_radius: Optional[float] = None         # [m], from the massive COM
+    # Reference for each particle's starting distance, a and e: "com" or a
+    # 1-based massive-body number.
+    test_center: Union[str, int] = "com"
 
 
 def _validate_params(params: SimulationParams) -> None:
@@ -105,9 +126,13 @@ def _validate_params(params: SimulationParams) -> None:
         raise ValueError("eps2 must satisfy 0 < eps2 < eps1.")
 
     if not isinstance(params.output_type, str):
-        raise ValueError('output_type must be "trajectories" or "animation".')
-    if params.output_type.lower() not in ("trajectories", "animation"):
-        raise ValueError('output_type must be "trajectories" or "animation".')
+        raise ValueError(
+            'output_type must be "trajectories", "animation" or "survival".'
+        )
+    if params.output_type.lower() not in ("trajectories", "animation", "survival"):
+        raise ValueError(
+            'output_type must be "trajectories", "animation" or "survival".'
+        )
 
     # Projection applies to both output modes.
     if not isinstance(params.projection, str):
@@ -165,6 +190,131 @@ def _validate_params(params: SimulationParams) -> None:
                 f"{MAX_ANIMATION_FRAMES:,} stored frames. Increase frame_time "
                 "or reduce dt or max_steps."
             )
+
+    _validate_test_particle_params(params, positions, velocities, masses)
+
+
+def _test_particle_arrays(params: SimulationParams):
+    """Return (positions, velocities) of the test particles, possibly empty."""
+    if params.test_positions_init is None and params.test_velocities_init is None:
+        return np.zeros((0, 3)), np.zeros((0, 3))
+    if params.test_positions_init is None or params.test_velocities_init is None:
+        raise ValueError(
+            "test_positions_init and test_velocities_init must be given together."
+        )
+    try:
+        test_pos = np.asarray(params.test_positions_init, dtype=float)
+        test_vel = np.asarray(params.test_velocities_init, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "Test-particle positions and velocities must contain numeric values."
+        ) from exc
+    if test_pos.size == 0 and test_vel.size == 0:
+        return np.zeros((0, 3)), np.zeros((0, 3))
+    if test_pos.ndim != 2 or test_pos.shape[1] != 3:
+        raise ValueError(
+            "test_positions_init must be a list of three-component vectors."
+        )
+    if test_vel.shape != test_pos.shape:
+        raise ValueError(
+            "test_velocities_init must contain one three-component vector per "
+            "test particle."
+        )
+    if not (np.all(np.isfinite(test_pos)) and np.all(np.isfinite(test_vel))):
+        raise ValueError("All test-particle positions and velocities must be finite.")
+    return test_pos, test_vel
+
+
+def _normalized_test_center(value, n_bodies: int):
+    """Return "com" or a 0-based massive-body index."""
+    if isinstance(value, str):
+        if value.lower() == "com":
+            return "com"
+        try:
+            value = int(value)
+        except ValueError:
+            raise ValueError(
+                'test_center must be "com" or a body number from 1 to n_bodies.'
+            ) from None
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise ValueError(
+            'test_center must be "com" or a body number from 1 to n_bodies.'
+        )
+    if not 1 <= int(value) <= n_bodies:
+        raise ValueError(
+            'test_center must be "com" or a body number from 1 to n_bodies.'
+        )
+    return int(value) - 1
+
+
+def _validate_test_particle_params(params, positions, velocities, masses) -> None:
+    test_pos, _ = _test_particle_arrays(params)
+    n_test = test_pos.shape[0]
+    output_type = params.output_type.lower()
+    if output_type == "survival" and n_test == 0:
+        raise ValueError("output_type 'survival' needs at least one test particle.")
+
+    _normalized_test_center(params.test_center, params.n_bodies)
+
+    radii = _removal_radii(params)
+    if params.escape_radius is not None:
+        value = params.escape_radius
+        if (
+            not isinstance(value, Real) or isinstance(value, bool)
+            or not np.isfinite(value) or value <= 0.0
+        ):
+            raise ValueError("escape_radius must be a positive finite number.")
+
+    if n_test:
+        # A particle already removed at t = 0 is an input mistake.
+        separation = positions[None, :, :] - test_pos[:, None, :]
+        distance = np.hypot.reduce(separation, axis=2)
+        if np.any(distance == 0.0):
+            raise ValueError("A test particle starts exactly on a massive body.")
+        if np.any(distance <= radii[None, :]):
+            raise ValueError(
+                "A test particle starts inside a massive body's removal radius."
+            )
+        if params.escape_radius is not None:
+            com = phys.center_of_mass(positions, masses)
+            if np.any(np.hypot.reduce(test_pos - com, axis=1)
+                      >= params.escape_radius):
+                raise ValueError(
+                    "A test particle starts at or beyond the escape radius."
+                )
+
+        if output_type == "trajectories":
+            stored = (int(params.max_steps) + 1) * n_test
+            if stored > MAX_TEST_PARTICLE_STATES:
+                raise ValueError(
+                    "Storing every test-particle state could exceed "
+                    f"{MAX_TEST_PARTICLE_STATES:,} particle-states. Use "
+                    "output_type survival, fewer particles, or fewer steps."
+                )
+        elif output_type == "animation":
+            frames = float(params.dt) * int(params.max_steps) / float(params.frame_time) + 1.0
+            if frames * n_test > MAX_TEST_PARTICLE_STATES:
+                raise ValueError(
+                    "The animation could store more than "
+                    f"{MAX_TEST_PARTICLE_STATES:,} test-particle frame states. "
+                    "Increase frame_time, use fewer particles, or use "
+                    "output_type survival."
+                )
+
+
+def _removal_radii(params: SimulationParams) -> np.ndarray:
+    """Return one non-negative removal radius per massive body."""
+    if params.removal_radii is None:
+        return np.zeros(params.n_bodies)
+    try:
+        radii = np.asarray(params.removal_radii, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("removal_radii must contain numeric values.") from exc
+    if radii.shape != (params.n_bodies,):
+        raise ValueError("removal_radii must contain exactly n_bodies values.")
+    if not np.all(np.isfinite(radii)) or np.any(radii < 0.0):
+        raise ValueError("Removal radii must be finite and non-negative.")
+    return radii
 
 
 def _max_relative_vector_change(old: np.ndarray, new: np.ndarray) -> float:
@@ -357,6 +507,108 @@ def _checked_maximum_drift(
     return max(current_maximum, candidate)
 
 
+def _advance_test_particles(
+    test_pos, test_vel, act, test_acc0, new_positions, masses, h, eps2,
+    max_iterations,
+) -> None:
+    """Advance the active test particles in place over one accepted step.
+
+    The same predictor and iterated trapezoidal corrector used for the
+    massive bodies, with the massive bodies' accepted end positions supplying
+    the end-of-step force. The test particles never reject a step: a particle
+    whose corrector has not converged keeps its last iterate.
+    """
+    p0 = test_pos[act]
+    v0 = test_vel[act]
+    with np.errstate(over="ignore", invalid="ignore"):
+        p_guess = p0 + v0 * h + 0.5 * test_acc0 * h * h
+        v_guess = v0 + test_acc0 * h
+    for _ in range(max_iterations):
+        acc_end = phys._test_accelerations_unchecked(p_guess, new_positions, masses)
+        with np.errstate(over="ignore", invalid="ignore"):
+            v_corr = v0 + 0.5 * (test_acc0 + acc_end) * h
+            p_corr = p0 + 0.5 * (v0 + v_corr) * h
+        change = _max_relative_vector_change(v_guess - v0, v_corr - v0)
+        p_guess, v_guess = p_corr, v_corr
+        if not np.isfinite(change) or change < eps2:
+            break
+    test_pos[act] = p_guess
+    test_vel[act] = v_guess
+
+
+def _remove_test_particles(
+    test_pos, test_vel, previous_pos, previous_vel, act, active, positions,
+    masses, removal_radii, escape_radius, time, removal_time,
+    removal_reason, removal_body,
+) -> None:
+    """Apply the removal criteria to the particles advanced this step."""
+    p = test_pos[act]
+    v = test_vel[act]
+    finite = np.all(np.isfinite(p), axis=1) & np.all(np.isfinite(v), axis=1)
+    with np.errstate(over="ignore", invalid="ignore"):
+        distance = np.hypot.reduce(positions[None, :, :] - p[:, None, :], axis=2)
+        inside = distance <= removal_radii[None, :]
+        flagged = ~finite | np.any(inside, axis=1)
+        if escape_radius is not None:
+            com = (np.sum(masses[:, None] * positions, axis=0)
+                   / float(np.sum(masses)))
+            from_com = np.hypot.reduce(p - com, axis=1)
+            flagged |= from_com > escape_radius
+    for local in np.flatnonzero(flagged):
+        index = act[local]
+        if not finite[local]:
+            reason, body = "numerical", 0
+            test_pos[index] = previous_pos[index]
+            test_vel[index] = previous_vel[index]
+        elif np.any(inside[local]):
+            hits = np.flatnonzero(inside[local])
+            reason = "encounter"
+            body = int(hits[np.argmin(distance[local, hits])]) + 1
+        else:
+            reason, body = "escaped", 0
+        active[index] = False
+        removal_time[index] = time
+        removal_reason[index] = reason
+        removal_body[index] = body
+
+
+def _test_particle_summary(
+    positions0, velocities0, masses, test_center, initial_pos, initial_vel,
+    final_pos, final_vel, removal_time, removal_reason, removal_body,
+    removal_radii, escape_radius,
+) -> Dict[str, Any]:
+    """Collect each particle's starting orbit and fate."""
+    if test_center == "com":
+        center_p = phys.center_of_mass(positions0, masses)
+        center_v = phys.center_of_mass_velocity(velocities0, masses)
+        center_mass = float(np.sum(masses))
+        center_label = "com"
+    else:
+        center_p = positions0[test_center]
+        center_v = velocities0[test_center]
+        center_mass = float(masses[test_center])
+        center_label = f"body {test_center + 1}"
+    rel_p = initial_pos - center_p
+    rel_v = initial_vel - center_v
+    semi_major, ecc = phys.osculating_elements(rel_p, rel_v, center_mass)
+    return {
+        "center": center_label,
+        "center_mass_solar": center_mass,
+        "initial_positions": initial_pos,
+        "initial_velocities": initial_vel,
+        "initial_distance_m": np.hypot.reduce(rel_p, axis=1),
+        "initial_semi_major_axis_m": semi_major,
+        "initial_eccentricity": ecc,
+        "final_positions": final_pos.copy(),
+        "final_velocities": final_vel.copy(),
+        "removal_time_s": removal_time.copy(),
+        "fate": list(removal_reason),
+        "removal_body": removal_body.copy(),
+        "removal_radii_m": removal_radii.copy(),
+        "escape_radius_m": escape_radius,
+    }
+
+
 def run_simulation(params: SimulationParams) -> Dict[str, Any]:
     """
     Run the Multiple simulation.
@@ -366,6 +618,12 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
     "animation" stores cubic-Hermite-interpolated frames at uniformly spaced
     physical times t = 0, frame_time, 2*frame_time, ... independent of the
     adaptive integration timestep.
+
+    "survival" stores no path history. It records when and why each test
+    particle is removed, and stops early once every particle is gone.
+
+    Test-particle states are stored as NaN after a particle is removed. The
+    conservation diagnostics describe the massive bodies only.
     """
     _validate_params(params)
 
@@ -435,10 +693,43 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
         next_frame_index = 1
         next_frame_time = next_frame_index * params.frame_time
 
+    # Massless test particles. They are advanced after each accepted step of
+    # the massive bodies, using the massive bodies' start and end positions,
+    # so they can never alter the massive bodies' motion or the timestep.
+    test_pos, test_vel = _test_particle_arrays(params)
+    n_test = test_pos.shape[0]
+    has_tests = n_test > 0
+    removal_radii = _removal_radii(params)
+    escape_radius = params.escape_radius
+    test_center = _normalized_test_center(params.test_center, params.n_bodies)
+    active = np.ones(n_test, dtype=bool)
+    removal_time = np.full(n_test, np.nan)
+    removal_reason = ["survived"] * n_test
+    removal_body = np.zeros(n_test, dtype=int)
+    test_initial_pos = test_pos.copy()
+    test_initial_vel = test_vel.copy()
+
+    def _masked(array):
+        shown = array.copy()
+        shown[~active] = np.nan
+        return shown
+
+    if has_tests:
+        if output_type == "trajectories":
+            test_out_positions = [test_pos.copy()]
+            test_out_velocities = [test_vel.copy()]
+        elif output_type == "animation":
+            test_frame_positions = [test_pos.copy()]
+
     accepted_steps = 0
 
     while accepted_steps < params.max_steps:
         acc0 = compute_accelerations(positions, masses)
+        if has_tests:
+            act = np.flatnonzero(active)
+            test_acc0 = phys._test_accelerations_unchecked(
+                test_pos[act], positions, masses
+            )
         accepted = False
 
         for _retry in range(max_retries_per_step):
@@ -554,6 +845,22 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
         velocities = vel_guess
         accepted_steps += 1
 
+        if has_tests:
+            previous_test_pos = test_pos.copy()
+            previous_test_vel = test_vel.copy()
+            active_before = active.copy()
+            if act.size:
+                _advance_test_particles(
+                    test_pos, test_vel, act, test_acc0, positions, masses,
+                    dt_work, params.eps2, max_corrector_iterations,
+                )
+                _remove_test_particles(
+                    test_pos, test_vel, previous_test_pos, previous_test_vel,
+                    act, active, positions, masses, removal_radii,
+                    escape_radius, time, removal_time, removal_reason,
+                    removal_body,
+                )
+
         if not (
             np.all(np.isfinite(positions))
             and np.all(np.isfinite(velocities))
@@ -613,7 +920,10 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
                 current_cons["angular_momentum"].copy()
             )
             dt_used.append(dt_work)
-        else:
+            if has_tests:
+                test_out_positions.append(_masked(test_pos))
+                test_out_velocities.append(_masked(test_vel))
+        elif output_type == "animation":
             # One accepted step can cross multiple requested frame times.
             while next_frame_time <= time:
                 if not previous_time <= next_frame_time <= time:
@@ -633,6 +943,13 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
                 frame_positions.append(p_frame)
                 frame_velocities.append(v_frame)
                 frame_times.append(next_frame_time)
+                if has_tests:
+                    t_frame, _ = _hermite_state(
+                        previous_time, previous_test_pos, previous_test_vel,
+                        time, test_pos, test_vel, next_frame_time,
+                    )
+                    t_frame[~active_before] = np.nan
+                    test_frame_positions.append(t_frame)
                 if len(frame_times) > MAX_ANIMATION_FRAMES:
                     raise RuntimeError(
                         "The animation exceeded the stored-frame safety limit. "
@@ -643,6 +960,11 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
 
         # Gradually recover after close encounters, never exceeding user dt.
         dt_work = min(dt_work * 1.1, params.dt)
+
+        # A survival scan has nothing left to measure once every particle
+        # has been removed.
+        if output_type == "survival" and not np.any(active):
+            break
 
     history_times = np.asarray(conservation_times, dtype=float)
     history_values = np.stack(conservation_values)
@@ -709,7 +1031,20 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
         # the normalization metadata above before interpreting these values.
         "max_fractional_momentum_drift": max_momentum_drift,
         "max_fractional_angular_momentum_drift": max_angular_momentum_drift,
+        "n_test_particles": n_test,
     }
+
+    if has_tests:
+        common["test_particles"] = _test_particle_summary(
+            np.asarray(params.positions_init, dtype=float),
+            np.asarray(params.velocities_init, dtype=float),
+            masses, test_center, test_initial_pos, test_initial_vel,
+            test_pos, test_vel, removal_time, removal_reason, removal_body,
+            removal_radii, escape_radius,
+        )
+
+    if output_type == "survival":
+        return {"type": "survival", **common}
 
     if output_type == "trajectories":
         return {
@@ -722,6 +1057,9 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
             "angular_momenta": np.stack(angular_momenta, axis=0),
             "dt_used": np.asarray(dt_used),
             **common,
+            **({"test_positions": np.stack(test_out_positions, axis=0),
+                "test_velocities": np.stack(test_out_velocities, axis=0)}
+               if has_tests else {}),
         }
 
     return {
@@ -736,4 +1074,6 @@ def run_simulation(params: SimulationParams) -> Dict[str, Any]:
         "projection": params.projection.lower(),
         "axis_mode": params.axis_mode.lower(),
         **common,
+        **({"test_frame_positions": np.stack(test_frame_positions, axis=0)}
+           if has_tests else {}),
     }

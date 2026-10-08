@@ -21,18 +21,38 @@ Run ``python main.py --help`` for defaults and examples. Inputs:
   --display_frame: com (recenter plotted positions at their instantaneous
       center of mass) or user (plot the input inertial coordinates).
   --show_energy_diagnostic: add an energy drift graph (trajectories only).
+  --test_positions_init, --test_velocities_init: optional massless test
+      particles (x,y,z triples, as for the massive bodies). Test particles
+      feel the massive bodies but pull on nothing.
+  --test_ring: "R_MIN,R_MAX,N" places N test particles on circular orbits
+      with radii evenly spaced from R_MIN to R_MAX metres in the x-y plane.
+  --test_center: com or a body number; the centre of --test_ring and the
+      reference for each test particle's starting distance, a and e.
+  --removal_radii: one radius per massive body [m]; a test particle that
+      comes this close is removed as an encounter.
+  --escape_radius: a test particle farther than this from the massive
+      bodies' centre of mass is removed as escaped [m].
+  --output_type survival: no plot of paths; record when each test particle
+      is removed and plot survival time against starting distance.
+  --test_csv: write each test particle's starting orbit and fate to a CSV.
 
-Console totals use input inertial coordinates in both display frames. Eleven
+Console totals use input inertial coordinates in both display frames and
+describe the massive bodies only. Eleven
 locally quadratically interpolated sets of E, E_internal, K, P and L span the run.
 """
 
 import argparse
+import csv
 import math
 import sys
 
 import physics_multiple as phys
 from driver_multiple import SimulationParams, run_simulation
-from plot_multiple import animate_multiple, plot_energy_drift, plot_trajectories
+from plot_multiple import (animate_multiple, plot_energy_drift, plot_survival,
+                           plot_trajectories)
+
+AU_M = 1.495978707e11          # astronomical unit [m]
+YEAR_S = 365.25 * 86400.0      # Julian year [s]
 
 DEFAULTS = {
     "n_bodies": 3,
@@ -44,6 +64,9 @@ DEFAULTS = {
     "frame_interval_ms": 50, "trail_time": 6e5, "projection": "xy",
     "axis_mode": "fixed", "display_frame": "com",
     "show_energy_diagnostic": False,
+    "test_positions_init": None, "test_velocities_init": None,
+    "test_ring": None, "test_center": "com", "removal_radii": None,
+    "escape_radius": None, "test_csv": None,
 }
 
 
@@ -109,6 +132,34 @@ def triples(text):
     return result
 
 
+def nonnegative_list(text):
+    try:
+        result = [nonnegative_float(x.strip()) for x in text.split(",")]
+    except argparse.ArgumentTypeError as error:
+        raise argparse.ArgumentTypeError("removal_radii must list non-negative finite radii") from error
+    return result
+
+
+def ring(text):
+    parts = [part.strip() for part in text.split(",")]
+    if len(parts) != 3:
+        raise argparse.ArgumentTypeError("test_ring needs R_MIN,R_MAX,N")
+    r_min, r_max = positive_float(parts[0]), positive_float(parts[1])
+    count = positive_int(parts[2])
+    if r_max < r_min:
+        raise argparse.ArgumentTypeError("test_ring needs R_MAX >= R_MIN")
+    return r_min, r_max, count
+
+
+def center(text):
+    if text.lower() == "com":
+        return "com"
+    try:
+        return positive_int(text)
+    except argparse.ArgumentTypeError as error:
+        raise argparse.ArgumentTypeError("test_center must be com or a body number") from error
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
         prog="Multiple", formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -134,9 +185,10 @@ def parse_args(argv=None):
         ("trail_time", nonnegative_float, "recent trajectory duration shown in animation [s]"),
     ):
         p.add_argument(f"--{name}", type=value_type, default=DEFAULTS[name], help=description)
-    p.add_argument("--output_type", choices=("animation", "trajectories"),
+    p.add_argument("--output_type", choices=("animation", "trajectories", "survival"),
                    default=DEFAULTS["output_type"],
-                   help="animation: playback at uniform simulated times; trajectories: full static paths")
+                   help="animation: playback at uniform simulated times; trajectories: full static paths; "
+                        "survival: test-particle survival times only")
     p.add_argument("--animation_mode", choices=("trails", "current_positions"),
                    default=DEFAULTS["animation_mode"],
                    help="trails: show recent motion; current_positions: markers only")
@@ -151,11 +203,27 @@ def parse_args(argv=None):
     p.add_argument("--show_energy_diagnostic", action=argparse.BooleanOptionalAction,
                    default=DEFAULTS["show_energy_diagnostic"],
                    help="also show energy drift graph when output_type=trajectories")
+    p.add_argument("--test_positions_init", type=triples, default=DEFAULTS["test_positions_init"],
+                   metavar='"X,Y,Z;X,Y,Z;..."', help="massless test-particle positions [m]")
+    p.add_argument("--test_velocities_init", type=triples, default=DEFAULTS["test_velocities_init"],
+                   metavar='"VX,VY,VZ;VX,VY,VZ;..."', help="matching test-particle velocities [m/s]")
+    p.add_argument("--test_ring", type=ring, default=DEFAULTS["test_ring"], metavar="R_MIN,R_MAX,N",
+                   help="N test particles on circular x-y orbits, radii R_MIN..R_MAX [m] about --test_center")
+    p.add_argument("--test_center", type=center, default=DEFAULTS["test_center"], metavar="com|BODY",
+                   help="centre of --test_ring and reference for each test particle's starting orbit")
+    p.add_argument("--removal_radii", type=nonnegative_list, default=DEFAULTS["removal_radii"],
+                   metavar="R1,R2,...", help="remove a test particle this close to each massive body [m]")
+    p.add_argument("--escape_radius", type=positive_float, default=DEFAULTS["escape_radius"],
+                   help="remove a test particle this far from the massive bodies' centre of mass [m]")
+    p.add_argument("--test_csv", default=DEFAULTS["test_csv"], metavar="PATH",
+                   help="write each test particle's starting orbit and fate to this CSV file")
     # Bind negative exponent-form scalars and vectors with a negative first
     # component so argparse validates values rather than treating them as flags.
     numeric = {"n_bodies", "dt", "max_steps", "eps1", "eps2", "frame_time",
-               "frame_interval_ms", "trail_time"}
-    vector_options = {"masses_solar", "positions_init", "velocities_init"}
+               "frame_interval_ms", "trail_time", "escape_radius"}
+    vector_options = {"masses_solar", "positions_init", "velocities_init",
+                      "test_positions_init", "test_velocities_init",
+                      "test_ring", "removal_radii"}
     raw = list(sys.argv[1:] if argv is None else argv)
     normalized = []
     index = 0
@@ -189,7 +257,103 @@ def parse_args(argv=None):
         p.error("--eps2 must be smaller than --eps1")
     if args.show_energy_diagnostic and args.output_type != "trajectories":
         p.error("--show_energy_diagnostic requires --output_type trajectories")
+    explicit = (args.test_positions_init, args.test_velocities_init)
+    if (explicit[0] is None) != (explicit[1] is None):
+        p.error("--test_positions_init and --test_velocities_init must be given together")
+    if explicit[0] is not None and len(explicit[0]) != len(explicit[1]):
+        p.error("--test_velocities_init needs one triple per test particle")
+    if explicit[0] is not None and args.test_ring is not None:
+        p.error("use either --test_ring or --test_positions_init, not both")
+    if args.test_center != "com" and args.test_center > args.n_bodies:
+        p.error("--test_center must be com or a body number from 1 to --n_bodies")
+    if args.removal_radii is not None and len(args.removal_radii) != args.n_bodies:
+        p.error("--removal_radii must contain exactly --n_bodies entries")
+    if args.output_type == "survival" and explicit[0] is None and args.test_ring is None:
+        p.error("--output_type survival needs --test_ring or --test_positions_init")
     return args
+
+
+def test_particle_initial_states(args):
+    """Return explicit or ring-generated test-particle states, or (None, None)."""
+    if args.test_ring is None:
+        return args.test_positions_init, args.test_velocities_init
+    r_min, r_max, count = args.test_ring
+    radii = [r_min + (r_max - r_min) * k / (count - 1) if count > 1 else r_min
+             for k in range(count)]
+    if args.test_center == "com":
+        position = phys.center_of_mass(args.positions_init, args.masses_solar)
+        velocity = phys.center_of_mass_velocity(args.velocities_init, args.masses_solar)
+        mass = sum(args.masses_solar)
+    else:
+        body = args.test_center - 1
+        position = args.positions_init[body]
+        velocity = args.velocities_init[body]
+        mass = args.masses_solar[body]
+    positions, velocities = phys.ring_test_particle_states(radii, mass, position, velocity)
+    return positions.tolist(), velocities.tolist()
+
+
+def _fate_text(fate, body):
+    if fate == "encounter":
+        return f"encounter (body {body})"
+    return fate
+
+
+def fewest_steps_per_orbit(result, dt):
+    """Return the smallest starting orbital period divided by dt, or None."""
+    info = result["test_particles"]
+    mu = phys.GM_SUN * info["center_mass_solar"]
+    periods = [2.0 * math.pi * math.sqrt(a ** 3 / mu)
+               for a in info["initial_semi_major_axis_m"] if math.isfinite(a)]
+    return min(periods) / dt if periods else None
+
+
+def print_test_particle_table(result, dt=None):
+    """Print each test particle's starting orbit and fate."""
+    info = result["test_particles"]
+    fates = info["fate"]
+    counts = {name: fates.count(name) for name in ("survived", "escaped", "encounter", "numerical")}
+    print(f"Test particles: {result['n_test_particles']}; survived {counts['survived']}; "
+          f"escaped {counts['escaped']}; encounter {counts['encounter']}"
+          + (f"; numerical {counts['numerical']}" if counts["numerical"] else ""))
+    center = "the massive bodies' centre of mass" if info["center"] == "com" else info["center"]
+    print(f"Starting orbits are measured from {center} "
+          f"(point mass {info['center_mass_solar']:.6g} solar masses).")
+    print("   #   r0 [AU]   a0 [AU]       e0  fate                 t_removed [yr]")
+    for index in range(result["n_test_particles"]):
+        a0 = info["initial_semi_major_axis_m"][index]
+        a_text = f"{a0 / AU_M:9.4f}" if math.isfinite(a0) else "  unbound"
+        time = info["removal_time_s"][index]
+        t_text = f"{time / YEAR_S:.4e}" if math.isfinite(time) else "-"
+        print(f"{index + 1:4d} {info['initial_distance_m'][index] / AU_M:9.4f} {a_text} "
+              f"{info['initial_eccentricity'][index]:8.5f}  "
+              f"{_fate_text(fates[index], info['removal_body'][index]):20s} {t_text}")
+    if dt is not None:
+        steps = fewest_steps_per_orbit(result, dt)
+        if steps is not None:
+            print(f"Fewest dt steps per starting test-particle orbit: {steps:.1f}")
+            if steps < 100.0:
+                print("Warning: the test particles do not control the timestep. Fewer than "
+                      "100 steps per orbit can give them inaccurate paths; reduce --dt.")
+
+
+def write_test_particle_csv(result, path):
+    """Write starting states, starting orbits and fates in SI units."""
+    info = result["test_particles"]
+    with open(path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["particle", "x0_m", "y0_m", "z0_m", "vx0_m_s", "vy0_m_s", "vz0_m_s",
+                         "r0_m", "a0_m", "e0", "fate", "removal_body", "removal_time_s"])
+        for index in range(result["n_test_particles"]):
+            time = info["removal_time_s"][index]
+            writer.writerow([index + 1,
+                             *(repr(float(v)) for v in info["initial_positions"][index]),
+                             *(repr(float(v)) for v in info["initial_velocities"][index]),
+                             repr(float(info["initial_distance_m"][index])),
+                             repr(float(info["initial_semi_major_axis_m"][index])),
+                             repr(float(info["initial_eccentricity"][index])),
+                             info["fate"][index], int(info["removal_body"][index]),
+                             repr(float(time)) if math.isfinite(time) else ""])
 
 
 def five(value):
@@ -250,6 +414,10 @@ def print_conservation_samples(result):
 
 def main(argv=None):
     args = parse_args(argv)
+    try:
+        test_positions, test_velocities = test_particle_initial_states(args)
+    except ValueError as error:
+        raise SystemExit(f"Multiple error: {error}") from error
     params = SimulationParams(
         n_bodies=args.n_bodies, masses_solar=args.masses_solar,
         positions_init=args.positions_init, velocities_init=args.velocities_init,
@@ -259,6 +427,9 @@ def main(argv=None):
         frame_time=args.frame_time, frame_interval_ms=args.frame_interval_ms,
         trail_time=args.trail_time, projection=args.projection,
         axis_mode=args.axis_mode, display_frame=args.display_frame,
+        test_positions_init=test_positions, test_velocities_init=test_velocities,
+        removal_radii=args.removal_radii, escape_radius=args.escape_radius,
+        test_center=args.test_center,
     )
     try:
         result = run_simulation(params)
@@ -282,9 +453,22 @@ def main(argv=None):
           f"momentum={five(result['max_momentum_drift'])}, "
           f"angular momentum={five(result['max_angular_momentum_drift'])}")
     print_conservation_samples(result)
+    if result["n_test_particles"]:
+        print(f"Simulated time: {five(result['final_time'] / YEAR_S)} yr")
+        print_test_particle_table(result, params.dt)
+        if args.test_csv:
+            try:
+                write_test_particle_csv(result, args.test_csv)
+            except OSError as error:
+                raise SystemExit(f"Multiple error: could not write {args.test_csv}: {error}") from error
+            print(f"Test-particle table written to {args.test_csv}")
+    elif args.test_csv:
+        print("No test particles: --test_csv was ignored.")
 
     try:
-        if result["type"] == "trajectories":
+        if result["type"] == "survival":
+            plot_survival(result)
+        elif result["type"] == "trajectories":
             plot_trajectories(result, projection=params.projection)
             if args.show_energy_diagnostic:
                 plot_energy_drift(result)
