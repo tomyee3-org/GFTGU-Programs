@@ -2949,5 +2949,70 @@ class TestAudit54Regressions(unittest.TestCase):
         self.assertTrue(np.isnan(m["resonant_min_deg"][1]))
 
 
+class TestAudit55Regressions(unittest.TestCase):
+    """Counterexamples from the Audit55 reviews: mean longitude inside the
+    accepted 5-degree domain must be the true spatial value."""
+
+    @staticmethod
+    def kepler_state(a, e, inclination_deg, node_deg, periapsis_deg, eccentric_anomaly_deg):
+        mu = phys.GM_SUN
+        E = np.radians(eccentric_anomaly_deg)
+        x, y = a * (np.cos(E) - e), a * np.sqrt(1 - e * e) * np.sin(E)
+        rate = np.sqrt(mu / a ** 3) / (1 - e * np.cos(E))
+        vx, vy = -a * np.sin(E) * rate, a * np.sqrt(1 - e * e) * np.cos(E) * rate
+        i, O, w = (np.radians(inclination_deg), np.radians(node_deg),
+                   np.radians(periapsis_deg))
+        R = np.array([
+            [np.cos(O) * np.cos(w) - np.sin(O) * np.sin(w) * np.cos(i),
+             -np.cos(O) * np.sin(w) - np.sin(O) * np.cos(w) * np.cos(i)],
+            [np.sin(O) * np.cos(w) + np.cos(O) * np.sin(w) * np.cos(i),
+             -np.sin(O) * np.sin(w) + np.cos(O) * np.cos(w) * np.cos(i)],
+            [np.sin(w) * np.sin(i), np.cos(w) * np.sin(i)]])
+        return R @ [x, y], R @ [vx, vy]
+
+    @staticmethod
+    def exact_lambda_deg(e, node_deg, periapsis_deg, eccentric_anomaly_deg):
+        E = np.radians(eccentric_anomaly_deg)
+        return node_deg + periapsis_deg + np.degrees(E - e * np.sin(E))
+
+    def test_a55_01_codex_four_degree_case_is_exact(self):
+        r, v = self.kepler_state(4.6 * AU, 0.99, 4.0, 30.0, 45.0, 90.0)
+        lam = np.degrees(phys.mean_longitudes([r], [v], phys.GM_SUN)[0]) % 360.0
+        self.assertAlmostEqual(lam, 108.277178282, places=8)
+
+    def test_a55_01_values_match_kepler_across_the_accepted_domain(self):
+        worst = 0.0
+        for inclination in (0.0, 1e-9, 0.5, 3.0, 4.0, 4.99):
+            for e in (0.0, 1e-9, 0.1, 0.4, 0.9, 0.99, 0.999):
+                for periapsis in (0.0, 45.0, 200.0):
+                    for node in (0.0, 30.0, 300.0):
+                        for anomaly in (0.0, 37.0, 90.0, 179.0, 250.0):
+                            r, v = self.kepler_state(4.6 * AU, e, inclination, node,
+                                                     periapsis, anomaly)
+                            lam = phys.mean_longitudes([r], [v], phys.GM_SUN)[0]
+                            exact = np.radians(self.exact_lambda_deg(e, node, periapsis,
+                                                                     anomaly))
+                            worst = max(worst, abs((lam - exact + np.pi)
+                                                   % (2 * np.pi) - np.pi))
+        self.assertLess(worst, 1e-10)
+        # Still refused beyond 5 degrees and for clockwise orbits.
+        for inclination in (5.01, 60.0, 179.0):
+            r, v = self.kepler_state(4.6 * AU, 0.4, inclination, 30.0, 45.0, 90.0)
+            self.assertTrue(np.isnan(phys.mean_longitudes([r], [v], phys.GM_SUN)[0]))
+
+    def test_a55_01_codex_cli_state_reports_the_true_value(self):
+        position = [-271338618772.5787, -632058592479.5168, -28815489151.61912]
+        velocity = [-3606.2279211954556, -13405.736215415987, -684.9891867944277]
+        result = driver.run_simulation(sun_jupiter_params(
+            dt=100, max_steps=1, output_type="survival",
+            test_positions_init=[position], test_velocities_init=[velocity]))
+        info = result["test_particles"]
+        self.assertTrue(info["co_orbital_start"][0])
+        # Jupiter's mean longitude is zero at the start, so dlambda starts at
+        # the particle's true mean longitude.
+        self.assertAlmostEqual(info["resonant_min_deg"][0] % 360.0, 108.277178, delta=1e-4)
+        self.assertNotAlmostEqual(info["resonant_min_deg"][0] % 360.0, 111.665, delta=0.1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

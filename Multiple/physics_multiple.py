@@ -7,7 +7,7 @@ import numpy as np
 # Public release metadata. MODEL_VERSION changes when the model's documented
 # behaviour changes; BUILD_ID changes whenever one of the core source files
 # changes.
-MODEL_VERSION = "1.12.0"
+MODEL_VERSION = "1.13.0"
 BUILD_ID_COVERS = (
     "physics_multiple.py",
     "driver_multiple.py",
@@ -717,36 +717,60 @@ def mean_longitudes(
     gm,
     max_tilt_deg: float = PAIR_MAX_TILT_DEG,
 ) -> np.ndarray:
-    """Osculating mean longitude [rad] of planar orbits about a central mass.
+    """Osculating mean longitude [rad] about a central mass.
 
     relative_positions/velocities: shape (n, 3), relative to the central
     body; gm: G times the mass that governs each orbit [m^3 s^-2] (scalar or
-    shape (n,)). lambda = varpi + M (longitude of periapsis plus mean
-    anomaly), which stays well defined as the eccentricity goes to zero.
-    The formula is the planar one, so it is only valid for counterclockwise
-    orbits (seen from +z) whose plane is within max_tilt_deg of the x-y
-    plane. NaN for any other orbit (inclined, clockwise or polar), and for an
-    orbit that is not bound or not finite; it never returns a projected
-    value for an orbit outside that domain.
+    shape (n,)).
+
+    lambda = Omega + omega + M (node longitude plus argument of periapsis
+    plus mean anomaly), computed from the full three-dimensional orbit as
+    Omega + u + (M - nu), where u is the argument of latitude and nu the
+    true anomaly, both measured in the orbit's own plane. This form stays
+    well defined as the eccentricity goes to zero (M - nu -> 0) and as the
+    inclination goes to zero (Omega + u -> the true longitude).
+
+    The co-orbital labels only interpret counterclockwise orbits (seen from
+    +z) within max_tilt_deg of the x-y plane, so NaN is returned for any
+    other orbit (more inclined, clockwise or polar), and for an orbit that
+    is not bound or not finite.
     """
     p = np.asarray(relative_positions, dtype=float)
     v = np.asarray(relative_velocities, dtype=float)
-    gm = np.asarray(gm, dtype=float)
+    gm = np.reshape(np.asarray(gm, dtype=float), (-1,))
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
         r = np.hypot.reduce(p, axis=1)
         v2 = np.sum(v * v, axis=1)
         rv = np.sum(p * v, axis=1)
-        e_vec = ((v2 - gm / r)[:, None] * p - rv[:, None] * v) / np.reshape(gm, (-1, 1))
-        e = np.hypot(e_vec[:, 0], e_vec[:, 1])
-        theta = np.arctan2(p[:, 1], p[:, 0])
-        varpi = np.arctan2(e_vec[:, 1], e_vec[:, 0])
-        nu = theta - varpi
-        E = 2.0 * np.arctan2(np.sqrt(np.maximum(0.0, 1.0 - e)) * np.sin(0.5 * nu),
-                             np.sqrt(1.0 + e) * np.cos(0.5 * nu))
-        lam = varpi + E - e * np.sin(E)
-        bound = (0.5 * v2 - gm / r < 0.0) & (e < 1.0)
         h = np.cross(p, v)
         h_norm = np.hypot.reduce(h, axis=1)
+        h_hat = h / h_norm[:, None]
+        e_vec = ((v2 - gm / r)[:, None] * p - rv[:, None] * v) / gm[:, None]
+        e = np.hypot.reduce(e_vec, axis=1)
+        r_hat = p / r[:, None]
+
+        # Ascending node; for an orbit in the x-y plane use the x axis.
+        node = np.stack((-h[:, 1], h[:, 0], np.zeros_like(r)), axis=1)
+        node_norm = np.hypot(node[:, 0], node[:, 1])
+        flat = node_norm <= 1e-12 * h_norm
+        n_hat = np.where(flat[:, None], np.array([1.0, 0.0, 0.0]),
+                         node / np.where(flat, 1.0, node_norm)[:, None])
+        Omega = np.arctan2(n_hat[:, 1], n_hat[:, 0])
+
+        def in_plane_angle(from_hat, to_hat):
+            """Angle from one unit vector to another, measured about h_hat."""
+            cosine = np.sum(from_hat * to_hat, axis=1)
+            sine = np.sum(h_hat * np.cross(from_hat, to_hat), axis=1)
+            return np.arctan2(sine, cosine)
+
+        u = in_plane_angle(n_hat, r_hat)
+        e_hat = e_vec / np.where(e > 0.0, e, 1.0)[:, None]
+        nu = np.where(e > 0.0, in_plane_angle(e_hat, r_hat), 0.0)
+        E = 2.0 * np.arctan2(np.sqrt(np.maximum(0.0, 1.0 - e)) * np.sin(0.5 * nu),
+                             np.sqrt(1.0 + e) * np.cos(0.5 * nu))
+        M = E - e * np.sin(E)
+        lam = Omega + u + (M - nu)
+        bound = (0.5 * v2 - gm / r < 0.0) & (e < 1.0)
         planar = (h[:, 2] > 0.0) & (
             h[:, 2] >= h_norm * np.cos(np.radians(max_tilt_deg)))
     return np.where(bound & planar & np.isfinite(lam), lam, np.nan)
