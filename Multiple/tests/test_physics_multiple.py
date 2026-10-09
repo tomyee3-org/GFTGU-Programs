@@ -1618,7 +1618,7 @@ class PairedTutorialTests(unittest.TestCase):
         self.assertIn(f"Version {version.group(1)}", guide)
         self.assertIn(f"Build {build.group(1)}", guide)
         images = re.findall(r'data:image/png;base64,([A-Za-z0-9+/=]+)', guide)
-        self.assertEqual(len(images), 9)
+        self.assertEqual(len(images), 11)
         for encoded in images:
             self.assertTrue(base64.b64decode(encoded).startswith(b"\x89PNG\r\n\x1a\n"))
 
@@ -2990,6 +2990,11 @@ class TestAudit55Regressions(unittest.TestCase):
                             r, v = self.kepler_state(4.6 * AU, e, inclination, node,
                                                      periapsis, anomaly)
                             lam = phys.mean_longitudes([r], [v], phys.GM_SUN)[0]
+                            # Every state here is inside the accepted domain, so a
+                            # NaN would be a wrong refusal (max() would hide it).
+                            with self.subTest(i=inclination, e=e, omega=periapsis,
+                                              node=node, E=anomaly):
+                                self.assertTrue(np.isfinite(lam))
                             exact = np.radians(self.exact_lambda_deg(e, node, periapsis,
                                                                      anomaly))
                             worst = max(worst, abs((lam - exact + np.pi)

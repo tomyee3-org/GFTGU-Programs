@@ -728,7 +728,10 @@ def mean_longitudes(
     Omega + u + (M - nu), where u is the argument of latitude and nu the
     true anomaly, both measured in the orbit's own plane. This form stays
     well defined as the eccentricity goes to zero (M - nu -> 0) and as the
-    inclination goes to zero (Omega + u -> the true longitude).
+    inclination goes to zero (Omega + u -> the true longitude). The result
+    is not reduced to [0, 2*pi): it can differ from that range by a whole
+    turn (for example -251.72 deg for a longitude of 108.28 deg), so compare
+    values only through wrapped differences.
 
     The co-orbital labels only interpret counterclockwise orbits (seen from
     +z) within max_tilt_deg of the x-y plane, so NaN is returned for any
