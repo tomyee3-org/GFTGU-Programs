@@ -17,6 +17,15 @@ PROGRAM = "Atmosphere"
 MODULE_DIR = Path(__file__).resolve().parent.parent
 
 
+def documented_command_lines(block):
+    """Join Windows/POSIX command continuations without merging separate runs."""
+    joined = re.sub(r"[\\^][ \t]*\r?\n[ \t]*", " ", block)
+    for line in joined.splitlines():
+        line = line.strip()
+        if re.match(r"python(?:3)? main\.py(?:\s|$)", line):
+            yield line.split(" #", 1)[0]
+
+
 def find_merged_help(module_dir):
     module_dir = Path(module_dir)
     for parent in (module_dir, *module_dir.parents):
@@ -95,11 +104,7 @@ class MergedHelpTests(unittest.TestCase):
         checked = 0
         for attrs, block in self.page.pres:
             if attrs.get("data-program", PROGRAM) != PROGRAM: continue
-            joined = re.sub(r"\\\n\s*", " ", block)
-            for line in joined.splitlines():
-                line = line.strip()
-                if not re.match(r"python(?:3)? main\.py(?:\s|$)", line): continue
-                line = line.split(" #", 1)[0]
+            for line in documented_command_lines(block):
                 flags = set(re.findall(r"--[A-Za-z][A-Za-z0-9_-]*", line))
                 self.assertFalse(flags - options, line + ": " + str(sorted(flags-options)))
                 checked += 1
