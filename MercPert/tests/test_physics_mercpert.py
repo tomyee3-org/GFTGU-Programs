@@ -39,6 +39,25 @@ HELP_FILENAMES = ("MercPert.html",)
 PROGRAM_NAME = "MercPert"
 
 
+def join_command_continuations(block):
+    """Normalize either shell continuation symbol, preserving other newlines."""
+    text = unescape(re.sub(r"<[^>]+>", "", block))
+    return re.sub(r"[\\^][ \t]*\r?\n[ \t]*", " ", text)
+
+
+def documented_commands(source, include_inline=False):
+    """Extract complete main.py commands regardless of pre attributes/wrappers."""
+    pre_pattern = r"<pre\b[^>]*>(.*?)</pre>"
+    blocks = re.findall(pre_pattern, source, flags=re.DOTALL)
+    if include_inline:
+        outside_pre = re.sub(pre_pattern, "", source, flags=re.DOTALL)
+        blocks.extend(re.findall(r"<code\b[^>]*>(.*?)</code>", outside_pre,
+                                 flags=re.DOTALL))
+    return [" ".join(line.split()) for block in blocks
+            for line in join_command_continuations(block).splitlines()
+            if re.match(r"python(?:3)? main\.py(?:\s|$)", line.strip())]
+
+
 def find_module_dir(start: Path) -> Path:
     """Find the nearest ancestor containing all four MercPert modules."""
     candidate = Path(start).resolve()
@@ -356,11 +375,7 @@ class PairedTutorialTests(unittest.TestCase):
                                 page, flags=re.DOTALL)
             self.assertIsNotNone(section)
             assert section is not None
-            blocks = re.findall(r'<pre class="code-block"><code>(.*?)</code></pre>',
-                                section.group(1), flags=re.DOTALL)
-            commands = [line.strip() for block in blocks
-                        for line in unescape(block).splitlines()
-                        if line.strip().startswith("python main.py")]
+            commands = documented_commands(section.group(1))
             self.assertTrue(commands, f"Beat {beat} lacks a runnable CLI command")
             for command in commands:
                 with self.subTest(beat=beat, command=command), \
@@ -1114,22 +1129,8 @@ class BeatsHelpTests(unittest.TestCase):
         assert beat9 is not None
         source = body.replace(beat9.group(0), "") if outside_beat9 \
             else beat9.group(1)
-        pre_pattern = r'<pre class="code-block"><code>(.*?)</code></pre>'
-        lines = []
-        for block in re.findall(pre_pattern, source, flags=re.DOTALL):
-            lines.extend(unescape(block).splitlines())
-        inline_source = re.sub(pre_pattern, "", source, flags=re.DOTALL)
-        lines.extend(unescape(code) for code in
-                     re.findall(r"<code>(.*?)</code>", inline_source,
-                                flags=re.DOTALL))
-        commands = []
-        for line in lines:
-            line = " ".join(line.split())
-            if (line.startswith("python main.py")
-                    and line not in ("python main.py --help",
-                                     "python main.py --version")):
-                commands.append(line)
-        return commands
+        return [command for command in documented_commands(source, include_inline=True)
+                if command not in ("python main.py --help", "python main.py --version")]
 
     def test_version_and_build_match_program(self) -> None:
         match = re.search(
@@ -1242,9 +1243,9 @@ class BeatsHelpTests(unittest.TestCase):
         lines = [
             line
             for block in re.findall(
-                r'<pre class="code-block"><code>(.*?)</code></pre>',
+                r'<pre\b[^>]*>(.*?)</pre>',
                 self.text, flags=re.DOTALL)
-            for line in unescape(block).splitlines()
+            for line in join_command_continuations(block).splitlines()
             if line.startswith('python -c "')
         ]
         self.assertEqual(len(lines), 1)
