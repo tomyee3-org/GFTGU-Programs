@@ -29,6 +29,15 @@ def find_merged_help(module_dir):
     raise FileNotFoundError(PROGRAM + ".html is required beside the program or in GFTGU-Documentation/" + PROGRAM)
 
 
+def documented_command_lines(block):
+    """Join Windows/POSIX continuations without merging separate commands."""
+    joined = re.sub(r"[\\^][ \t]*\r?\n[ \t]*", " ", block)
+    for line in joined.splitlines():
+        line = line.strip()
+        if re.match(r"python(?:3)? main\.py(?:\s|$)", line):
+            yield line.split(" #", 1)[0]
+
+
 class Page(HTMLParser):
     def __init__(self, source):
         super().__init__()
@@ -95,11 +104,7 @@ class MergedHelpTests(unittest.TestCase):
         checked = 0
         for attrs, block in self.page.pres:
             if attrs.get("data-program", PROGRAM) != PROGRAM: continue
-            joined = re.sub(r"\\\n\s*", " ", block)
-            for line in joined.splitlines():
-                line = line.strip()
-                if not re.match(r"python(?:3)? main\.py(?:\s|$)", line): continue
-                line = line.split(" #", 1)[0]
+            for line in documented_command_lines(block):
                 flags = set(re.findall(r"--[A-Za-z][A-Za-z0-9_-]*", line))
                 self.assertFalse(flags - options, line + ": " + str(sorted(flags-options)))
                 checked += 1
