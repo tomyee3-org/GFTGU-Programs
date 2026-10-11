@@ -799,11 +799,16 @@ def section_html(html: str, section_id: str) -> str:
     return match.group(1)
 
 
+def join_command_continuations(command: str) -> str:
+    """Accept Windows and POSIX shell continuations only at line endings."""
+    return re.sub(r"[\\^][ \t]*\r?\n[ \t]*", " ", command)
+
+
 def documented_commands(fragment: str) -> list:
     """Every ``python main.py ...`` command shown in a <pre> block."""
     commands = []
     for block in re.findall(r"<pre[^>]*>(.*?)</pre>", fragment, re.DOTALL):
-        text = html_module.unescape(re.sub(r"<[^>]+>", "", block)).replace("\\\n", " ")
+        text = join_command_continuations(html_module.unescape(re.sub(r"<[^>]+>", "", block)))
         for line in text.splitlines():
             line = " ".join(line.split())
             if line.startswith("python main.py"):
@@ -812,7 +817,7 @@ def documented_commands(fragment: str) -> list:
 
 
 def command_arguments(command: str) -> tuple:
-    return tuple(shlex.split(command)[2:])
+    return tuple(shlex.split(join_command_continuations(command))[2:])
 
 
 def is_seeded(arguments) -> bool:
