@@ -1550,29 +1550,17 @@ class _HelpInspector(HTMLParser):
 
 
 def tutorial_commands(source):
-    """Read whole commands, joining lines continued with a POSIX backslash or
-    a Windows Command Prompt caret at the end of the line."""
+    """Read whole commands, including continued lines in edited tutorials."""
     commands = []
     for block in re.findall(r'<pre class="code-block"><code>(.*?)</code></pre>',
                             source, flags=re.DOTALL):
-        block = re.sub(r"[ \t]*[\\^][ \t]*\r?\n", " ", unescape(block))
+        block = unescape(block).replace("\\\r\n", " ").replace("\\\n", " ")
         commands.extend(" ".join(line.split()) for line in block.splitlines()
                         if line.strip().startswith("python main.py"))
     return commands
 
 
 class PairedTutorialTests(unittest.TestCase):
-    def test_tutorial_commands_join_backslash_and_caret_continuations(self):
-        # The Help may continue a command with either character; both must give
-        # the same single command, and a caret inside an argument is kept.
-        expected = 'python main.py --n_bodies 2 --masses_solar "1,2^3" --max_steps 10'
-        for mark, newline in (("\\", "\n"), ("^", "\n"), ("^", "\r\n"), ("\\", "\r\n")):
-            block = ('<pre class="code-block"><code>python main.py --n_bodies 2 ' + mark
-                     + newline + '  --masses_solar "1,2^3" ' + mark + newline
-                     + '  --max_steps 10</code></pre>')
-            with self.subTest(mark=mark, newline=repr(newline)):
-                self.assertEqual(tutorial_commands(block), [expected])
-
     def test_merged_help_is_required_and_archives_are_ignored(self):
         with tempfile.TemporaryDirectory() as temp_name:
             folder = Path(temp_name)

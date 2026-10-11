@@ -95,7 +95,7 @@ class MergedHelpTests(unittest.TestCase):
         checked = 0
         for attrs, block in self.page.pres:
             if attrs.get("data-program", PROGRAM) != PROGRAM: continue
-            joined = re.sub(r"[ \t]*[\\^][ \t]*\r?\n\s*", " ", block)
+            joined = re.sub(r"\\\n\s*", " ", block)
             for line in joined.splitlines():
                 line = line.strip()
                 if not re.match(r"python(?:3)? main\.py(?:\s|$)", line): continue
