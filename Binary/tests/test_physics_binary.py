@@ -2353,7 +2353,7 @@ def documented_commands(html):
 def _commands_from_block(block):
     commands = []
     text = html_module.unescape(re.sub(r"<[^>]+>", "", block))
-    text = re.sub(r"\\\n\s*", " ", text)
+    text = re.sub(r"[\\^][ \t]*\r?\n[ \t]*", " ", text)
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line.startswith("python main.py"):
@@ -3053,7 +3053,7 @@ class BeatStructureTests(unittest.TestCase):
             with self.subTest(beat=number):
                 body = section_html(HELP_HTML, f"beat{number}")
                 block = html_module.unescape(re.search(r"<pre>(.*?)</pre>", body, re.DOTALL).group(1))
-                block = re.sub(r"\\\n\s*", " ", block)
+                block = re.sub(r"[\\^][ \t]*\r?\n[ \t]*", " ", block)
                 lines = [line for line in block.splitlines() if line.strip()]
                 self.assertTrue(lines)
                 for line in lines:
@@ -4378,7 +4378,7 @@ def experiment_lines(fragment):
     """Every ``python main.py`` line in the code blocks of a fragment, whitespace collapsed."""
     lines = []
     for block in re.findall(r"<pre[^>]*>(.*?)</pre>", fragment, re.DOTALL):
-        text = re.sub(r"\\\n\s*", " ", html_module.unescape(re.sub(r"<[^>]+>", "", block)))
+        text = re.sub(r"[\\^][ \t]*\r?\n[ \t]*", " ", html_module.unescape(re.sub(r"<[^>]+>", "", block)))
         lines += [" ".join(line.split()) for line in text.splitlines()
                   if line.strip().startswith("python main.py")]
     return lines
