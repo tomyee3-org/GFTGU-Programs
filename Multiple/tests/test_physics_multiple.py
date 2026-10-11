@@ -1552,9 +1552,10 @@ class _HelpInspector(HTMLParser):
 def tutorial_commands(source):
     """Read whole commands, including continued lines in edited tutorials."""
     commands = []
-    for block in re.findall(r'<pre class="code-block"><code>(.*?)</code></pre>',
+    for block in re.findall(r'<pre\b[^>]*>(.*?)</pre>',
                             source, flags=re.DOTALL):
-        block = unescape(block).replace("\\\r\n", " ").replace("\\\n", " ")
+        block = unescape(re.sub(r"<[^>]+>", "", block))
+        block = re.sub(r"[\\^][ \t]*\r?\n[ \t]*", " ", block)
         commands.extend(" ".join(line.split()) for line in block.splitlines()
                         if line.strip().startswith("python main.py"))
     return commands
