@@ -408,7 +408,7 @@ def animate_multiple(result: Dict[str, Any]):
     test_marker = None
     if has_test:
         test_marker, = ax.plot([], [], marker=".", linestyle="none",
-                               color=_TEST_COLOR, markersize=3,
+                               color=_TEST_COLOR, markersize=6,
                                label="Test particles")
 
     lines = []
